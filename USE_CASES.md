@@ -1920,6 +1920,64 @@ but no point picking or brush selection.
   screen orientation, pyqtgraph navigation links, metrics-table layout, window
   close/reopen behavior, and PNG output still require this manual napari run.
 
+### UC-016: Compare Multiple Flatmap Windows Side by Side
+
+**Capability**
+
+The user can keep several complete napari flatmap viewers open at once to
+compare different neuron selections, flatmap styles, render modes, clusters, or
+display settings side by side. **Project to Flatmap** continues to update the
+newest flatmap viewer, while **Project in New Window** preserves it and renders
+into another viewer. Older viewers remain independently navigable snapshots;
+the controls in the plugin's **Flatmap** tab target the newest viewer.
+
+**Prerequisites**
+
+- Load a neuron Parquet with valid flatmap coordinates. For **Precomputed
+  Parquet + Cache**, use a version-3 Parquet produced by UC-003.
+- Select enough neurons or clusters to make two visibly different projections.
+- Start from a clean napari session with the **Neuron Navigator** plugin open.
+
+**Steps and expected results**
+
+1. **Action:** In **Flatmap**, choose the first neuron selection and render
+   options, then click **Project to Flatmap**.
+   **Expected:** A populated viewer named **Neuron Navigator Flatmap** appears.
+   The main napari viewer is unchanged.
+2. **Action:** Change the selection, style, or render mode, then click **Project
+   in New Window**.
+   **Expected:** A second populated viewer named **Neuron Navigator Flatmap 2**
+   appears. The first viewer, all of its layers, and its camera remain unchanged,
+   so the two projections can be arranged side by side.
+3. **Action:** In the plugin tab, use **Add Soma**, cached region actions, or
+   **Heatmap Appearance** where those controls apply.
+   **Expected:** The action changes only the newest flatmap viewer. It does not
+   add, remove, or restyle layers in the older comparison viewer.
+4. **Action:** Move the plane slider and camera independently in both flatmap
+   viewers.
+   **Expected:** Each viewer keeps its own dimensions and camera. Its on-canvas
+   depth or Allen-layer caption follows that viewer's slider independently.
+5. **Action:** Close the older viewer, leaving the newest open, then click
+   **Project in New Window** again with another configuration.
+   **Expected:** Closing the older viewer does not close or modify the newest
+   viewer. The next successful projection opens another independently tracked
+   flatmap viewer without exposing a blank window.
+6. **Action:** Cause a validation error while using **Project in New Window**,
+   such as selecting an incompatible input or render option.
+   **Expected:** The failed target is never shown as an empty viewer. Every
+   already populated comparison viewer remains open and unchanged, and the
+   status reports the corrective error.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Notes: Added on 2026-09-08. Automated tests cover retaining two populated
+  viewers, active-viewer scoping, independent plane captions, retiring an older
+  closed viewer without changing the active viewer, and stale-render generation
+  guards. Side-by-side layout and native window behavior still require this
+  manual napari run.
+
 ## Use-Case Template
 
 Copy this section when adding a use case. Remove guidance in parentheses and

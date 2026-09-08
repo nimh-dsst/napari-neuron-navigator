@@ -642,9 +642,12 @@ class NeuronViewerWidget(QWidget):
                 int,
                 tuple[object, object, object],
             ] = {}
+            self._flatmap_viewers: list[object] = []
             self._flatmap_viewer = None
             self._flatmap_viewer_pending_show = False
             self._flatmap_viewer_generation = 0
+            self._flatmap_viewer_serial = 0
+            self._flatmap_hidden_viewer_ids: set[int] = set()
             self._flatmap_viewer_watch_timer = None
             self._flatmap_close_guards: dict[int, tuple[object, object]] = {}
 
@@ -763,7 +766,7 @@ class NeuronViewerWidget(QWidget):
         if timer is None:
             timer = QTimer(self)
             timer.setInterval(250)
-            timer.timeout.connect(self._retire_closed_flatmap_viewer)
+            timer.timeout.connect(self._retire_closed_flatmap_viewers)
             self._flatmap_viewer_watch_timer = timer
         timer.start()
 
@@ -816,10 +819,24 @@ class NeuronViewerWidget(QWidget):
         """Hide and reset a macOS viewer without destroying its Vispy canvas."""
         if not _IS_MACOS:
             return False
-        if getattr(self, "_flatmap_viewer", None) is not viewer:
+        managed = getattr(self, "_flatmap_viewers", None)
+        if managed is None:
+            managed = []
+            self._flatmap_viewers = managed
+        active_viewer = getattr(self, "_flatmap_viewer", None)
+        if active_viewer is not None and not any(
+            candidate is active_viewer for candidate in managed
+        ):
+            managed.append(active_viewer)
+        if not any(candidate is viewer for candidate in managed):
             return False
-        was_visible = not bool(
-            getattr(self, "_flatmap_viewer_pending_show", False)
+        hidden_ids = getattr(self, "_flatmap_hidden_viewer_ids", None)
+        if hidden_ids is None:
+            hidden_ids = set()
+            self._flatmap_hidden_viewer_ids = hidden_ids
+        was_visible = id(viewer) not in hidden_ids and not bool(
+            viewer is active_viewer
+            and getattr(self, "_flatmap_viewer_pending_show", False)
         )
         guards = getattr(self, "_flatmap_close_guards", None) or {}
         record = guards.get(id(viewer))
@@ -846,13 +863,15 @@ class NeuronViewerWidget(QWidget):
         except RuntimeError:
             return False
 
+        hidden_ids.add(id(viewer))
         if not was_visible:
             return True
 
-        self._flatmap_viewer_pending_show = True
-        self._flatmap_viewer_generation = (
-            int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
-        )
+        if viewer is active_viewer:
+            self._flatmap_viewer_pending_show = True
+            self._flatmap_viewer_generation = (
+                int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
+            )
 
         # The viewer and canvas stay alive on macOS. Disconnect plugin-owned
         # handlers and discard transient layers only after the native window
@@ -890,11 +909,11 @@ class NeuronViewerWidget(QWidget):
         """Consume a native close and hide the viewer without canvas teardown."""
         guards = getattr(self, "_flatmap_close_guards", None) or {}
         record = guards.get(id(viewer))
-        if (
-            getattr(self, "_flatmap_viewer", None) is not viewer
-            or record is None
-            or record[0] is not qt_window
-        ):
+        managed = getattr(self, "_flatmap_viewers", ())
+        viewer_is_managed = viewer is getattr(
+            self, "_flatmap_viewer", None
+        ) or any(candidate is viewer for candidate in managed)
+        if not viewer_is_managed or record is None or record[0] is not qt_window:
             return False
         ignore = getattr(event, "ignore", None)
         if callable(ignore):
@@ -908,15 +927,17 @@ class NeuronViewerWidget(QWidget):
 
     def _release_flatmap_viewer(self, viewer, *, close: bool) -> bool:
         """Forget one flatmap viewer and optionally close it safely."""
-        if getattr(self, "_flatmap_viewer", None) is not viewer:
+        managed = getattr(self, "_flatmap_viewers", None)
+        if managed is None:
+            managed = []
+            self._flatmap_viewers = managed
+        active_viewer = getattr(self, "_flatmap_viewer", None)
+        if active_viewer is not None and not any(
+            candidate is active_viewer for candidate in managed
+        ):
+            managed.append(active_viewer)
+        if not any(candidate is viewer for candidate in managed):
             return False
-
-        self._flatmap_viewer = None
-        self._flatmap_viewer_pending_show = False
-        self._flatmap_viewer_generation = (
-            int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
-        )
-        self._stop_flatmap_viewer_watch()
 
         flatmap_tab = getattr(self, "_flatmap_tab", None)
         release = getattr(flatmap_tab, "_release_display_viewer", None)
@@ -924,36 +945,123 @@ class NeuronViewerWidget(QWidget):
             release(viewer)
 
         self._remove_flatmap_macos_close_guard(viewer)
+        managed[:] = [candidate for candidate in managed if candidate is not viewer]
+        hidden_ids = getattr(self, "_flatmap_hidden_viewer_ids", None)
+        if hidden_ids is not None:
+            hidden_ids.discard(id(viewer))
+
+        if active_viewer is viewer:
+            visible = [
+                candidate
+                for candidate in managed
+                if hidden_ids is None or id(candidate) not in hidden_ids
+            ]
+            self._flatmap_viewer = visible[-1] if visible else None
+            self._flatmap_viewer_pending_show = False
+            self._flatmap_viewer_generation = (
+                int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
+            )
+
         if close:
             self._close_flatmap_viewer_now(viewer)
+        if not managed:
+            self._stop_flatmap_viewer_watch()
         return True
 
-    def _retire_closed_flatmap_viewer(self) -> bool:
-        """Drop references after a user closes the flatmap window."""
-        viewer = getattr(self, "_flatmap_viewer", None)
-        if viewer is None or self._flatmap_viewer_is_open(viewer):
-            return False
-        return self._release_flatmap_viewer(viewer, close=False)
+    def _retire_closed_flatmap_viewers(self) -> bool:
+        """Drop references after users close any flatmap window."""
+        managed = getattr(self, "_flatmap_viewers", None)
+        if managed is None:
+            managed = []
+            self._flatmap_viewers = managed
+        active_viewer = getattr(self, "_flatmap_viewer", None)
+        if active_viewer is not None and not any(
+            candidate is active_viewer for candidate in managed
+        ):
+            managed.append(active_viewer)
 
-    def _get_or_create_flatmap_viewer(self, *, create: bool = True):
-        """Return the dedicated napari viewer used for flatmap display."""
-        self._retire_closed_flatmap_viewer()
+        retired = False
+        for viewer in list(managed):
+            if self._flatmap_viewer_is_open(viewer):
+                continue
+            retired = self._release_flatmap_viewer(viewer, close=False) or retired
+        return retired
+
+    def _retire_closed_flatmap_viewer(self) -> bool:
+        """Compatibility wrapper for the former single-viewer lifecycle."""
+        return self._retire_closed_flatmap_viewers()
+
+    def _get_or_create_flatmap_viewer(
+        self,
+        *,
+        create: bool = True,
+        new_window: bool = False,
+    ):
+        """Return the active flatmap viewer, optionally creating a new one."""
+        self._retire_closed_flatmap_viewers()
         viewer = getattr(self, "_flatmap_viewer", None)
-        if viewer is not None or not create:
+        if viewer is not None and not new_window:
             return viewer
+        if not create:
+            return viewer
+
+        # A failed/closed first render can leave a hidden macOS viewer ready for
+        # reuse. Do not strand another empty top-level when the user retries.
+        if viewer is not None and getattr(self, "_flatmap_viewer_pending_show", False):
+            return viewer
+
+        managed = getattr(self, "_flatmap_viewers", None)
+        if managed is None:
+            managed = []
+            self._flatmap_viewers = managed
+        hidden_ids = getattr(self, "_flatmap_hidden_viewer_ids", None)
+        if new_window and hidden_ids:
+            reusable = next(
+                (
+                    candidate
+                    for candidate in reversed(managed)
+                    if candidate is not viewer and id(candidate) in hidden_ids
+                ),
+                None,
+            )
+            if reusable is not None:
+                self._flatmap_viewer = reusable
+                self._flatmap_viewer_pending_show = True
+                hidden_ids.discard(id(reusable))
+                self._flatmap_viewer_generation = (
+                    int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
+                )
+                return reusable
 
         import napari
 
+        serial = int(getattr(self, "_flatmap_viewer_serial", 0)) + 1
+        self._flatmap_viewer_serial = serial
+        title = "Neuron Navigator Flatmap"
+        if serial > 1:
+            title = f"{title} {serial}"
         viewer = napari.Viewer(
-            title="Neuron Navigator Flatmap",
+            title=title,
             ndisplay=3,
             show=False,
         )
+        previous = getattr(self, "_flatmap_viewer", None)
+        managed.append(viewer)
         self._flatmap_viewer = viewer
         self._flatmap_viewer_pending_show = True
+        if hidden_ids is not None:
+            hidden_ids.discard(id(viewer))
+        if previous is not None:
+            self._flatmap_viewer_generation = (
+                int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
+            )
         self._install_flatmap_macos_close_guard(viewer)
         self._start_flatmap_viewer_watch()
         return viewer
+
+    def _create_new_flatmap_viewer(self):
+        """Create and activate another flatmap viewer for side-by-side use."""
+        return self._get_or_create_flatmap_viewer(create=True, new_window=True)
 
     def _on_flatmap_display_viewer_ready(self, viewer, layer) -> None:
         """Show the flatmap window after its first layer is fully configured."""
@@ -980,6 +1088,9 @@ class NeuronViewerWidget(QWidget):
                 self._release_flatmap_viewer(viewer, close=True)
             return
         self._flatmap_viewer_pending_show = False
+        hidden_ids = getattr(self, "_flatmap_hidden_viewer_ids", None)
+        if hidden_ids is not None:
+            hidden_ids.discard(id(viewer))
 
     def _on_flatmap_display_viewer_failed(self, viewer, reason: str) -> None:
         """Close a hidden viewer after an unsuccessful first render."""
@@ -1004,14 +1115,18 @@ class NeuronViewerWidget(QWidget):
         return self._release_flatmap_viewer(viewer, close=True)
 
     def _on_neuron_viewer_destroyed(self, *_args) -> None:
-        """Release the plugin-owned flatmap viewer during widget teardown."""
+        """Release all plugin-owned flatmap viewers during widget teardown."""
         try:
-            viewer = getattr(self, "_flatmap_viewer", None)
-            if viewer is not None and _IS_MACOS:
-                self._hide_flatmap_macos_viewer(viewer)
-                released = self._release_flatmap_viewer(viewer, close=False)
-            else:
-                released = self._close_flatmap_viewer()
+            self._retire_closed_flatmap_viewers()
+            viewers = list(getattr(self, "_flatmap_viewers", ()))
+            released = False
+            for viewer in viewers:
+                if _IS_MACOS:
+                    self._hide_flatmap_macos_viewer(viewer)
+                    current = self._release_flatmap_viewer(viewer, close=False)
+                else:
+                    current = self._release_flatmap_viewer(viewer, close=True)
+                released = current or released
             if not released:
                 self._flatmap_viewer_generation = (
                     int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
@@ -1070,6 +1185,7 @@ class NeuronViewerWidget(QWidget):
                 selected_region_error_provider=self._active_flatmap_region_error,
                 region_appearance_provider=self._region_appearance_store,
                 display_viewer_provider=self._get_or_create_flatmap_viewer,
+                new_display_viewer_callback=self._create_new_flatmap_viewer,
                 display_viewer_ready_callback=(self._on_flatmap_display_viewer_ready),
                 display_viewer_failed_callback=(self._on_flatmap_display_viewer_failed),
                 display_generation_provider=(self._flatmap_viewer_generation_value),

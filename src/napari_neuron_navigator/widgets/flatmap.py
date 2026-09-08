@@ -235,6 +235,7 @@ class FlatmapProjectionWidget(QWidget):
         selected_region_error_provider: Callable[[], str | None] | None = None,
         region_appearance_provider: Callable[[], RegionAppearanceStore] | None = None,
         display_viewer_provider: Callable[..., object | None] | None = None,
+        new_display_viewer_callback: Callable[[], object | None] | None = None,
         display_viewer_ready_callback: Callable[[object, object], None] | None = None,
         display_viewer_failed_callback: Callable[[object, str], None] | None = None,
         display_generation_provider: Callable[[], int] | None = None,
@@ -243,11 +244,13 @@ class FlatmapProjectionWidget(QWidget):
         super().__init__(parent)
         self._viewer = viewer
         self._display_viewer_provider = display_viewer_provider
+        self._new_display_viewer_callback = new_display_viewer_callback
         self._display_viewer_ready_callback = display_viewer_ready_callback
         self._display_viewer_failed_callback = display_viewer_failed_callback
         self._display_generation_provider = display_generation_provider or (lambda: 0)
         self._last_display_viewer = None
         self._display_axis_annotation_state: dict | None = None
+        self._display_axis_annotation_states: dict[int, dict] = {}
         self._flatmap_display_layer_event_viewer = None
         self._flatmap_display_layer_event_connections: list[tuple[object, object]] = []
         self._flatmap_heatmap_name_event_connections: dict[
@@ -364,19 +367,43 @@ class FlatmapProjectionWidget(QWidget):
 
     def _release_display_viewer(self, viewer) -> bool:
         """Forget layer handles when a flatmap display viewer closes."""
+        self._clear_display_axis_annotations(viewer)
+        self._disconnect_flatmap_display_layer_events(viewer)
         if getattr(self, "_last_display_viewer", None) is not viewer:
             return False
 
-        self._clear_display_axis_annotations(viewer)
-        self._disconnect_flatmap_display_layer_events(viewer)
         self._last_display_viewer = None
+        self._clear_display_layer_handles()
+        self._refresh_flatmap_heatmap_layer_list()
+        return True
+
+    def _clear_display_layer_handles(self) -> None:
+        """Forget layers controlled in the active flatmap viewer."""
         self._projection_layer = None
         self._soma_layer = None
         self._region_labels_layer = None
         self._region_surfaces_layers = []
         self._region_outlines_layers = []
+
+    def _begin_new_display_viewer(self):
+        """Activate an empty display viewer while preserving the current one."""
+        callback = getattr(self, "_new_display_viewer_callback", None)
+        if not callable(callback):
+            return self._display_viewer()
+
+        previous = self._current_display_viewer()
+        viewer = callback()
+        if viewer is None:
+            raise RuntimeError("Could not create another flatmap window.")
+        if viewer is previous:
+            return viewer
+
+        self._disconnect_flatmap_display_layer_events(previous)
+        self._last_display_viewer = viewer
+        self._clear_display_layer_handles()
+        self._connect_flatmap_display_layer_events(viewer)
         self._refresh_flatmap_heatmap_layer_list()
-        return True
+        return viewer
 
     def _notify_display_viewer_ready(self, layer) -> None:
         """Report that one display layer is configured and ready to show."""
@@ -988,6 +1015,13 @@ class FlatmapProjectionWidget(QWidget):
         self._project_btn = QPushButton("Project to Flatmap")
         self._project_btn.clicked.connect(self._project)
         actions_row.addWidget(self._project_btn)
+        self._new_window_btn = QPushButton("Project in New Window")
+        self._new_window_btn.setToolTip(
+            "Keep the current flatmap window open and render this projection "
+            "in another window for side-by-side comparison."
+        )
+        self._new_window_btn.clicked.connect(self._project_in_new_window)
+        actions_row.addWidget(self._new_window_btn)
         self._add_soma_btn = QPushButton("Add Soma")
         self._add_soma_btn.setToolTip(
             "Project only soma nodes into flatmap + depth space as a "
@@ -2957,8 +2991,20 @@ class FlatmapProjectionWidget(QWidget):
             self._hide_projection_progress()
             self._set_projection_controls_enabled(True)
 
-    def _project(self) -> None:
+    def _project_in_new_window(self, _checked: bool = False) -> None:
+        """Render the current projection in another flatmap window."""
+        self._project(new_window=True)
+
+    def _project(self, _checked: bool = False, *, new_window: bool = False) -> None:
         """Run projection from the current UI state and render the layer."""
+        if new_window:
+            try:
+                self._begin_new_display_viewer()
+            except Exception as exc:
+                logger.exception("Could not create another flatmap window")
+                self._status_label.setText(f"Flatmap projection failed: {exc}")
+                show_warning(f"Flatmap projection failed: {exc}")
+                return
         projection_source = self._current_projection_source()
         if projection_source == _PROJECTION_SOURCE_PRECOMPUTED and (
             self._current_render_mode()
@@ -3765,7 +3811,7 @@ class FlatmapProjectionWidget(QWidget):
 
     def _set_projection_controls_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled and self._allen_layer_selection_ready())
-        for name in ("_project_btn", "_add_soma_btn"):
+        for name in ("_project_btn", "_new_window_btn", "_add_soma_btn"):
             button = getattr(self, name, None)
             set_enabled = getattr(button, "setEnabled", None)
             if callable(set_enabled):
@@ -7110,11 +7156,17 @@ class FlatmapProjectionWidget(QWidget):
 
     def _capture_display_axis_annotation_state(self, viewer) -> dict | None:
         """Remember a viewer's pre-existing overlay state so it can be restored."""
-        state = getattr(self, "_display_axis_annotation_state", None)
+        states = getattr(self, "_display_axis_annotation_states", None)
+        if states is None:
+            states = {}
+            existing = getattr(self, "_display_axis_annotation_state", None)
+            if existing is not None and existing.get("viewer") is not None:
+                states[id(existing["viewer"])] = existing
+            self._display_axis_annotation_states = states
+        state = states.get(id(viewer))
         if state is not None and state.get("viewer") is viewer:
+            self._display_axis_annotation_state = state
             return state
-        if state is not None:
-            self._clear_display_axis_annotations(state.get("viewer"))
 
         axes = getattr(
             getattr(getattr(viewer, "scene", None), "overlays", None),
@@ -7137,11 +7189,17 @@ class FlatmapProjectionWidget(QWidget):
             "previous_text_visible": getattr(text_overlay, "visible", None),
             "previous_text": getattr(text_overlay, "text", None),
         }
+        states[id(viewer)] = state
         self._display_axis_annotation_state = state
         return state
 
     def _connect_display_dims_events(self, viewer) -> None:
-        state = getattr(self, "_display_axis_annotation_state", None)
+        states = getattr(self, "_display_axis_annotation_states", {})
+        state = states.get(id(viewer))
+        if state is None:
+            state = getattr(self, "_display_axis_annotation_state", None)
+            if state is not None and state.get("viewer") is not viewer:
+                state = None
         if state is None or state.get("connected"):
             return
         emitter = getattr(
@@ -7152,8 +7210,11 @@ class FlatmapProjectionWidget(QWidget):
         connect = getattr(emitter, "connect", None)
         if not callable(connect):
             return
+        callback = lambda event=None, target=viewer: (
+            self._on_display_dims_step_changed(event, viewer=target)
+        )
         try:
-            connect(self._on_display_dims_step_changed)
+            connect(callback)
         except Exception:
             logger.debug(
                 "Failed to follow the flatmap display slider.",
@@ -7161,10 +7222,16 @@ class FlatmapProjectionWidget(QWidget):
             )
             return
         state["connected"] = True
+        state["callback"] = callback
 
-    def _on_display_dims_step_changed(self, event=None) -> None:
+    def _on_display_dims_step_changed(self, event=None, *, viewer=None) -> None:
         """Write the on-canvas name of the plane currently under the slider."""
-        state = getattr(self, "_display_axis_annotation_state", None)
+        if viewer is None:
+            state = getattr(self, "_display_axis_annotation_state", None)
+        else:
+            state = getattr(self, "_display_axis_annotation_states", {}).get(
+                id(viewer)
+            )
         if state is None:
             return
         viewer = state.get("viewer")
@@ -7216,12 +7283,28 @@ class FlatmapProjectionWidget(QWidget):
 
     def _clear_display_axis_annotations(self, viewer=None) -> None:
         """Disconnect the slider follower and restore the viewer's own overlays."""
-        state = getattr(self, "_display_axis_annotation_state", None)
+        states = getattr(self, "_display_axis_annotation_states", None)
+        if viewer is None:
+            viewer = self._current_display_viewer()
+        state = (
+            states.get(id(viewer))
+            if states is not None and viewer is not None
+            else None
+        )
+        if state is None:
+            state = getattr(self, "_display_axis_annotation_state", None)
+            if (
+                viewer is not None
+                and state is not None
+                and state.get("viewer") is not viewer
+            ):
+                state = None
         if state is None:
             return
-        if viewer is not None and state.get("viewer") is not viewer:
-            return
-        self._display_axis_annotation_state = None
+        if states is not None:
+            states.pop(id(state.get("viewer")), None)
+        if getattr(self, "_display_axis_annotation_state", None) is state:
+            self._display_axis_annotation_state = None
 
         target = state.get("viewer")
         if target is None:
@@ -7232,7 +7315,9 @@ class FlatmapProjectionWidget(QWidget):
             disconnect = getattr(emitter, "disconnect", None)
             if callable(disconnect):
                 try:
-                    disconnect(self._on_display_dims_step_changed)
+                    disconnect(
+                        state.get("callback", self._on_display_dims_step_changed)
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to stop following the flatmap display slider.",

@@ -2619,6 +2619,76 @@ def test_release_display_viewer_clears_only_matching_viewer_layer_handles(
     assert widget._active_cache_profile is cache_profile
 
 
+def test_begin_new_display_viewer_preserves_old_layers_and_resets_active_handles(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    first_layer = first.add_image(
+        np.ones((2, 2)),
+        name="first comparison",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    state = {"viewer": first}
+
+    def activate_second():
+        state["viewer"] = second
+        return second
+
+    widget._display_viewer_provider = lambda create=True: state["viewer"]
+    widget._new_display_viewer_callback = activate_second
+    widget._last_display_viewer = first
+    widget._projection_layer = first_layer
+    widget._soma_layer = object()
+    widget._region_labels_layer = object()
+    widget._region_surfaces_layers = [object()]
+    widget._region_outlines_layers = [object()]
+
+    assert widget._begin_new_display_viewer() is second
+
+    assert first.layers == [first_layer]
+    assert second.layers == []
+    assert widget._last_display_viewer is second
+    assert widget._projection_layer is None
+    assert widget._soma_layer is None
+    assert widget._region_labels_layer is None
+    assert widget._region_surfaces_layers == []
+    assert widget._region_outlines_layers == []
+
+
+def test_project_in_new_window_activates_new_viewer_before_fast_worker(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    state = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: state["viewer"]
+
+    def activate_second():
+        state["viewer"] = second
+        return second
+
+    widget._new_display_viewer_callback = activate_second
+    widget._last_display_viewer = first
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    started_in = []
+    widget._start_precomputed_heatmap_worker = lambda: started_in.append(
+        widget._current_display_viewer()
+    )
+
+    widget._project(new_window=True)
+
+    assert started_in == [second]
+    assert widget._last_display_viewer is second
+
+
 def test_flatmap_heatmap_selector_lists_only_gamma_adjustable_heatmaps(
     monkeypatch,
 ) -> None:
@@ -3912,6 +3982,37 @@ def test_release_display_viewer_stops_following_the_slider(monkeypatch) -> None:
     assert viewer.dims.events.current_step.callbacks == []
     assert widget._display_axis_annotation_state is None
     assert viewer.text_overlay.visible is False
+
+
+def test_plane_captions_keep_following_each_side_by_side_viewer(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    active = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+
+    first_layer = first.add_image(
+        np.zeros((2, 3, 3)),
+        name="first",
+        axis_labels=("Depth bin", "Flatmap Y", "Flatmap X"),
+    )
+    widget._apply_display_axis_annotations(first_layer)
+
+    active["viewer"] = second
+    second_layer = second.add_image(
+        np.zeros((3, 3, 3)),
+        name="second",
+        axis_labels=("Depth bin", "Flatmap Y", "Flatmap X"),
+    )
+    widget._apply_display_axis_annotations(second_layer)
+
+    first.dims.set_current_step(1)
+    second.dims.set_current_step(2)
+
+    assert first.text_overlay.text == "Depth bin: plane 2 of 2"
+    assert second.text_overlay.text == "Depth bin: plane 3 of 3"
+    assert len(widget._display_axis_annotation_states) == 2
 
 
 def test_allen_layer_mode_enables_cached_labels_but_disables_depth_and_geometry(
