@@ -1995,6 +1995,55 @@ def test_flatmap_heatmap_worker_emits_allen_layer_stack(tmp_path):
     assert float(result.volume.sum()) == 1500.0
 
 
+def test_flatmap_heatmap_worker_emits_selected_allen_layer_projection(tmp_path):
+    workers = _import_workers_module()
+    path = tmp_path / "flatmap_v3.parquet"
+    _write_flatmap_v3_parquet(path)
+    frame = pd.read_parquet(path)
+    region_ids = (101, 102, 103, 104, 105, 106)
+    frame["region_id"] = np.resize(region_ids, len(frame))
+    frame.to_parquet(path, index=False)
+    layer_map = AllenIsocortexLayerMap(
+        atlas_name="allen_mouse_25um",
+        isocortex_region_id=315,
+        region_to_layer_index={
+            region_id: index for index, region_id in enumerate(region_ids)
+        },
+        region_ids_by_layer=tuple((region_id,) for region_id in region_ids),
+    )
+    worker = workers.FlatmapHeatmapWorker(
+        str(path),
+        style_key="both_shaped",
+        color_mode="single",
+        x_bounds=(0.0, 100.0),
+        y_bounds=(0.0, 80.0),
+        depth_range_um=None,
+        y_bins=16,
+        depth_bin_um=50.0,
+        include_depth_minus_one=False,
+        plane_mode="allen_layer_projection",
+        allen_layer_map=layer_map,
+        allen_layer_indices=(1, 4),
+        allen_layer_output_mode="projection",
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert len(finished) == 1
+    result = finished[0]
+    assert result.volume.shape == (16, 20)
+    assert result.summary.selected_layer_indices == (1, 4)
+    assert result.summary.layer_labels == ("L2/3", "L6a")
+    assert result.summary.output_mode == "projection"
+    assert result.summary.rendered_nodes == 500
+    assert float(result.volume.sum()) == 500.0
+
+
 def _write_terminus_parquet(path: Path) -> None:
     """One axon-labelled cell with two tips, plus an undefined-only cell."""
     pd.DataFrame(

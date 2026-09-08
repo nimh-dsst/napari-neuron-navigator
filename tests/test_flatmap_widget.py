@@ -214,6 +214,54 @@ class _DummyCombo:
         self.enabled = bool(enabled)
 
 
+class _DummyDataCombo:
+    def __init__(self, data) -> None:
+        self.data = data
+        self.enabled = True
+
+    def currentData(self):
+        return self.data
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+
+
+class _DummyWindowCombo:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, object]] = []
+        self.index = -1
+        self.enabled = True
+        self.signals_blocked = False
+
+    def blockSignals(self, blocked: bool) -> bool:
+        previous = self.signals_blocked
+        self.signals_blocked = bool(blocked)
+        return previous
+
+    def clear(self) -> None:
+        self.items.clear()
+        self.index = -1
+
+    def addItem(self, label: str, data) -> None:
+        self.items.append((str(label), data))
+        self.index = max(self.index, 0)
+
+    def findData(self, data) -> int:
+        return next(
+            (index for index, item in enumerate(self.items) if item[1] == data),
+            -1,
+        )
+
+    def setCurrentIndex(self, index: int) -> None:
+        self.index = int(index)
+
+    def currentData(self):
+        return self.items[self.index][1] if self.index >= 0 else None
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+
+
 class _DummyLayer:
     def __init__(self, data, **kwargs) -> None:
         # Kept verbatim so a test can assert what was and was not passed at
@@ -1921,12 +1969,76 @@ def test_render_mode_change_removes_a_stale_soma_layer(monkeypatch) -> None:
     widget._render_mode_combo = types.SimpleNamespace(
         currentData=lambda: module._RENDER_FLAT_HEATMAP
     )
+    queued = []
+    widget._queue_gui_callback = queued.append
 
     widget._on_render_mode_changed()
 
-    # Depth-bin soma coordinates are meaningless in the new 2D space.
-    assert layer not in widget._viewer.layers
+    # Choosing settings for a possible new comparison window must leave the
+    # displayed depth-bin scene alone.
+    assert layer in widget._viewer.layers
+    assert layer.visible is True
+    assert widget._soma_layer is layer
+    assert widget._flatmap_render_mode_change_pending is True
+    assert queued == []
+
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    started = []
+    widget._start_precomputed_heatmap_worker = lambda: started.append(True)
+    widget._project()
+
+    # Re-projecting into this same viewer retires the stale grid safely.
+    assert layer.visible is False
     assert widget._soma_layer is None
+    assert len(queued) == 1
+    assert started == [True]
+
+    queued[0]()
+
+    assert layer not in widget._viewer.layers
+
+
+def test_render_mode_change_defers_gpu_layer_removal(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    layer = widget._viewer.add_image(
+        np.ones((2, 2)),
+        name=module._FLAT_HEATMAP_LAYER_NAME,
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    widget._projection_layer = layer
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    widget._update_render_mode_controls = lambda: None
+    widget._update_cached_region_controls = lambda: None
+    widget._notify_flatmap_correlation_source_changed = lambda: None
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    queued = []
+    widget._queue_gui_callback = queued.append
+
+    widget._on_render_mode_changed()
+
+    assert layer in widget._viewer.layers
+    assert layer.visible is True
+    assert widget._projection_layer is layer
+    assert widget._flatmap_render_mode_change_pending is True
+    assert queued == []
+
+    started = []
+    widget._start_precomputed_heatmap_worker = lambda: started.append(True)
+    widget._project()
+
+    assert layer.visible is False
+    assert widget._projection_layer is None
+    assert len(queued) == 1
+    assert started == [True]
+
+    queued[0]()
+
+    assert layer not in widget._viewer.layers
 
 
 def test_add_soma_without_soma_nodes_reports_and_adds_no_layer(
@@ -2607,6 +2719,120 @@ def test_release_display_viewer_clears_only_matching_viewer_layer_handles(
     assert widget._active_cache_profile is cache_profile
 
 
+def test_begin_new_display_viewer_preserves_old_layers_and_resets_active_handles(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    first_layer = first.add_image(
+        np.ones((2, 2)),
+        name="first comparison",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    state = {"viewer": first}
+
+    def activate_second():
+        state["viewer"] = second
+        return second
+
+    widget._display_viewer_provider = lambda create=True: state["viewer"]
+    widget._new_display_viewer_callback = activate_second
+    widget._last_display_viewer = first
+    widget._projection_layer = first_layer
+    widget._soma_layer = object()
+    widget._region_labels_layer = object()
+    widget._region_surfaces_layers = [object()]
+    widget._region_outlines_layers = [object()]
+
+    assert widget._begin_new_display_viewer() is second
+
+    assert first.layers == [first_layer]
+    assert second.layers == []
+    assert widget._last_display_viewer is second
+    assert widget._projection_layer is None
+    assert widget._soma_layer is None
+    assert widget._region_labels_layer is None
+    assert widget._region_surfaces_layers == []
+    assert widget._region_outlines_layers == []
+
+
+def test_project_in_new_window_activates_new_viewer_before_fast_worker(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    state = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: state["viewer"]
+
+    def activate_second():
+        state["viewer"] = second
+        return second
+
+    widget._new_display_viewer_callback = activate_second
+    widget._last_display_viewer = first
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    started_in = []
+    widget._start_precomputed_heatmap_worker = lambda: started_in.append(
+        widget._current_display_viewer()
+    )
+
+    widget._project(new_window=True)
+
+    assert started_in == [second]
+    assert widget._last_display_viewer is second
+
+
+def test_project_in_new_window_preserves_scene_after_render_mode_change(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    old_layer = first.add_image(
+        np.ones((2, 2)),
+        name=module._FLAT_HEATMAP_LAYER_NAME,
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    second = _DummyViewer()
+    active = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+
+    def activate_second():
+        active["viewer"] = second
+        return second
+
+    widget._new_display_viewer_callback = activate_second
+    widget._last_display_viewer = first
+    widget._projection_layer = old_layer
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._flatmap_render_mode_change_pending = True
+    widget._queue_gui_callback = lambda _callback: pytest.fail(
+        "a new comparison window must not retire the old scene"
+    )
+    started_in = []
+    widget._start_precomputed_heatmap_worker = lambda: started_in.append(
+        widget._current_display_viewer()
+    )
+
+    widget._project(new_window=True)
+
+    assert first.layers == [old_layer]
+    assert old_layer.visible is True
+    assert second.layers == []
+    assert started_in == [second]
+    assert widget._flatmap_render_mode_change_pending is False
+
+
 def test_flatmap_heatmap_selector_lists_only_gamma_adjustable_heatmaps(
     monkeypatch,
 ) -> None:
@@ -2729,6 +2955,134 @@ def test_flatmap_heatmap_gamma_controls_disable_without_selection(monkeypatch) -
     )
 
 
+def test_flatmap_heatmap_window_selector_scopes_layers_and_gamma(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    first.title = "Neuron Navigator Flatmap"
+    first_heatmap = first.add_image(
+        np.ones((2, 2)),
+        name="First window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    second = _DummyViewer()
+    second.title = "Neuron Navigator Flatmap 2"
+    second_heatmap = second.add_image(
+        np.ones((2, 2)),
+        name="Second window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    active = {"viewer": second}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+    widget._display_viewers_provider = lambda: (first, second)
+    widget._last_display_viewer = second
+    widget._flatmap_heatmap_window_combo = _DummyWindowCombo()
+    widget._flatmap_heatmap_layer_list = _DummyListWidget()
+    widget._flatmap_heatmap_gamma_status_label = _DummyLabel()
+    widget._flatmap_enhance_fine_projections_btn = _DummyButton()
+    widget._flatmap_reset_gamma_btn = _DummyButton()
+
+    widget._refresh_flatmap_heatmap_layer_list()
+
+    assert [label for label, _data in widget._flatmap_heatmap_window_combo.items] == [
+        "Neuron Navigator Flatmap",
+        "Neuron Navigator Flatmap 2",
+    ]
+    assert widget._flatmap_heatmap_window_combo.index == 1
+    assert [item.text() for item in widget._flatmap_heatmap_layer_list.items] == [
+        "Second window heatmap"
+    ]
+
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(0)
+    widget._on_flatmap_heatmap_window_changed(0)
+    widget._flatmap_heatmap_layer_list.item(0).setSelected(True)
+    widget._enhance_selected_flatmap_heatmap_projections()
+
+    assert first_heatmap.gamma == pytest.approx(0.2)
+    assert second_heatmap.gamma == pytest.approx(1.0)
+
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(1)
+    widget._on_flatmap_heatmap_window_changed(1)
+    assert [item.text() for item in widget._flatmap_heatmap_layer_list.items] == [
+        "Second window heatmap"
+    ]
+    assert widget._flatmap_heatmap_layer_list.selectedItems() == []
+
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(0)
+    widget._on_flatmap_heatmap_window_changed(0)
+    assert [
+        item.text() for item in widget._flatmap_heatmap_layer_list.selectedItems()
+    ] == ["First window heatmap"]
+
+
+def test_flatmap_heatmap_window_selector_drops_closed_window(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    first.title = "Neuron Navigator Flatmap"
+    first.add_image(
+        np.ones((2, 2)),
+        name="First window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    second = _DummyViewer()
+    second.title = "Neuron Navigator Flatmap 2"
+    second.add_image(
+        np.ones((2, 2)),
+        name="Second window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    viewers = [first, second]
+    widget._display_viewer_provider = lambda create=True: second
+    widget._display_viewers_provider = lambda: tuple(viewers)
+    widget._flatmap_heatmap_window_combo = _DummyWindowCombo()
+    widget._flatmap_heatmap_layer_list = _DummyListWidget()
+    widget._flatmap_heatmap_gamma_status_label = _DummyLabel()
+    widget._flatmap_enhance_fine_projections_btn = _DummyButton()
+    widget._flatmap_reset_gamma_btn = _DummyButton()
+
+    widget._refresh_flatmap_heatmap_layer_list()
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(0)
+    widget._on_flatmap_heatmap_window_changed(0)
+    viewers.remove(first)
+    widget._refresh_flatmap_heatmap_layer_list()
+
+    assert [label for label, _data in widget._flatmap_heatmap_window_combo.items] == [
+        "Neuron Navigator Flatmap 2"
+    ]
+    assert [item.text() for item in widget._flatmap_heatmap_layer_list.items] == [
+        "Second window heatmap"
+    ]
+
+    viewers.clear()
+    widget._refresh_flatmap_heatmap_layer_list()
+
+    assert widget._flatmap_heatmap_window_combo.items == []
+    assert widget._flatmap_heatmap_window_combo.enabled is False
+    assert widget._flatmap_heatmap_layer_list.items == []
+
+
+def test_flatmap_layer_events_defer_and_coalesce_selector_refresh(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._flatmap_heatmap_refresh_pending = False
+    queued = []
+    refreshed = []
+    widget._queue_gui_callback = queued.append
+    widget._refresh_flatmap_heatmap_layer_list = lambda: refreshed.append(True)
+
+    widget._on_flatmap_display_layers_changed()
+    widget._on_flatmap_display_layers_changed()
+
+    assert len(queued) == 1
+    assert refreshed == []
+
+    queued[0]()
+
+    assert refreshed == [True]
+    assert widget._flatmap_heatmap_refresh_pending is False
+
+
 def _simple_projection_summary(module, total_nodes: int = 1):
     return module.ProjectionSummary(total_nodes, total_nodes, 0, 0, 0, 0, 0, 1, 0)
 
@@ -2838,6 +3192,264 @@ def test_allen_layer_stack_uses_one_2d_categorical_image(monkeypatch) -> None:
         "version": "1.2.3",
     }
     assert layer.metadata["flatmap_projection_source"] == "legacy_auto"
+
+
+def test_allen_layer_selection_helpers_preserve_canonical_order(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._allen_layer_checkboxes = [
+        _DummyValueControl(checked=value)
+        for value in (False, True, False, False, True, False)
+    ]
+    widget._allen_layer_output_combo = _DummyDataCombo(
+        module.ALLEN_LAYER_OUTPUT_PROJECTION
+    )
+
+    assert widget._current_allen_layer_indices() == (1, 4)
+    assert widget._is_allen_layer_projection() is True
+    assert widget._current_plane_mode() == "allen_layer_projection"
+    assert widget._axis_labels_for_render_mode(module._RENDER_ALLEN_LAYERS) == (
+        "Flatmap Y",
+        "Flatmap X",
+    )
+
+
+def test_allen_layer_options_default_to_all_layers_and_stack(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+
+    assert widget._current_allen_layer_indices() == (0, 1, 2, 3, 4, 5)
+    assert widget._current_allen_layer_output_mode() == "stack"
+
+
+def test_allen_layer_options_are_visible_only_in_allen_mode(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    options_group = _DummyProgressBar()
+    widget._allen_layer_options_group = options_group
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+
+    widget._update_render_mode_controls()
+    assert options_group.visible is True
+
+    widget._render_mode_combo.data = module._RENDER_HEATMAP
+    widget._update_render_mode_controls()
+    assert options_group.visible is False
+
+
+def test_allen_layer_option_change_invalidates_existing_render(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._allen_layer_checkboxes = [
+        _DummyValueControl(checked=index == 3) for index in range(6)
+    ]
+    invalidated = []
+    widget._invalidate_flatmap_grid_layers = lambda: invalidated.append(True)
+    widget._update_render_mode_controls = lambda: None
+    widget._update_cached_region_controls = lambda: None
+
+    widget._on_allen_layer_options_changed()
+
+    assert invalidated == [True]
+    assert widget._status_label.text == (
+        "Allen layers L5 will render as a compact 2D stack."
+    )
+
+
+def test_empty_allen_layer_selection_disables_projection_and_labels(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._allen_layer_checkboxes = [
+        _DummyValueControl(checked=False)
+        for _label in module.ALLEN_ISOCORTEX_LAYER_LABELS
+    ]
+    widget._active_cache_profile = object()
+    widget._add_soma_btn = _DummyButton()
+
+    widget._set_projection_controls_enabled(True)
+
+    assert widget._project_btn.enabled is False
+    assert widget._add_soma_btn.enabled is False
+    assert widget._cached_region_control_states()["_region_labels_btn"] is False
+
+
+def test_allen_layer_projection_uses_rank_two_layer_and_metadata(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._heatmap_color_mode_combo = _DummyDataCombo(
+        module._HEATMAP_COLOR_SINGLE
+    )
+    summary = module.AllenLayerStackSummary(
+        total_nodes=3,
+        flatmap_valid_nodes=3,
+        layer_classified_nodes=3,
+        rendered_nodes=2,
+        excluded_non_layer_nodes=0,
+        excluded_unselected_layer_nodes=1,
+        nonzero_voxels=1,
+        traces_represented=2,
+        y_bins=4,
+        x_bins=4,
+        x_flat_min=0.0,
+        x_flat_max=1.0,
+        y_flat_min=0.0,
+        y_flat_max=1.0,
+        layer_labels=("L2/3", "L6a"),
+        layer_node_counts=(1, 1),
+        selected_layer_indices=(1, 4),
+        output_mode=module.ALLEN_LAYER_OUTPUT_PROJECTION,
+        output_shape=(4, 4),
+        atlas_name="allen_mouse_25um",
+    )
+    projected = pd.DataFrame(
+        {
+            "file_id": ["a.swc", "b.swc"],
+            "render_valid": [True, True],
+            "allen_layer_index": [1, 4],
+            "allen_layer_render_index": [0, 1],
+            "y_flat_bin": [1, 1],
+            "x_flat_bin": [2, 2],
+        }
+    )
+    result = module.AllenLayerStackResult(
+        projected_nodes=projected,
+        volume=np.asarray(
+            [[0, 0, 0, 0], [0, 0, 2, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+            dtype=np.float32,
+        ),
+        summary=summary,
+    )
+
+    layer = widget._create_or_update_allen_layer_stack(
+        result,
+        _simple_projection_summary(module, total_nodes=3),
+        flatmap_style="both_shaped",
+        coordinate_mode="parquet_columns",
+    )
+
+    assert layer.name == module._ALLEN_LAYER_PROJECTION_LAYER_NAME
+    assert layer.data.shape == (4, 4)
+    assert layer.axis_labels == ("Flatmap Y", "Flatmap X")
+    assert layer.metadata["flatmap_plane_mode"] == "allen_layer_projection"
+    assert layer.metadata["allen_layer_output_mode"] == "projection"
+    assert layer.metadata["allen_layer_indices"] == [1, 4]
+    assert layer.metadata["allen_layer_labels"] == ["L2/3", "L6a"]
+    assert widget._viewer.canvas.overlays.text.visible is False
+
+
+def test_selected_allen_stack_caption_uses_compact_plane_number(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    summary = module.AllenLayerStackSummary(
+        total_nodes=2,
+        flatmap_valid_nodes=2,
+        layer_classified_nodes=2,
+        rendered_nodes=2,
+        excluded_non_layer_nodes=0,
+        nonzero_voxels=2,
+        traces_represented=1,
+        y_bins=4,
+        x_bins=4,
+        x_flat_min=0.0,
+        x_flat_max=1.0,
+        y_flat_min=0.0,
+        y_flat_max=1.0,
+        layer_labels=("L2/3", "L5"),
+        layer_node_counts=(1, 1),
+        selected_layer_indices=(1, 3),
+        output_mode=module.ALLEN_LAYER_OUTPUT_STACK,
+        output_shape=(2, 4, 4),
+        atlas_name="allen_mouse_25um",
+    )
+    result = module.AllenLayerStackResult(
+        projected_nodes=pd.DataFrame(
+            {
+                "file_id": ["a.swc", "a.swc"],
+                "render_valid": [True, True],
+                "allen_layer_render_index": [0, 1],
+                "y_flat_bin": [1, 2],
+                "x_flat_bin": [1, 2],
+            }
+        ),
+        volume=np.ones((2, 4, 4), dtype=np.float32),
+        summary=summary,
+    )
+
+    widget._create_or_update_allen_layer_stack(
+        result,
+        _simple_projection_summary(module, total_nodes=2),
+        flatmap_style="both_shaped",
+        coordinate_mode="parquet_columns",
+    )
+    widget._viewer.dims.set_current_step(1)
+
+    assert widget._viewer.text_overlay.text == "Allen layer: L5  (plane 2 of 2)"
+
+
+def test_allen_layer_projection_places_selected_somas_in_xy_only(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._allen_layer_output_combo = _DummyDataCombo(
+        module.ALLEN_LAYER_OUTPUT_PROJECTION
+    )
+    widget._soma_layer = None
+    summary = module.AllenLayerStackSummary(
+        total_nodes=2,
+        flatmap_valid_nodes=2,
+        layer_classified_nodes=2,
+        rendered_nodes=1,
+        excluded_non_layer_nodes=0,
+        excluded_unselected_layer_nodes=1,
+        nonzero_voxels=1,
+        traces_represented=1,
+        y_bins=4,
+        x_bins=4,
+        x_flat_min=0.0,
+        x_flat_max=1.0,
+        y_flat_min=0.0,
+        y_flat_max=1.0,
+        layer_labels=("L5",),
+        layer_node_counts=(1,),
+        selected_layer_indices=(3,),
+        output_mode=module.ALLEN_LAYER_OUTPUT_PROJECTION,
+        output_shape=(4, 4),
+        atlas_name="allen_mouse_25um",
+    )
+    render = module.AllenLayerStackResult(
+        projected_nodes=pd.DataFrame(
+            {
+                "file_id": ["a.swc", "b.swc"],
+                "render_valid": [True, False],
+                "y_flat_bin": [2, -1],
+                "x_flat_bin": [3, -1],
+                "allen_layer_index": [3, 4],
+                "allen_layer_render_index": [0, -1],
+            }
+        ),
+        volume=np.zeros((4, 4), dtype=np.float32),
+        summary=summary,
+    )
+
+    layer = widget._create_or_update_soma_layer(
+        render,
+        _simple_projection_summary(module, total_nodes=2),
+    )
+
+    np.testing.assert_array_equal(layer.data, np.asarray([[2.0, 3.0]]))
+    assert layer.axis_labels == ("Flatmap Y", "Flatmap X")
+    assert layer.metadata["flatmap_plane_mode"] == "allen_layer_projection"
+    assert layer.metadata["allen_layer_indices"] == [3]
 
 
 def _render_allen_layer_stack(module, widget, *, color_mode=None):
@@ -3644,6 +4256,37 @@ def test_release_display_viewer_stops_following_the_slider(monkeypatch) -> None:
     assert viewer.text_overlay.visible is False
 
 
+def test_plane_captions_keep_following_each_side_by_side_viewer(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    active = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+
+    first_layer = first.add_image(
+        np.zeros((2, 3, 3)),
+        name="first",
+        axis_labels=("Depth bin", "Flatmap Y", "Flatmap X"),
+    )
+    widget._apply_display_axis_annotations(first_layer)
+
+    active["viewer"] = second
+    second_layer = second.add_image(
+        np.zeros((3, 3, 3)),
+        name="second",
+        axis_labels=("Depth bin", "Flatmap Y", "Flatmap X"),
+    )
+    widget._apply_display_axis_annotations(second_layer)
+
+    first.dims.set_current_step(1)
+    second.dims.set_current_step(2)
+
+    assert first.text_overlay.text == "Depth bin: plane 2 of 2"
+    assert second.text_overlay.text == "Depth bin: plane 3 of 3"
+    assert len(widget._display_axis_annotation_states) == 2
+
+
 def test_allen_layer_mode_enables_cached_labels_but_disables_depth_and_geometry(
     monkeypatch,
 ) -> None:
@@ -4250,6 +4893,80 @@ def test_cached_allen_layer_labels_create_synchronized_planar_stack(
     assert widget._viewer.dims.ndisplay == 2
     assert layer.slice_dims_calls[-1] == (widget._viewer.dims, True)
     assert "6 Allen layer planes" in widget._region_labels_status_label.text
+
+
+def test_cached_allen_layer_projection_labels_share_selected_xy_space(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._active_cache_profile = types.SimpleNamespace(profile_id="profile-1")
+    widget._region_cache_dir = Path("cache")
+    widget._style_combo = _DummyDataCombo("both_shaped")
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._allen_layer_output_combo = _DummyDataCombo(
+        module.ALLEN_LAYER_OUTPUT_PROJECTION
+    )
+    widget._allen_layer_checkboxes = [
+        _DummyValueControl(checked=index in {1, 4}) for index in range(6)
+    ]
+    widget._selected_region_ids_provider = lambda: [10, 11]
+    widget._selected_region_acronyms_provider = lambda: ["R10", "R11"]
+    widget._selected_region_source_provider = lambda: "custom_regions"
+    widget._selected_region_scope_provider = lambda: "whole_parquet"
+    widget._atlas_provider = lambda: types.SimpleNamespace(
+        atlas_name="allen_mouse_25um",
+        structures={},
+    )
+    layer_map = types.SimpleNamespace(
+        atlas_name="allen_mouse_25um",
+        atlas_version="1.2.3",
+        layer_labels=("L1", "L2/3", "L4", "L5", "L6a", "L6b"),
+    )
+    widget._current_allen_layer_map = lambda: layer_map
+    result = types.SimpleNamespace(
+        labels=np.asarray([[10, 0], [0, 11]], dtype=np.int32),
+        profile_id="profile-1",
+        selected_region_ids=(10, 11),
+        layer_mapped_region_ids=(10, 11),
+        represented_region_ids=(10, 11),
+        layer_labels=("L2/3", "L6a"),
+        summary=types.SimpleNamespace(
+            labeled_bins=2,
+            to_dict=lambda: {
+                "labeled_bins": 2,
+                "output_shape": [2, 2],
+            },
+        ),
+    )
+    import napari_neuron_navigator.flatmap_region_cache as cache_module
+
+    captured = {}
+    monkeypatch.setattr(
+        cache_module,
+        "materialize_allen_layer_region_selection",
+        lambda _profile, _region_ids, **kwargs: (
+            captured.update(kwargs) or result
+        ),
+    )
+
+    actual = widget._create_cached_region_labels()
+
+    assert actual is result
+    assert captured["selected_layer_indices"] == (1, 4)
+    assert captured["output_mode"] == "projection"
+    layer = widget._region_labels_layer
+    assert layer.name == module._ALLEN_LAYER_PROJECTION_REGION_LABELS_LAYER_NAME
+    assert layer.data.shape == (2, 2)
+    assert layer.axis_labels == ("Flatmap Y", "Flatmap X")
+    assert layer.metadata["flatmap_plane_mode"] == "allen_layer_projection"
+    assert layer.metadata["allen_layer_indices"] == [1, 4]
+    assert "projected from 2 selected Allen layer" in (
+        widget._region_labels_status_label.text
+    )
 
 
 def test_cached_allen_layer_labels_reject_unmapped_and_clear_empty_results(
@@ -5201,6 +5918,8 @@ def test_export_current_projection_to_path_writes_csv(monkeypatch, tmp_path) -> 
             "depth_bin_label": ["0-25 um"],
             "allen_layer_index": [0],
             "allen_layer_label": ["L1"],
+            "allen_layer_selected": [True],
+            "allen_layer_render_index": [0],
         }
     )
 
@@ -5216,6 +5935,8 @@ def test_export_current_projection_to_path_writes_csv(monkeypatch, tmp_path) -> 
     assert exported["x_flat_bin"].tolist() == [10]
     assert exported["allen_layer_index"].tolist() == [0]
     assert exported["allen_layer_label"].tolist() == ["L1"]
+    assert bool(exported["allen_layer_selected"].iloc[0]) is True
+    assert exported["allen_layer_render_index"].tolist() == [0]
     assert "Exported flatmap projection" in widget._status_label.text
 
 

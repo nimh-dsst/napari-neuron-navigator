@@ -1998,6 +1998,8 @@ class FlatmapHeatmapWorker(QObject):
         cluster_map: dict[object, int | None] | None = None,
         plane_mode: str = "depth",
         allen_layer_map: AllenIsocortexLayerMap | None = None,
+        allen_layer_indices: tuple[int, ...] | None = None,
+        allen_layer_output_mode: str = "stack",
     ):
         super().__init__()
         self._parquet_path = str(parquet_path)
@@ -2017,6 +2019,8 @@ class FlatmapHeatmapWorker(QObject):
         self._cluster_map = cluster_map
         self._plane_mode = str(plane_mode)
         self._allen_layer_map = allen_layer_map
+        self._allen_layer_indices = allen_layer_indices
+        self._allen_layer_output_mode = str(allen_layer_output_mode)
 
     def run(self) -> None:
         """Execute the DuckDB flatmap heatmap pipeline."""
@@ -2024,6 +2028,7 @@ class FlatmapHeatmapWorker(QObject):
             import duckdb
 
             from .flatmap_heatmap import (
+                FLATMAP_PLANE_MODE_ALLEN_LAYER_PROJECTION,
                 FLATMAP_PLANE_MODE_ALLEN_LAYERS,
                 FLATMAP_PLANE_MODE_FLAT,
                 build_allen_layer_heatmap_volume_result,
@@ -2037,7 +2042,10 @@ class FlatmapHeatmapWorker(QObject):
                 x_bounds = self._x_bounds
                 y_bounds = self._y_bounds
                 depth_range_um = self._depth_range_um
-                needs_depth_bounds = self._plane_mode != FLATMAP_PLANE_MODE_ALLEN_LAYERS
+                needs_depth_bounds = self._plane_mode not in {
+                    FLATMAP_PLANE_MODE_ALLEN_LAYERS,
+                    FLATMAP_PLANE_MODE_ALLEN_LAYER_PROJECTION,
+                }
                 if (
                     x_bounds is None
                     or y_bounds is None
@@ -2054,7 +2062,10 @@ class FlatmapHeatmapWorker(QObject):
                     y_bounds = bounds["y_bounds"]
                     depth_range_um = bounds["depth_range_um"]
 
-                if self._plane_mode == FLATMAP_PLANE_MODE_ALLEN_LAYERS:
+                if self._plane_mode in {
+                    FLATMAP_PLANE_MODE_ALLEN_LAYERS,
+                    FLATMAP_PLANE_MODE_ALLEN_LAYER_PROJECTION,
+                }:
                     if self._allen_layer_map is None:
                         raise ValueError(
                             "Allen layer rendering requires an atlas-derived "
@@ -2072,6 +2083,8 @@ class FlatmapHeatmapWorker(QObject):
                         x_bins=self._x_bins,
                         file_ids=self._file_ids,
                         cluster_map=self._cluster_map,
+                        selected_layer_indices=self._allen_layer_indices,
+                        output_mode=self._allen_layer_output_mode,
                         progress_callback=self.progress.emit,
                         progress_total=total_steps,
                     )

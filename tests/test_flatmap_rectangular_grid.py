@@ -15,7 +15,9 @@ import pandas as pd
 import pytest
 
 from napari_neuron_navigator.flatmap_heatmap import (
+    ALLEN_LAYER_OUTPUT_PROJECTION,
     _bin_flat_values,
+    build_allen_layer_render_from_projected_nodes,
     build_allen_layer_stack_from_projected_nodes,
     build_flatmap_render_data_from_projected_nodes,
     build_flatmap_segment_vectors,
@@ -238,6 +240,34 @@ def test_explicit_x_bins_is_used_verbatim_not_re_derived() -> None:
     )
     assert render.summary.x_bins == 5
     assert render.volume.shape[1:] == (Y_BINS, 5)
+
+    allen_nodes = _asymmetric_nodes()
+    allen_nodes["region_id"] = [10, 10, 11, 11]
+    selected_stack = build_allen_layer_render_from_projected_nodes(
+        allen_nodes,
+        _layer_map(),
+        y_bins=Y_BINS,
+        x_bins=5,
+        x_bounds=X_BOUNDS,
+        y_bounds=Y_BOUNDS,
+        selected_layer_indices=[0, 1],
+    )
+    selected_projection = build_allen_layer_render_from_projected_nodes(
+        allen_nodes,
+        _layer_map(),
+        y_bins=Y_BINS,
+        x_bins=5,
+        x_bounds=X_BOUNDS,
+        y_bounds=Y_BOUNDS,
+        selected_layer_indices=[0, 1],
+        output_mode=ALLEN_LAYER_OUTPUT_PROJECTION,
+    )
+    assert selected_stack.volume.shape == (2, Y_BINS, 5)
+    assert selected_projection.volume.shape == (Y_BINS, 5)
+    np.testing.assert_array_equal(
+        selected_projection.volume,
+        selected_stack.volume.sum(axis=0),
+    )
 
 
 def test_omitted_x_bins_derives_the_square_bin_count() -> None:

@@ -60,8 +60,15 @@ FLATMAP_HEATMAP_COLOR_INDIVIDUAL = "individual"
 FLATMAP_HEATMAP_COLOR_CLUSTER = "cluster"
 FLATMAP_PLANE_MODE_DEPTH = "depth"
 FLATMAP_PLANE_MODE_ALLEN_LAYERS = "allen_layers"
+# Selected Allen layers collapsed into one categorical, depth-free XY plane.
+# This stays distinct from ``FLATMAP_PLANE_MODE_FLAT`` because it is filtered by
+# atlas layer membership rather than by the numeric-depth inclusion controls.
+FLATMAP_PLANE_MODE_ALLEN_LAYER_PROJECTION = "allen_layer_projection"
 # A flat render has no plane axis at all: flatmap XY only, depth collapsed.
 FLATMAP_PLANE_MODE_FLAT = "flat"
+
+ALLEN_LAYER_OUTPUT_STACK = "stack"
+ALLEN_LAYER_OUTPUT_PROJECTION = "projection"
 
 # Bilateral precomputed styles map onto the ``*_shaped``/``*_square`` column
 # families that carry ready-to-render flatmap coordinates.
@@ -199,8 +206,8 @@ class FlatmapSegmentVectors:
 
 
 @dataclass(frozen=True, kw_only=True)
-class AllenLayerStackSummary:
-    """Counts and grid provenance for one categorical Allen-layer stack.
+class AllenLayerRenderSummary:
+    """Counts and grid provenance for one categorical Allen-layer render.
 
     Keyword-only for the same reason as :class:`FlatmapRenderSummary`.
     """
@@ -222,15 +229,21 @@ class AllenLayerStackSummary:
     layer_node_counts: tuple[int, ...]
     atlas_name: str
     atlas_version: str = ""
+    selected_layer_indices: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    output_mode: str = ALLEN_LAYER_OUTPUT_STACK
+    excluded_unselected_layer_nodes: int = 0
+    output_shape: tuple[int, ...] = ()
 
     @property
     def plane_count(self) -> int:
         """Return the number of categorical image planes."""
+        if self.output_mode == ALLEN_LAYER_OUTPUT_PROJECTION:
+            return 0
         return len(self.layer_labels)
 
     @property
     def excluded_nodes(self) -> int:
-        """Return all input nodes omitted from the rendered stack."""
+        """Return all input nodes omitted from the rendered output."""
         return max(0, int(self.total_nodes) - int(self.rendered_nodes))
 
     @property
@@ -241,7 +254,13 @@ class AllenLayerStackSummary:
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-safe dictionary."""
         return {
-            "plane_mode": FLATMAP_PLANE_MODE_ALLEN_LAYERS,
+            "plane_mode": (
+                FLATMAP_PLANE_MODE_ALLEN_LAYER_PROJECTION
+                if self.output_mode == ALLEN_LAYER_OUTPUT_PROJECTION
+                else FLATMAP_PLANE_MODE_ALLEN_LAYERS
+            ),
+            "output_mode": self.output_mode,
+            "allen_layer_output_mode": self.output_mode,
             "total_nodes": int(self.total_nodes),
             "flatmap_valid_nodes": int(self.flatmap_valid_nodes),
             "layer_classified_nodes": int(self.layer_classified_nodes),
@@ -249,6 +268,9 @@ class AllenLayerStackSummary:
             "excluded_nodes": self.excluded_nodes,
             "invalid_flatmap_nodes": self.invalid_flatmap_nodes,
             "excluded_non_layer_nodes": int(self.excluded_non_layer_nodes),
+            "excluded_unselected_layer_nodes": int(
+                self.excluded_unselected_layer_nodes
+            ),
             "nonzero_voxels": int(self.nonzero_voxels),
             "traces_represented": int(self.traces_represented),
             "y_bins": int(self.y_bins),
@@ -258,19 +280,29 @@ class AllenLayerStackSummary:
             "y_flat_min": float(self.y_flat_min),
             "y_flat_max": float(self.y_flat_max),
             "layer_labels": list(self.layer_labels),
+            "selected_layer_labels": list(self.layer_labels),
+            "selected_layer_indices": [
+                int(value) for value in self.selected_layer_indices
+            ],
             "layer_node_counts": [int(value) for value in self.layer_node_counts],
+            "output_shape": [int(value) for value in self.output_shape],
             "atlas_name": self.atlas_name,
             "atlas_version": self.atlas_version,
         }
 
 
 @dataclass(frozen=True)
-class AllenLayerStackResult:
+class AllenLayerRenderResult:
     """Materialized node table and node-count volume for Allen layers."""
 
     projected_nodes: pd.DataFrame
     volume: np.ndarray
-    summary: AllenLayerStackSummary
+    summary: AllenLayerRenderSummary
+
+
+# Compatibility names for code that imports the original all-six stack types.
+AllenLayerStackSummary = AllenLayerRenderSummary
+AllenLayerStackResult = AllenLayerRenderResult
 
 
 @dataclass(frozen=True)
@@ -283,6 +315,7 @@ class AllenLayerAggregateStats:
     layer_classified_nodes: int
     rendered_nodes: int
     traces_represented: int
+    excluded_unselected_layer_nodes: int = 0
 
 
 @dataclass(frozen=True)
@@ -292,9 +325,9 @@ class AllenLayerHeatmapVolumeResult:
     color_mode: str
     volume: np.ndarray | None
     grouped_volumes: tuple[FlatmapGroupedVolume, ...]
-    summary: AllenLayerStackSummary
+    summary: AllenLayerRenderSummary
     stats: AllenLayerAggregateStats
-    volume_shape: tuple[int, int, int]
+    volume_shape: tuple[int, ...]
 
 
 def _validate_resolution(
@@ -989,7 +1022,42 @@ def build_flatmap_render_data_from_projected_nodes(
     )
 
 
-def build_allen_layer_stack_from_projected_nodes(
+def _resolve_allen_layer_render_options(
+    layer_map: AllenIsocortexLayerMap,
+    selected_layer_indices: Sequence[int] | None,
+    output_mode: str,
+) -> tuple[tuple[int, ...], tuple[str, ...], str]:
+    """Validate and canonicalize one Allen-layer render selection."""
+    layer_labels = tuple(str(label) for label in layer_map.layer_labels)
+    if not layer_labels:
+        raise ValueError("Allen layer labels cannot be empty.")
+
+    if selected_layer_indices is None:
+        selected = tuple(range(len(layer_labels)))
+    else:
+        try:
+            selected = tuple(sorted({int(value) for value in selected_layer_indices}))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Allen layer indices must be integers.") from exc
+    if not selected:
+        raise ValueError("Select at least one Allen layer.")
+    invalid = [index for index in selected if index < 0 or index >= len(layer_labels)]
+    if invalid:
+        raise ValueError(
+            "Allen layer indices must be between 0 and "
+            f"{len(layer_labels) - 1}; got {invalid}."
+        )
+
+    mode = str(output_mode)
+    if mode not in {ALLEN_LAYER_OUTPUT_STACK, ALLEN_LAYER_OUTPUT_PROJECTION}:
+        raise ValueError(
+            "Allen layer output_mode must be 'stack' or 'projection'; "
+            f"got {output_mode!r}."
+        )
+    return selected, tuple(layer_labels[index] for index in selected), mode
+
+
+def build_allen_layer_render_from_projected_nodes(
     projected_nodes: pd.DataFrame,
     layer_map: AllenIsocortexLayerMap,
     *,
@@ -997,14 +1065,24 @@ def build_allen_layer_stack_from_projected_nodes(
     x_bins: int | None = None,
     x_bounds: tuple[float, float],
     y_bounds: tuple[float, float],
-) -> AllenLayerStackResult:
-    """Bin projected nodes into six atlas-defined Isocortex layer planes."""
+    selected_layer_indices: Sequence[int] | None = None,
+    output_mode: str = ALLEN_LAYER_OUTPUT_STACK,
+) -> AllenLayerRenderResult:
+    """Bin selected atlas-defined Isocortex layers into a stack or projection."""
     required = ("x_flat", "y_flat", "region_id")
     missing = [column for column in required if column not in projected_nodes.columns]
     if missing:
         raise ValueError(
             f"Projected nodes are missing Allen-layer column(s): {missing}."
         )
+
+    selected_indices, selected_labels, output_mode = (
+        _resolve_allen_layer_render_options(
+            layer_map,
+            selected_layer_indices,
+            output_mode,
+        )
+    )
 
     # Bounds first: the derived x count needs them, and the size guard needs the
     # derived count.
@@ -1017,12 +1095,15 @@ def build_allen_layer_stack_from_projected_nodes(
         x_bins=x_bins,
     )
 
-    plane_count = len(layer_map.layer_labels)
-    voxel_count = int(plane_count * y_bins * x_bins)
+    canonical_plane_count = len(layer_map.layer_labels)
+    output_plane_count = (
+        len(selected_indices) if output_mode == ALLEN_LAYER_OUTPUT_STACK else 1
+    )
+    voxel_count = int(output_plane_count * y_bins * x_bins)
     if voxel_count > MAX_FLATMAP_HEATMAP_VOXELS:
         raise ValueError(
             "Allen layer heatmap is too large: "
-            f"{plane_count}x{y_bins}x{x_bins} voxels. Use fewer Y bins."
+            f"{output_plane_count}x{y_bins}x{x_bins} voxels. Use fewer Y bins."
         )
 
     table = projected_nodes.copy()
@@ -1044,7 +1125,11 @@ def build_allen_layer_stack_from_projected_nodes(
         layer_indices[layer_classified] = (
             mapped_layers[layer_classified].astype(np.int64).to_numpy()
         )
-    render_valid = flatmap_valid & layer_classified
+    layer_selected = layer_classified & np.isin(layer_indices, selected_indices)
+    render_valid = flatmap_valid & layer_selected
+    render_plane_indices = np.full(len(table), -1, dtype=np.int64)
+    for render_index, canonical_index in enumerate(selected_indices):
+        render_plane_indices[layer_indices == canonical_index] = render_index
 
     x_bin_indices = np.full(len(table), -1, dtype=np.int64)
     y_bin_indices = np.full(len(table), -1, dtype=np.int64)
@@ -1060,18 +1145,33 @@ def build_allen_layer_stack_from_projected_nodes(
             y_bins,
         )
 
-    volume = np.zeros((plane_count, y_bins, x_bins), dtype=np.float32)
+    volume_shape = (
+        (len(selected_indices), y_bins, x_bins)
+        if output_mode == ALLEN_LAYER_OUTPUT_STACK
+        else (y_bins, x_bins)
+    )
+    volume = np.zeros(volume_shape, dtype=np.float32)
     render_indices = np.flatnonzero(render_valid)
     if render_indices.size:
-        np.add.at(
-            volume,
-            (
-                layer_indices[render_indices],
-                y_bin_indices[render_indices],
-                x_bin_indices[render_indices],
-            ),
-            1.0,
-        )
+        if output_mode == ALLEN_LAYER_OUTPUT_STACK:
+            np.add.at(
+                volume,
+                (
+                    render_plane_indices[render_indices],
+                    y_bin_indices[render_indices],
+                    x_bin_indices[render_indices],
+                ),
+                1.0,
+            )
+        else:
+            np.add.at(
+                volume,
+                (
+                    y_bin_indices[render_indices],
+                    x_bin_indices[render_indices],
+                ),
+                1.0,
+            )
 
     layer_labels = np.full(len(table), "", dtype=object)
     for index, label in enumerate(layer_map.layer_labels):
@@ -1081,24 +1181,29 @@ def build_allen_layer_stack_from_projected_nodes(
     table.loc[:, "y_flat_bin"] = y_bin_indices
     table.loc[:, "allen_layer_index"] = layer_indices
     table.loc[:, "allen_layer_label"] = layer_labels
+    table.loc[:, "allen_layer_selected"] = layer_selected
+    table.loc[:, "allen_layer_render_index"] = render_plane_indices
 
     if render_indices.size and "file_id" in table.columns:
         traces_represented = int(table.iloc[render_indices]["file_id"].nunique())
     else:
         traces_represented = 0
-    layer_node_counts = tuple(
-        int(value)
-        for value in np.bincount(
-            layer_indices[render_valid],
-            minlength=plane_count,
-        ).tolist()
+    canonical_counts = np.bincount(
+        layer_indices[render_valid],
+        minlength=canonical_plane_count,
     )
-    summary = AllenLayerStackSummary(
+    layer_node_counts = tuple(
+        int(canonical_counts[index]) for index in selected_indices
+    )
+    summary = AllenLayerRenderSummary(
         total_nodes=int(len(table)),
         flatmap_valid_nodes=int(flatmap_valid.sum()),
         layer_classified_nodes=int(layer_classified.sum()),
         rendered_nodes=int(render_valid.sum()),
         excluded_non_layer_nodes=int((flatmap_valid & ~layer_classified).sum()),
+        excluded_unselected_layer_nodes=int(
+            (flatmap_valid & layer_classified & ~layer_selected).sum()
+        ),
         nonzero_voxels=int(np.count_nonzero(volume)),
         traces_represented=traces_represented,
         y_bins=y_bins,
@@ -1107,15 +1212,38 @@ def build_allen_layer_stack_from_projected_nodes(
         x_flat_max=resolved_x_bounds[1],
         y_flat_min=resolved_y_bounds[0],
         y_flat_max=resolved_y_bounds[1],
-        layer_labels=tuple(layer_map.layer_labels),
+        layer_labels=selected_labels,
         layer_node_counts=layer_node_counts,
         atlas_name=layer_map.atlas_name,
         atlas_version=layer_map.atlas_version,
+        selected_layer_indices=selected_indices,
+        output_mode=output_mode,
+        output_shape=tuple(int(value) for value in volume.shape),
     )
-    return AllenLayerStackResult(
+    return AllenLayerRenderResult(
         projected_nodes=table,
         volume=volume,
         summary=summary,
+    )
+
+
+def build_allen_layer_stack_from_projected_nodes(
+    projected_nodes: pd.DataFrame,
+    layer_map: AllenIsocortexLayerMap,
+    *,
+    y_bins: int = DEFAULT_FLATMAP_Y_BINS,
+    x_bins: int | None = None,
+    x_bounds: tuple[float, float],
+    y_bounds: tuple[float, float],
+) -> AllenLayerStackResult:
+    """Compatibility wrapper that builds the original all-six layer stack."""
+    return build_allen_layer_render_from_projected_nodes(
+        projected_nodes,
+        layer_map,
+        y_bins=y_bins,
+        x_bins=x_bins,
+        x_bounds=x_bounds,
+        y_bounds=y_bounds,
     )
 
 
@@ -1325,11 +1453,10 @@ def build_flatmap_cluster_volumes(
 
 def _rendered_allen_layer_nodes(
     projected_nodes: pd.DataFrame,
-    volume_shape: tuple[int, int, int],
+    volume_shape: tuple[int, ...],
 ) -> pd.DataFrame:
     required = (
         "render_valid",
-        "allen_layer_index",
         "y_flat_bin",
         "x_flat_bin",
         "file_id",
@@ -1339,26 +1466,49 @@ def _rendered_allen_layer_nodes(
         raise ValueError(
             f"Projected nodes are missing Allen-layer render column(s): {missing}"
         )
-    plane_size, y_size, x_size = (int(size) for size in volume_shape)
+    if len(volume_shape) not in (2, 3):
+        raise ValueError(f"volume_shape must be 2D or 3D; got {volume_shape}.")
+    has_plane_axis = len(volume_shape) == 3
+    if has_plane_axis:
+        plane_size, y_size, x_size = (int(size) for size in volume_shape)
+        plane_column = (
+            "allen_layer_render_index"
+            if "allen_layer_render_index" in projected_nodes.columns
+            else "allen_layer_index"
+        )
+        if plane_column not in projected_nodes.columns:
+            raise ValueError(
+                "Projected nodes are missing an Allen-layer render index column."
+            )
+    else:
+        y_size, x_size = (int(size) for size in volume_shape)
+        plane_column = None
     table = projected_nodes.copy()
     render_valid = table["render_valid"].fillna(False).astype(bool).to_numpy()
-    plane_bins = pd.to_numeric(table["allen_layer_index"], errors="coerce").to_numpy(
-        dtype=float
-    )
     y_bins = pd.to_numeric(table["y_flat_bin"], errors="coerce").to_numpy(dtype=float)
     x_bins = pd.to_numeric(table["x_flat_bin"], errors="coerce").to_numpy(dtype=float)
-    finite = np.isfinite(plane_bins) & np.isfinite(y_bins) & np.isfinite(x_bins)
+    finite = np.isfinite(y_bins) & np.isfinite(x_bins)
     in_bounds = (
         finite
-        & (plane_bins >= 0)
-        & (plane_bins < plane_size)
         & (y_bins >= 0)
         & (y_bins < y_size)
         & (x_bins >= 0)
         & (x_bins < x_size)
     )
+    if plane_column is not None:
+        plane_bins = pd.to_numeric(
+            table[plane_column], errors="coerce"
+        ).to_numpy(dtype=float)
+        in_bounds &= (
+            np.isfinite(plane_bins)
+            & (plane_bins >= 0)
+            & (plane_bins < plane_size)
+        )
     filtered = table.loc[render_valid & in_bounds].copy()
-    for column in ("allen_layer_index", "y_flat_bin", "x_flat_bin"):
+    integer_columns = ["y_flat_bin", "x_flat_bin"]
+    if plane_column is not None:
+        integer_columns.append(plane_column)
+    for column in integer_columns:
         filtered.loc[:, column] = pd.to_numeric(
             filtered[column], errors="coerce"
         ).astype(np.int64)
@@ -1367,26 +1517,36 @@ def _rendered_allen_layer_nodes(
 
 def _allen_layer_volume_for_node_group(
     group: pd.DataFrame,
-    volume_shape: tuple[int, int, int],
+    volume_shape: tuple[int, ...],
 ) -> np.ndarray:
     volume = np.zeros(volume_shape, dtype=np.float32)
     if group.empty:
         return volume
-    np.add.at(
-        volume,
-        (
-            group["allen_layer_index"].to_numpy(dtype=np.int64),
+    if len(volume_shape) == 3:
+        plane_column = (
+            "allen_layer_render_index"
+            if "allen_layer_render_index" in group.columns
+            else "allen_layer_index"
+        )
+        coordinates = (
+            group[plane_column].to_numpy(dtype=np.int64),
             group["y_flat_bin"].to_numpy(dtype=np.int64),
             group["x_flat_bin"].to_numpy(dtype=np.int64),
-        ),
-        1.0,
-    )
+        )
+    elif len(volume_shape) == 2:
+        coordinates = (
+            group["y_flat_bin"].to_numpy(dtype=np.int64),
+            group["x_flat_bin"].to_numpy(dtype=np.int64),
+        )
+    else:
+        raise ValueError(f"volume_shape must be 2D or 3D; got {volume_shape}.")
+    np.add.at(volume, coordinates, 1.0)
     return volume
 
 
 def build_allen_layer_file_id_volumes(
     projected_nodes: pd.DataFrame,
-    volume_shape: tuple[int, int, int],
+    volume_shape: tuple[int, ...],
 ) -> list[FlatmapGroupedVolume]:
     """Split an Allen-layer stack into one scalar volume per neuron."""
     rendered = _rendered_allen_layer_nodes(projected_nodes, volume_shape)
@@ -1409,7 +1569,7 @@ def build_allen_layer_file_id_volumes(
 
 def build_allen_layer_cluster_volumes(
     projected_nodes: pd.DataFrame,
-    volume_shape: tuple[int, int, int],
+    volume_shape: tuple[int, ...],
     cluster_map: dict[object, int | None],
 ) -> list[FlatmapGroupedVolume]:
     """Split an Allen-layer stack into scalar volumes by cluster ID."""
@@ -2242,6 +2402,7 @@ def _allen_layer_sql_expressions(
     y_upper: float,
     y_bins: int,
     x_bins: int,
+    selected_layer_indices: tuple[int, ...],
 ) -> dict[str, str]:
     x_column = f"x_flat_{suffix}"
     y_column = f"y_flat_{suffix}"
@@ -2271,6 +2432,15 @@ def _allen_layer_sql_expressions(
         id_list = ", ".join(str(int(value)) for value in region_ids)
         case_parts.append(f"WHEN {region_ref} IN ({id_list}) THEN {int(index)}")
     layer_index = "CASE " + " ".join(case_parts) + " ELSE NULL END"
+    selected_values = ", ".join(str(index) for index in selected_layer_indices)
+    layer_selected = f"({layer_index}) IN ({selected_values})"
+    render_index_parts = " ".join(
+        f"WHEN {canonical_index} THEN {render_index}"
+        for render_index, canonical_index in enumerate(selected_layer_indices)
+    )
+    render_plane_index = (
+        f"CASE ({layer_index}) {render_index_parts} ELSE NULL END"
+    )
 
     x_span = x_upper - x_lower
     y_span = y_upper - y_lower
@@ -2288,7 +2458,9 @@ def _allen_layer_sql_expressions(
         "flatmap_valid": flatmap_valid,
         "layer_index": layer_index,
         "layer_classified": f"({layer_index}) IS NOT NULL",
-        "render_where": (f"({flatmap_valid}) AND (({layer_index}) IS NOT NULL)"),
+        "layer_selected": layer_selected,
+        "render_plane_index": render_plane_index,
+        "render_where": f"({flatmap_valid}) AND ({layer_selected})",
         "x_bin": x_bin,
         "y_bin": y_bin,
     }
@@ -2304,6 +2476,7 @@ def _query_allen_layer_stats(
     where_sql = f"WHERE {file_filter_sql}" if file_filter_sql else ""
     flatmap_valid = expressions["flatmap_valid"]
     layer_classified = expressions["layer_classified"]
+    layer_selected = expressions["layer_selected"]
     render_where = expressions["render_where"]
     query = f"""
         SELECT
@@ -2314,7 +2487,11 @@ def _query_allen_layer_stats(
                 AS layer_classified_nodes,
             COUNT(*) FILTER (WHERE {render_where}) AS rendered_nodes,
             COUNT(DISTINCT file_id) FILTER (WHERE {render_where})
-                AS traces_represented
+                AS traces_represented,
+            COUNT(*) FILTER (
+                WHERE ({flatmap_valid}) AND ({layer_classified})
+                    AND NOT ({layer_selected})
+            ) AS excluded_unselected_layer_nodes
         FROM {source_sql}
         {where_sql}
     """
@@ -2324,7 +2501,7 @@ def _query_allen_layer_stats(
         else conn.execute(query).fetchone()
     )
     if row is None:
-        row = (0, 0, 0, 0, 0, 0)
+        row = (0, 0, 0, 0, 0, 0, 0)
     return AllenLayerAggregateStats(
         total_nodes=int(row[0] or 0),
         total_traces=int(row[1] or 0),
@@ -2332,6 +2509,7 @@ def _query_allen_layer_stats(
         layer_classified_nodes=int(row[3] or 0),
         rendered_nodes=int(row[4] or 0),
         traces_represented=int(row[5] or 0),
+        excluded_unselected_layer_nodes=int(row[6] or 0),
     )
 
 
@@ -2343,18 +2521,26 @@ def _query_allen_layer_bin_counts(
     params: list[object],
     *,
     include_file_id: bool,
+    include_plane_bin: bool,
 ) -> pd.DataFrame:
     file_select = "file_id, " if include_file_id else ""
     file_group = ", file_id" if include_file_id else ""
+    plane_select = (
+        f'{expressions["render_plane_index"]} AS depth_bin,\n            '
+        if include_plane_bin
+        else ""
+    )
+    plane_group = "depth_bin, " if include_plane_bin else ""
     query = f"""
         SELECT
-            {file_select}{expressions["layer_index"]} AS depth_bin,
+            {file_select}{expressions["layer_index"]} AS allen_layer_index,
+            {plane_select}
             {expressions["y_bin"]} AS y_bin,
             {expressions["x_bin"]} AS x_bin,
             COUNT(*) AS node_count
         FROM {source_sql}
         WHERE {where_sql}
-        GROUP BY depth_bin, y_bin, x_bin{file_group}
+        GROUP BY allen_layer_index, {plane_group}y_bin, x_bin{file_group}
     """
     return (
         conn.execute(query, params).fetchdf()
@@ -2378,8 +2564,17 @@ def build_allen_layer_heatmap_volume_result(
     cluster_map: dict[object, int | None] | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
     progress_total: int = 3,
+    selected_layer_indices: Sequence[int] | None = None,
+    output_mode: str = ALLEN_LAYER_OUTPUT_STACK,
 ) -> AllenLayerHeatmapVolumeResult:
-    """Build a six-plane Allen Isocortex layer heatmap in DuckDB."""
+    """Build a selected Allen-layer stack or XY projection in DuckDB."""
+    selected_indices, selected_labels, output_mode = (
+        _resolve_allen_layer_render_options(
+            layer_map,
+            selected_layer_indices,
+            output_mode,
+        )
+    )
     suffix = _style_suffix(style_key)
     x_lower, x_upper = _nondegenerate_bounds(*x_bounds)
     y_lower, y_upper = _nondegenerate_bounds(*y_bounds)
@@ -2389,12 +2584,17 @@ def build_allen_layer_heatmap_volume_result(
         y_bins=y_bins,
         x_bins=x_bins,
     )
-    plane_count = len(layer_map.layer_labels)
-    volume_shape = (plane_count, y_bins, x_bins)
+    canonical_plane_count = len(layer_map.layer_labels)
+    volume_shape = (
+        (len(selected_indices), y_bins, x_bins)
+        if output_mode == ALLEN_LAYER_OUTPUT_STACK
+        else (y_bins, x_bins)
+    )
     if int(np.prod(volume_shape)) > MAX_FLATMAP_HEATMAP_VOXELS:
         raise ValueError(
             "Allen layer heatmap is too large: "
-            f"{plane_count}x{y_bins}x{x_bins} voxels. Use fewer Y bins."
+            f"{'x'.join(str(value) for value in volume_shape)} voxels. "
+            "Use fewer Y bins."
         )
 
     source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
@@ -2409,6 +2609,7 @@ def build_allen_layer_heatmap_volume_result(
         y_upper=y_upper,
         y_bins=y_bins,
         x_bins=x_bins,
+        selected_layer_indices=selected_indices,
     )
     file_filter = _file_id_filter(file_ids)
 
@@ -2417,15 +2618,20 @@ def build_allen_layer_heatmap_volume_result(
         *,
         nonzero_voxels: int,
         layer_node_counts: tuple[int, ...],
-    ) -> AllenLayerStackSummary:
-        return AllenLayerStackSummary(
+    ) -> AllenLayerRenderSummary:
+        return AllenLayerRenderSummary(
             total_nodes=stats.total_nodes,
             flatmap_valid_nodes=stats.flatmap_valid_nodes,
             layer_classified_nodes=stats.layer_classified_nodes,
             rendered_nodes=stats.rendered_nodes,
             excluded_non_layer_nodes=max(
                 0,
-                stats.flatmap_valid_nodes - stats.rendered_nodes,
+                stats.flatmap_valid_nodes
+                - stats.rendered_nodes
+                - stats.excluded_unselected_layer_nodes,
+            ),
+            excluded_unselected_layer_nodes=(
+                stats.excluded_unselected_layer_nodes
             ),
             nonzero_voxels=int(nonzero_voxels),
             traces_represented=stats.traces_represented,
@@ -2435,14 +2641,17 @@ def build_allen_layer_heatmap_volume_result(
             x_flat_max=x_upper,
             y_flat_min=y_lower,
             y_flat_max=y_upper,
-            layer_labels=tuple(layer_map.layer_labels),
+            layer_labels=selected_labels,
             layer_node_counts=layer_node_counts,
             atlas_name=layer_map.atlas_name,
             atlas_version=layer_map.atlas_version,
+            selected_layer_indices=selected_indices,
+            output_mode=output_mode,
+            output_shape=tuple(int(value) for value in volume_shape),
         )
 
     empty_stats = AllenLayerAggregateStats(0, 0, 0, 0, 0, 0)
-    empty_counts = tuple(0 for _label in layer_map.layer_labels)
+    empty_counts = tuple(0 for _label in selected_labels)
     if file_filter is None:
         volume = (
             np.zeros(volume_shape, dtype=np.float32)
@@ -2494,13 +2703,16 @@ def build_allen_layer_heatmap_volume_result(
         where_sql,
         params,
         include_file_id=include_file_id,
+        include_plane_bin=(output_mode == ALLEN_LAYER_OUTPUT_STACK),
     )
-    layer_node_counts_array = np.zeros(plane_count, dtype=np.int64)
+    layer_node_counts_array = np.zeros(canonical_plane_count, dtype=np.int64)
     if not counts.empty:
-        grouped_counts = counts.groupby("depth_bin")["node_count"].sum()
+        grouped_counts = counts.groupby("allen_layer_index")["node_count"].sum()
         for layer_index, node_count in grouped_counts.items():
             layer_node_counts_array[int(layer_index)] = int(node_count)
-    layer_node_counts = tuple(int(value) for value in layer_node_counts_array.tolist())
+    layer_node_counts = tuple(
+        int(layer_node_counts_array[index]) for index in selected_indices
+    )
 
     if color_mode == FLATMAP_HEATMAP_COLOR_SINGLE:
         volume = np.zeros(volume_shape, dtype=np.float32)

@@ -68,7 +68,12 @@ The main viewer and all of its layers, selection, dimensions, camera, and
 overlays remain untouched while projection data is computed and displayed. The
 flatmap viewer is created hidden, populated, and then shown, so a long-running
 calculation does not expose a blank second window. Re-projecting reuses the open
-flatmap viewer. Selecting another plugin tab leaves both windows available.
+flatmap viewer. Use **Project in New Window** to preserve the current flatmap and
+render another one for side-by-side comparison. Flatmap controls such as **Add
+Soma** and cached region overlays operate on the newest window. In **Heatmap
+Appearance**, use **Window** to list and adjust heatmaps from any open flatmap
+viewer. Older comparison windows remain independently navigable. Selecting
+another plugin tab leaves every window available.
 
 Use the flatmap window's operating-system close control to discard its transient
 layers; project again to display a fresh flatmap scene. The plugin intentionally
@@ -171,7 +176,8 @@ Vector**, **Show Region Labels** builds one depth-collapsed label image and
 from the same occupancy arrays — these two overlays need no cache rebuild of
 their own. Collapsing sums source-voxel counts across depth **per selected
 region**, so a 2D overlay is a map of the areas you selected rather than of
-cortical layers; use **Allen Layer Heatmap (2D stack)** for per-layer questions.
+cortical layers; use **Allen Layer Heatmap** to select Allen layers and view
+them as either a compact stack or a summed 2D projection.
 Cached surfaces stay 3D-only, since a voxel shell has no 2D form.
 
 Missing or incompatible cache data reports the specific mismatch and never

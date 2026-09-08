@@ -199,46 +199,56 @@ In **Data** > **Convert SWC to Parquet**, enable **Add bilateral flatmap/depth
 columns** and select **Lookup directory...** to combine SWC conversion and
 version-3 augmentation in one cancellable, atomic background operation.
 
-### Allen Isocortex layer flatmap stack
+### Allen Isocortex layer flatmap projection and stack
 
-- In **Flatmap**, choose **Allen Layer Heatmap (2D stack)** under **Render** to
-  create six raw node-count images ordered `L1`, `L2/3`, `L4`, `L5`, `L6a`,
-  and `L6b`.
+- In **Flatmap**, choose **Allen Layer Heatmap** under **Render**. The
+  **Allen Layer Options** section starts with `L1`, `L2/3`, `L4`, `L5`, `L6a`,
+  and `L6b` checked and **View** set to **2D stack**. Use **Select All** or
+  **Clear** for quick selection changes.
+- **2D stack** creates one raw node-count plane per checked layer, compacted in
+  superficial-to-deep order. **Single 2D projection** sums the checked planes
+  into one XY node-count image; it is exactly the selected stack summed over
+  its plane axis.
 - Load the Allen atlas used to annotate the input and provide a Parquet with
   `region_id`. Membership is derived from terminal regions in the loaded
   atlas's **Isocortex** hierarchy; numeric depth does not assign layers.
 - Flatmap-invalid nodes, non-Isocortex annotations, parent regions,
-  unannotated nodes, and non-laminar regions are excluded. Cortical areas
+  unannotated nodes, and non-laminar regions are excluded. Valid nodes in
+  unchecked Allen layers are counted separately as unselected. Cortical areas
   without layer 4 remain empty on the `L4` plane.
 - **Y bins**, shaped/square style, neuron selection, and heatmap color mode
   continue to apply. Depth-bin controls and cached surfaces/outlines are
-  unavailable while this categorical mode is selected. For a flatmap with no
-  plane axis at all, see **Depth-free 2D flatmap modes** below.
+  unavailable while this categorical mode is selected. If no layer is checked,
+  projection, soma, and label actions are disabled until one is selected.
 - With **Precomputed Parquet + Cache** and a compatible cache profile active,
   select **Atlas Regions** or **Custom Regions** and click **Show Region
-  Labels** to create a cache-backed six-plane **Flatmap Region Labels** stack.
-  It uses the same Allen layer order and XY grid as the heatmap, so napari's
-  first-axis slider changes both layers together. The labels may also be shown
-  before projecting neurons.
+  Labels** to create cache-backed labels matching the current selection and
+  view. Stack labels use the same compact layer order and XY grid as the
+  heatmap, so napari's first-axis slider changes both layers together.
+  Projection labels are one rank-2 image named **Flatmap Region Labels Allen
+  Projection**. Labels may also be shown before projecting neurons.
 - Planar labels contain an Atlas selection's terminal Allen-layer descendants
   or the exact checked Custom Region terminal IDs. Cached source-voxel counts
   are summed across depth for each region/XY bin; greatest occupancy wins
   collisions, with smaller region ID as the tie-breaker. The viewing path does
   not load NRRDs or `atlas.annotation`.
-- Single color creates one six-plane image stack. Individual and cluster color
-  modes create one stack per neuron or cluster.
+- Single color creates one selected stack or projection. Individual and cluster
+  color modes create one corresponding image per `file_id` or cluster.
 - The flatmap window names what is on screen: the plane slider is captioned
   **Allen layer**, the upper-left canvas corner reads the layer of the plane
-  under the slider (for example `Allen layer: L2/3  (plane 2 of 6)`, following
+  under the slider (for example `Allen layer: L5  (plane 2 of 2)`, following
   the slider as it moves), and
   labelled **Flatmap X** / **Flatmap Y** axis arrows are drawn at the image
-  origin. In **3D Heatmap** the same readout reports the plane's depth range in
+  origin. **Single 2D projection** is named **Isocortex Flatmap Allen Layer
+  Projection** and has only the Flatmap Y/X axes, with no slider or plane
+  caption. In **3D Heatmap** the readout reports the plane's depth range in
   microns and the caption reads **Depth bin**. The images are binned in index
   space, so the arrows orient and name the axes without asserting physical
   units or anatomical direction.
 - CSV export is available for materialized NRRD recomputation and includes
-  `allen_layer_index` and `allen_layer_label`. The fast precomputed,
-  volume-only path remains non-exportable.
+  canonical `allen_layer_index`, `allen_layer_label`,
+  `allen_layer_selected`, and compact `allen_layer_render_index` provenance.
+  The fast precomputed, volume-only path remains non-exportable.
 
 ### Depth-free 2D flatmap modes
 
@@ -277,14 +287,15 @@ version-3 augmentation in one cancellable, atomic background operation.
   place.
 - The somas are built for the **Render** mode that is currently selected, so
   they land in the coordinate space of the visible render: depth bins in **3D
-  Heatmap** / **3D Points**, Allen layer planes in **Allen Layer Heatmap (2D
-  stack)**, and a single flat plane in **2D Heatmap** / **2D Vector**. The
+  Heatmap** / **3D Points**, selected compact planes or XY-only points in
+  **Allen Layer Heatmap**, and a single flat plane in **2D Heatmap** / **2D
+  Vector**. The
   flatmap window's display dimensionality, axis captions, and plane caption are
   preserved rather than reset.
 - **Add Soma** in Allen Layer mode needs a Parquet with `region_id` so somas can
-  be assigned to the same six layer planes. Without it the action reports the
+  be filtered to the same selected layers. Without it the action reports the
   requirement instead of falling back to depth bins, which would place the somas
-  off the six-plane stack.
+  in a different coordinate space.
 - Changing **Render**, the flatmap style, or the cache profile removes the soma
   layer, because its bin coordinates belong to the retired grid. Re-run **Add
   Soma** after switching.
@@ -327,10 +338,10 @@ version-3 augmentation in one cancellable, atomic background operation.
   surfaces, and outlines use exactly the checked terminal Allen IDs, with one
   acronym/ID-named, atlas-colored geometry layer per terminal region.
 - In **3D Heatmap** mode, cached labels use the depth grid; recomputed labels
-  also accept the active Atlas or Custom selection. In **Allen Layer Heatmap
-  (2D stack)** mode, cached labels collapse the same occupancy arrays into
-  six synchronized Allen planes. The planar mode itself needs no rebuild of a
-  format-version-2 cache, and surfaces/outlines remain unavailable in it
+  also accept the active Atlas or Custom selection. In **Allen Layer Heatmap**
+  mode, cached labels collapse the same occupancy arrays into the selected
+  compact Allen planes or one projected label image. The planar modes need no
+  rebuild of a format-version-2 cache, and surfaces/outlines remain unavailable
   because their geometry is depth-based.
 - In **2D Heatmap** and **2D Vector** modes, **Show Region Labels** builds one
   `Y bins × X bins` image named **Flatmap Region Labels 2D**, and **Show Region
@@ -345,8 +356,8 @@ version-3 augmentation in one cancellable, atomic background operation.
   cortical column into a contest between its own layers: measured on the 25 µm
   cache, 43,863 of 43,967 columns are contested and the thickest layer wins — L5
   in 53% of columns and L2/3 in 33%. That reads as a layer patchwork rather than
-  anatomy, which is why **Allen Layer Heatmap (2D stack)** exists for per-layer
-  questions.
+  anatomy, which is why **Allen Layer Heatmap** provides selectable layer stacks
+  and projections for per-layer questions.
 - Combining more than one directly selected region into a 2D overlay needs a
   loaded matching structure catalog, because the plugin has to decide which
   cached region belongs to which selection. A single selected region, and any

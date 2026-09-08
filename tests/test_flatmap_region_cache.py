@@ -297,6 +297,53 @@ def test_allen_layer_region_selection_reports_mapped_but_empty_regions(tmp_path)
     assert not np.any(result.labels)
 
 
+def test_allen_layer_region_selection_compacts_selected_stack_planes(tmp_path):
+    profile = _build_planar_cache(tmp_path / "cache")
+
+    result = materialize_allen_layer_region_selection(
+        profile,
+        [10, 11, 12],
+        style="shaped",
+        layer_map=_allen_layer_map(),
+        selected_layer_indices=[1],
+        output_mode="stack",
+    )
+
+    assert result.labels.shape == (1, 2, 2)
+    assert result.layer_labels == ("L2/3",)
+    assert result.labels[0, 0, 0] == 12
+    assert result.layer_mapped_region_ids == (12,)
+    assert result.summary.excluded_unselected_layer_region_count == 2
+    assert result.summary.excluded_non_layer_region_count == 0
+    assert result.summary.to_dict()["selected_layer_labels"] == ["L2/3"]
+    assert result.grid_spec["selected_layer_indices"] == [1]
+
+
+def test_allen_layer_region_projection_uses_majority_across_selected_layers(
+    tmp_path,
+):
+    profile = _build_planar_cache(tmp_path / "cache")
+
+    result = materialize_allen_layer_region_selection(
+        profile,
+        [10, 11, 12],
+        style="shaped",
+        layer_map=_allen_layer_map(),
+        selected_layer_indices=[0, 1],
+        output_mode="projection",
+    )
+
+    assert result.labels.shape == (2, 2)
+    # All three regions meet at this XY bin. Regions 10 and 11 have the
+    # greatest equal occupancy, so the smaller region ID wins.
+    assert result.labels[0, 0] == 10
+    assert np.count_nonzero(result.labels) == 1
+    assert result.summary.collision_bins == 1
+    assert result.summary.output_mode == "projection"
+    assert result.grid_spec["coordinate_order"] == ["y", "x"]
+    assert result.grid_spec["plane_mode"] == "allen_layer_projection"
+
+
 def _nested_structures():
     """Two single-child parents that are absent from cache occupancy."""
     return {

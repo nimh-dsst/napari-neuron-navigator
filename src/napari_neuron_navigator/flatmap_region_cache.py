@@ -26,12 +26,14 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import numpy as np
 
 from .flatmap_heatmap import (
+    ALLEN_LAYER_OUTPUT_STACK,
     DEFAULT_FLATMAP_DEPTH_BIN_UM,
     DEFAULT_FLATMAP_Y_BINS,
     DEFAULT_LOOKUP_STATS_CHUNK_VOXELS,
     _bin_flat_values,
     _depth_bin_count,
     _flatmap_valid_mask,
+    _resolve_allen_layer_render_options,
     _spatial_chunk_slices,
     compute_flatmap_lookup_stats,
     resolve_flatmap_bin_counts,
@@ -243,7 +245,7 @@ class CachedRegionSelection:
 
 @dataclass(frozen=True)
 class CachedAllenLayerRegionSelectionSummary:
-    """Counts for a region selection collapsed into Allen layer planes."""
+    """Counts for a cached Allen-layer stack or projection."""
 
     selected_region_count: int
     layer_mapped_region_count: int
@@ -251,15 +253,23 @@ class CachedAllenLayerRegionSelectionSummary:
     labeled_bins: int
     collision_bins: int
     source_voxel_count: int
-    output_shape: tuple[int, int, int]
+    output_shape: tuple[int, ...]
     layer_labels: tuple[str, ...]
+    selected_layer_indices: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
+    output_mode: str = ALLEN_LAYER_OUTPUT_STACK
+    excluded_unselected_layer_region_count: int = 0
 
     @property
     def excluded_non_layer_region_count(self) -> int:
         """Return selected IDs that do not map to an Allen layer plane."""
-        return max(0, self.selected_region_count - self.layer_mapped_region_count)
+        return max(
+            0,
+            self.selected_region_count
+            - self.layer_mapped_region_count
+            - self.excluded_unselected_layer_region_count,
+        )
 
-    def to_dict(self) -> dict[str, int | list[int] | list[str]]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "selected_region_count": int(self.selected_region_count),
             "layer_mapped_region_count": int(self.layer_mapped_region_count),
@@ -267,11 +277,20 @@ class CachedAllenLayerRegionSelectionSummary:
             "excluded_non_layer_region_count": int(
                 self.excluded_non_layer_region_count
             ),
+            "excluded_unselected_layer_region_count": int(
+                self.excluded_unselected_layer_region_count
+            ),
             "labeled_bins": int(self.labeled_bins),
             "collision_bins": int(self.collision_bins),
             "source_voxel_count": int(self.source_voxel_count),
             "output_shape": [int(size) for size in self.output_shape],
             "layer_labels": list(self.layer_labels),
+            "selected_layer_labels": list(self.layer_labels),
+            "selected_layer_indices": [
+                int(value) for value in self.selected_layer_indices
+            ],
+            "output_mode": self.output_mode,
+            "allen_layer_output_mode": self.output_mode,
         }
 
 
@@ -2937,8 +2956,10 @@ def materialize_allen_layer_region_selection(
     style: str,
     layer_map: AllenIsocortexLayerMap,
     profile_id: str | None = None,
+    selected_layer_indices: Sequence[int] | None = None,
+    output_mode: str = ALLEN_LAYER_OUTPUT_STACK,
 ) -> CachedAllenLayerRegionSelection:
-    """Collapse cached depth occupancy into categorical Allen layer labels.
+    """Collapse cached occupancy into a selected Allen stack or projection.
 
     Source-voxel counts are first summed across depth for each region and XY
     bin. Competing regions in one Allen plane use the cache's normal majority
@@ -2947,15 +2968,26 @@ def materialize_allen_layer_region_selection(
     profile = _profile_from_value(cache_or_profile, profile_id)
     style_cache = profile.style(style)
     selected = _normalise_region_ids(region_ids)
-    layer_labels = tuple(str(label) for label in layer_map.layer_labels)
-    if not layer_labels:
-        raise ValueError("Allen layer labels cannot be empty.")
+    selected_indices, layer_labels, output_mode = (
+        _resolve_allen_layer_render_options(
+            layer_map,
+            selected_layer_indices,
+            output_mode,
+        )
+    )
+    render_index_by_layer = {
+        canonical_index: render_index
+        for render_index, canonical_index in enumerate(selected_indices)
+    }
 
-    plane_count = len(layer_labels)
     depth_shape = style_cache.output_shape
     y_bins, x_bins = int(depth_shape[1]), int(depth_shape[2])
     plane_size = y_bins * x_bins
-    output_shape = (plane_count, y_bins, x_bins)
+    output_shape = (
+        (len(selected_indices), y_bins, x_bins)
+        if output_mode == ALLEN_LAYER_OUTPUT_STACK
+        else (y_bins, x_bins)
+    )
     labels = np.zeros(output_shape, dtype=np.int32)
 
     mapped: list[int] = []
@@ -2964,22 +2996,31 @@ def materialize_allen_layer_region_selection(
     pair_counts: list[np.ndarray] = []
     pair_ids: list[np.ndarray] = []
     source_voxel_count = 0
+    excluded_unselected_layer_region_count = 0
     for region_id in selected:
         raw_layer_index = layer_map.region_to_layer_index.get(region_id)
         if raw_layer_index is None:
             continue
         layer_index = int(raw_layer_index)
-        if layer_index < 0 or layer_index >= plane_count:
+        if layer_index < 0 or layer_index >= len(layer_map.layer_labels):
             raise ValueError(
                 f"Region ID {region_id} maps to invalid Allen layer index "
-                f"{layer_index}; expected 0 through {plane_count - 1}."
+                f"{layer_index}; expected 0 through {len(layer_map.layer_labels) - 1}."
             )
+        if layer_index not in render_index_by_layer:
+            excluded_unselected_layer_region_count += 1
+            continue
         mapped.append(region_id)
         collapsed = _collapsed_occupancy(style_cache, region_id, plane_size)
         if collapsed is None:
             continue
         unique_planar_bins, collapsed_counts = collapsed
-        output_bins = layer_index * plane_size + unique_planar_bins
+        if output_mode == ALLEN_LAYER_OUTPUT_STACK:
+            output_bins = (
+                render_index_by_layer[layer_index] * plane_size + unique_planar_bins
+            )
+        else:
+            output_bins = unique_planar_bins
 
         pair_bins.append(output_bins)
         pair_counts.append(collapsed_counts)
@@ -3012,11 +3053,26 @@ def materialize_allen_layer_region_selection(
         source_voxel_count=source_voxel_count,
         output_shape=output_shape,
         layer_labels=layer_labels,
+        selected_layer_indices=selected_indices,
+        output_mode=output_mode,
+        excluded_unselected_layer_region_count=(
+            excluded_unselected_layer_region_count
+        ),
     )
     grid_spec = {
-        "coordinate_order": ["allen_layer", "y", "x"],
-        "plane_mode": "allen_layers",
+        "coordinate_order": (
+            ["allen_layer", "y", "x"]
+            if output_mode == ALLEN_LAYER_OUTPUT_STACK
+            else ["y", "x"]
+        ),
+        "plane_mode": (
+            "allen_layers"
+            if output_mode == ALLEN_LAYER_OUTPUT_STACK
+            else "allen_layer_projection"
+        ),
+        "allen_layer_output_mode": output_mode,
         "layer_labels": list(layer_labels),
+        "selected_layer_indices": [int(value) for value in selected_indices],
         "y_bins": int(style_cache.grid_spec["y_bins"]),
         "x_bins": int(style_cache.grid_spec["x_bins"]),
         "x_bounds": list(style_cache.grid_spec["x_bounds"]),

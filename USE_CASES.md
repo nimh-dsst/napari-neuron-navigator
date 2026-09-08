@@ -30,7 +30,7 @@ Unless a use case says otherwise:
 | [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Not run |
 | [UC-003](#uc-003-prepare-a-whole-neuron-parquet-for-flatmap-viewing) | Append bilateral shaped/square flatmap and depth coordinates to a whole Parquet | Not run |
 | [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Passed |
-| [UC-005](#uc-005-view-an-allen-isocortex-layer-flatmap-stack) | View flatmap node counts as six Allen Isocortex layer images | Not run |
+| [UC-005](#uc-005-view-selected-allen-isocortex-layers-as-a-flatmap-projection-or-stack) | View selected Allen-layer node counts as one projection or a compact stack | Not run |
 | [UC-006](#uc-006-inspect-and-query-custom-isocortex-layer-regions) | Inspect and query exact terminal regions grouped by Isocortex layer | Not run |
 | [UC-007](#uc-007-refine-and-save-multiple-cluster-assignments) | Preserve a soma clustering and refine selected neurons with a second method | Not run |
 | [UC-008](#uc-008-create-combined-individual-and-enhanced-neuron-heatmaps) | Create combined or individual heatmaps and enhance fine projections in selected layers | Not run |
@@ -452,26 +452,26 @@ projecting meshes, or converting region coordinates while viewing.
   window. The napari 0.9 implementation now retains a macOS hide/reuse guard,
   so steps 3, 9, and 10 must be run again.
 
-### UC-005: View an Allen Isocortex Layer Flatmap Stack
+### UC-005: View Selected Allen Isocortex Layers as a Flatmap Projection or Stack
 
 **Capability**
 
-The user can view selected neuron morphology nodes as six planar flatmap
-heatmaps, one for each Allen Isocortex layer group: `L1`, `L2/3`, `L4`, `L5`,
-`L6a`, and `L6b`. Layer membership comes from each node's Allen `region_id`,
-not from a numeric flatmap-depth interval. Each image pixel is the number of
-matching nodes in that flatmap XY bin.
+The user can choose any combination of the six Allen Isocortex layer groups:
+`L1`, `L2/3`, `L4`, `L5`, `L6a`, and `L6b`. The chosen nodes can be rendered
+as a **Single 2D projection**, which sums their raw node counts by flatmap XY
+bin, or as a **2D stack** containing only the checked layers in superficial-to-
+deep order. Layer membership comes from each node's Allen `region_id`, not
+from numeric flatmap depth or SWC `type`.
 
-The six images are one napari image stack, ordered from superficial to deep.
-The default single-color mode creates one stack; the existing individual and
-cluster color modes create one six-plane stack per color group.
+All six layers and **2D stack** are selected by default, preserving the original
+six-plane behavior. Single-color mode creates one image; Individual and Cluster
+color modes create one corresponding image per `file_id` or cluster. The layer
+selection also governs **Add Soma** and cache-backed region labels so every
+visible layer uses the same coordinate space.
 
-The flatmap window's canvas names what is on screen. The plane axis is captioned
-**Allen layer**, an on-canvas line reports the layer of the plane under the
-slider, and labelled **Flatmap X** / **Flatmap Y** axis arrows show the image
-orientation. The same annotations serve the depth-binned **3D Heatmap**, where
-the plane axis is captioned **Depth bin** and the on-canvas line reports the
-plane's depth range in microns.
+A stack has an **Allen layer** plane axis and an on-canvas caption naming the
+current selected layer. A projection is a rank-2 image with only **Flatmap Y**
+and **Flatmap X** axes, with no plane slider or plane caption.
 
 The images are binned in index space, so the axis arrows name and orient the
 axes without asserting physical units or anatomical direction.
@@ -493,104 +493,85 @@ axes without asserting physical units or anatomical direction.
 
 1. **Action:** In the neuron table, select one or more rows. Open **Flatmap**,
    choose **Precomputed Parquet + Cache**, select **Both hemispheres, shaped**,
-   choose the compatible cache directory/profile, and set **Render** to
-   **Allen Layer Heatmap (2D stack)**.
-   **Expected:** **Y bins** remains available unless locked by the active
-   cache profile. **Depth bin** and **Exclude depth -1 nodes** are disabled
-   because numeric depth does not assign Allen layers. **Show Region Labels**
-   is available for the active cache, while cached surfaces and outlines
-   remain unavailable because their geometry is depth-based.
-2. **Action:** In **Regions**, choose **Atlas Regions**, select a cortical
-   parent region, return to **Flatmap**, and click **Show Region Labels**
-   before projecting neurons.
-   **Expected:** A separate **Neuron Navigator Flatmap** window opens with a label-only
-   2D stack named **Flatmap Region Labels**. It has six planes ordered `L1`,
-   `L2/3`, `L4`, `L5`, `L6a`, `L6b`, contains only the selected region's
-   terminal Allen-layer descendants, uses atlas colors, and reads only the
-   active cache arrays and structure catalog—not NRRDs or `atlas.annotation`.
-3. **Action:** Keep **Heatmap colors** at **Single color** and click **Project
-   to Flatmap**.
-   **Expected:** The flatmap window remains open and shows one image layer named
-   **Isocortex Flatmap Allen Layers**. The first-axis slider is
-   captioned **Allen layer** and the canvas names the plane the slider opened
-   on in its upper-left corner — napari starts a six-plane axis at its middle
-   position, so this reads `Allen layer: L4  (plane 3 of 6)`. Labelled
-   **Flatmap X** and **Flatmap Y** axis arrows are drawn at the image origin.
-   The existing **Flatmap Region Labels** layer remains aligned with it.
-4. **Action:** Move the first-axis slider through all six positions.
-   **Expected:** The heatmap and Labels layer change planes together, and the
-   canvas line tracks the slider through `L1`, `L2/3`, `L4`, `L5`, `L6a`, and
-   `L6b` — reading `Allen layer: L1  (plane 1 of 6)` at the first position and
-   `Allen layer: L6b  (plane 6 of 6)` at the last. Each position shows only
-   nodes and region labels assigned to that terminal Allen Isocortex layer. A
-   cortical area without layer 4 is blank in that area on the `L4` plane; it is
-   not filled by a depth estimate.
-5. **Action:** Choose **Custom Regions**, select terminal leaves from two
-   layers, and click **Show Region Labels** again.
-   **Expected:** The existing Labels layer is updated rather than duplicated.
-   Only the exact checked terminal IDs are included and each appears on its
-   mapped Allen plane; the retained Atlas Regions selection does not contribute.
-   Regions competing for one plane/XY bin use greatest source-voxel occupancy,
-   with the smaller region ID winning ties.
-6. **Action:** Compare the projection summary with an independent count of the
-   selected Parquet rows by the corresponding Allen layer region IDs.
-   **Expected:** The total rendered-node count and all six per-layer counts
-   agree. Flatmap-invalid, non-Isocortex, parent-level, unannotated, and
-   otherwise non-laminar nodes are reported as excluded and do not appear.
-7. **Action:** Repeat with **Both hemispheres, square**, **All table rows**,
+   choose the compatible cache profile, and set **Render** to **Allen Layer
+   Heatmap**.
+   **Expected:** **Allen Layer Options** appears with all six layers checked and
+   **View** set to **2D stack**. **Y bins** remains available unless cache-
+   locked. Numeric depth controls are disabled. Cached labels are available;
+   cached surfaces and outlines remain unavailable because they are depth-based.
+2. **Action:** Uncheck every layer except `L2/3` and `L5`, set **View** to
+   **Single 2D projection**, keep **Heatmap colors** at **Single color**, and
+   click **Project to Flatmap**.
+   **Expected:** **Isocortex Flatmap Allen Layer Projection** is one rank-2
+   node-count image. Every pixel equals the sum of the matching `L2/3` and `L5`
+   stack pixels. Only **Flatmap Y** and **Flatmap X** axes appear; there is no
+   plane slider or caption. The summary reports the two selected layer counts
+   and separately counts nodes excluded because their Allen layer was unchecked.
+3. **Action:** In **Regions**, select a cortical Atlas parent or Custom Region
+   leaves spanning the chosen layers, then click **Show Region Labels**.
+   **Expected:** **Flatmap Region Labels Allen Projection** is a rank-2 label
+   image aligned with the heatmap and filtered to `L2/3` and `L5`. At XY
+   collisions, greatest summed source-voxel occupancy wins and smaller region
+   ID breaks ties. It reads the active cache rather than NRRDs or
+   `atlas.annotation`.
+4. **Action:** Click **Add Soma**.
+   **Expected:** Only somas assigned by `region_id` to `L2/3` or `L5` appear,
+   as XY-only points aligned with the projection. A selection with no matching
+   soma reports that no soma mapped instead of falling back to numeric depth.
+5. **Action:** Change **View** to **2D stack**, select `L1`, `L5`, and `L6b`,
+   and project again.
+   **Expected:** The projection, soma, and label layers from the previous
+   coordinate space are removed immediately when the options change. The new
+   **Isocortex Flatmap Allen Layers** image has exactly three planes in the
+   order `L1`, `L5`, `L6b`; unchecked layers do not remain as blank planes.
+6. **Action:** Click **Show Region Labels** and **Add Soma**, then move through
+   all three planes.
+   **Expected:** Heatmap, labels, and somas use the same compact plane indices.
+   The canvas reads `Allen layer: L1  (plane 1 of 3)` through
+   `Allen layer: L6b  (plane 3 of 3)` and each plane contains only nodes and
+   regions belonging to its named Allen layer.
+7. **Action:** Compare the summary and a recomputed CSV with independent
+   `region_id` counts for the selected neurons.
+   **Expected:** Rendered and per-selected-layer counts agree. Export retains
+   canonical `allen_layer_index`/`allen_layer_label` and adds
+   `allen_layer_selected` plus compact `allen_layer_render_index`. Flatmap-
+   invalid, non-laminar, and valid but unchecked-layer nodes remain exported
+   with `render_valid == false` and are reported separately.
+8. **Action:** Use **Select All**, project the default six-plane stack, then
+   repeat both views with **Both hemispheres, square**, **All table rows**,
    **Individual neurons**, and **Cluster**.
-   **Expected:** Shaped and square stacks use their recorded canonical XY
-   grids. Input selection is respected. Individual and cluster modes create
-   one synchronized six-plane stack per neuron or cluster using existing
-   colors. Stale labels from the prior style are removed; showing them again
-   uses the new style's cache grid.
-8. **Action:** Choose **Recompute from NRRDs**, select the matching flatmap and
-   depth NRRDs, and project the same neurons.
-   **Expected:** The materialized result has the same layer assignments and
-   node-count semantics. **Export CSV...** includes `allen_layer_index` and
-   `allen_layer_label` for every classified node. Planar cached labels,
-   surfaces, and outlines are unavailable in this explicit fallback mode.
-9. **Action:** With the categorical stack on screen, click **Add Soma**.
-   **Expected:** Somas appear on the layer plane their own `region_id` assigns,
-   not on a depth bin, so moving the plane slider shows each soma only on its own
-   layer. The flatmap canvas stays in 2D and the **Allen layer** plane caption and
-   **Flatmap X** / **Flatmap Y** labels remain. UC-011 covers the soma coordinate
-   space across every render mode.
-10. **Action:** Switch **Render** back to **3D Heatmap** and project, then
-    switch to **3D Points** and project again.
-   **Expected:** The categorical stack is removed, numeric depth controls and
-   compatible cached-region actions return, and a new projection uses the
-   original depth-binned behavior. The plane axis is now captioned **Depth
-   bin** and the canvas line reports the current plane's micron range, for
-   example `Depth bin: 900-925 um  (plane 37 of 75)`. **3D Points** has no
-   plane axis, so the canvas line and axis arrows clear rather than keeping a
-   stale layer name. Any soma layer from step 9 is removed with the stack,
-   because its layer-plane coordinates do not carry over.
-11. **Action:** Retry layer rendering without a loaded atlas, then with a
-    Parquet missing `region_id`, and finally with selected neurons that have no
-    flatmap-valid terminal Isocortex-layer nodes. Also try **Show Region
-    Labels** with no active Atlas/Custom selection, a non-Isocortex-only Atlas
-    selection, and terminal layer regions with no occupancy in the active cache.
-   **Expected:** Each attempt reports a specific corrective message and does
-   not leave a blank flatmap window or a stale Labels overlay. If no valid
-   flatmap window existed, no second window is shown and the main viewer remains
-   visible and unchanged.
+   **Expected:** Select All plus stack reproduces the original six-plane
+   behavior. Shaped and square views use their recorded rectangular grids.
+   Individual grouping remains by unique `file_id`, even when `neuron_id`
+   repeats across subjects; Cluster uses the current assignment colors.
+9. **Action:** Choose **Recompute from NRRDs**, select matching lookup files,
+   and project the same layer subsets in both views.
+   **Expected:** Materialized output matches the precomputed node-count and
+   selection semantics. CSV export is available. Cache-backed labels, surfaces,
+   and outlines are unavailable in this explicit fallback mode.
+10. **Action:** Clear every Allen layer.
+    **Expected:** **Project to Flatmap**, **Add Soma**, and **Show Region
+    Labels** are disabled and the status reads **Select at least one Allen
+    layer.** Selecting any layer enables the otherwise valid actions again.
+11. **Action:** Switch **Render** to **3D Heatmap**, project, then switch to
+    **3D Points**.
+    **Expected:** Allen options hide, numeric-depth controls and compatible
+    cached actions return, and no Allen layer filter affects the depth renders.
+12. **Action:** Retry without a loaded atlas, with a Parquet missing
+    `region_id`, with no flatmap-valid nodes in the selected Allen layers, and
+    with selected regions that are either outside the chosen layers or absent
+    from the active cache.
+    **Expected:** Each attempt reports a corrective message, retains an already
+    valid render when appropriate, and leaves no blank window or stale overlay.
 
 **Manual verification**
 
 - Status: Not run
 - Last verified: Never
-- Notes: On 2026-08-11 the grid control became **Y bins** and the X bin count
-  is derived from the flat map aspect ratio, so the Allen layer stack is now
-  491 or 512 bins wide rather than square; step 1's control name and the
-  on-screen proportions both changed and are unverified.
-  The plane-name and axis-arrow annotations in steps 3, 4, and 10 were
-  added on 2026-08-05 and have not been exercised in napari. Automated tests
-  cover them against a viewer double only, which cannot show whether the
-  overlays are legible or correctly placed on the canvas. Step 9 was added on
-  2026-08-05 with the per-render-mode soma fix and has not been exercised either;
-  before that fix, **Add Soma** placed somas on depth bins and forced the canvas
-  back to 3D.
+- Notes: Selectable layers and the projection/stack choice were added on
+  2026-09-04. Automated tests cover data parity, rank, metadata, compact plane
+  indices, labels, somas, and rectangular grids, but the controls and visual
+  alignment have not yet been exercised in napari.
 
 ### UC-006: Inspect and Query Custom Isocortex Layer Regions
 
@@ -689,8 +670,9 @@ surfaces, and outlines.
     Each geometry family is replaced with one layer per terminal ID from the
     active scope. Selection changes do not rebuild flatmap layers until the
     corresponding **Show** action is clicked.
-11. **Action:** Set **Render** to **Allen Layer Heatmap (2D stack)** and click
-    **Show Region Labels**, then project neurons and move the first-axis slider.
+11. **Action:** Set **Render** to **Allen Layer Heatmap**, choose **2D stack**,
+    select the applicable layers, click **Show Region Labels**, then project
+    neurons and move the first-axis slider.
     Repeat after switching between shaped and square styles.
     **Expected:** The selected custom terminal regions appear only on their
     corresponding `L1`, `L2/3`, `L4`, `L5`, `L6a`, or `L6b` planes. The
@@ -1251,7 +1233,7 @@ projections remain visible without changing their node-count data.
    added, the existing flatmap remains usable (or no window opens on a first
    failure), and both viewers stay responsive.
 9. **Action:** In each of the five **Render** modes in turn — **3D Heatmap**, **3D
-   Points**, **2D Heatmap**, **2D Vector**, **Allen Layer Heatmap (2D stack)** —
+   Points**, **2D Heatmap**, **2D Vector**, **Allen Layer Heatmap** —
    project, then click **Add Soma**.
    **Expected:** In every mode the somas appear on the render that is on screen.
    In the two 2D modes and the Allen stack the flatmap canvas stays in 2D. In the
@@ -1262,7 +1244,7 @@ projections remain visible without changing their node-count data.
     **Expected:** The **Isocortex Flatmap Somas** layer is removed, because its
     bin coordinates belong to the previous coordinate space. **Add Soma** can be
     clicked again to rebuild it for the new mode.
-11. **Action:** With **Render** set to **Allen Layer Heatmap (2D stack)** and a
+11. **Action:** With **Render** set to **Allen Layer Heatmap** and a
     Parquet that has no `region_id` column, click **Add Soma**.
     **Expected:** The action reports that `region_id` is required and names both
     remedies (regenerate the Parquet, or switch to a depth or 2D mode). No soma
@@ -1937,6 +1919,74 @@ but no point picking or brush selection.
   accounting, and export-sidecar provenance. The 4×4 visual result, anatomical
   screen orientation, pyqtgraph navigation links, metrics-table layout, window
   close/reopen behavior, and PNG output still require this manual napari run.
+
+### UC-016: Compare Multiple Flatmap Windows Side by Side
+
+**Capability**
+
+The user can keep several complete napari flatmap viewers open at once to
+compare different neuron selections, flatmap styles, render modes, clusters, or
+display settings side by side. **Project to Flatmap** continues to update the
+newest flatmap viewer, while **Project in New Window** preserves it and renders
+into another viewer. Older viewers remain independently navigable snapshots;
+projection, soma, and cached-region controls in the plugin's **Flatmap** tab
+target the newest viewer, while **Heatmap Appearance** can target any open
+viewer.
+
+**Prerequisites**
+
+- Load a neuron Parquet with valid flatmap coordinates. For **Precomputed
+  Parquet + Cache**, use a version-3 Parquet produced by UC-003.
+- Select enough neurons or clusters to make two visibly different projections.
+- Start from a clean napari session with the **Neuron Navigator** plugin open.
+
+**Steps and expected results**
+
+1. **Action:** In **Flatmap**, choose the first neuron selection and render
+   options, then click **Project to Flatmap**.
+   **Expected:** A populated viewer named **Neuron Navigator Flatmap** appears.
+   The main napari viewer is unchanged.
+2. **Action:** Change the selection, style, or render mode, then click **Project
+   in New Window**.
+   **Expected:** Changing **Render** does not remove or alter the first viewer.
+   A second populated viewer named **Neuron Navigator Flatmap 2** appears after
+   projection. The first viewer, all of its layers, and its camera remain
+   unchanged, so the two projections can be arranged side by side.
+3. **Action:** In the plugin tab, expand **Heatmap Appearance**, choose each
+   viewer in **Window**, and select one or more of that viewer's heatmaps. Apply
+   **Enhance Fine Projections** or **Reset Gamma**. Then use **Add Soma** or a
+   cached region action.
+   **Expected:** The heatmap list changes to show only the selected window's
+   heatmaps, and the gamma action changes only the selected layers in that
+   window. Returning to a window restores its heatmap selection. **Add Soma**
+   and cached region actions continue to change only the newest flatmap viewer.
+4. **Action:** Move the plane slider and camera independently in both flatmap
+   viewers.
+   **Expected:** Each viewer keeps its own dimensions and camera. Its on-canvas
+   depth or Allen-layer caption follows that viewer's slider independently.
+5. **Action:** Close the older viewer, leaving the newest open, then click
+   **Project in New Window** again with another configuration.
+   **Expected:** Closing the older viewer does not close or modify the newest
+   viewer. The next successful projection opens another independently tracked
+   flatmap viewer without exposing a blank window.
+6. **Action:** Cause a validation error while using **Project in New Window**,
+   such as selecting an incompatible input or render option.
+   **Expected:** The failed target is never shown as an empty viewer. Every
+   already populated comparison viewer remains open and unchanged, and the
+   status reports the corrective error.
+
+**Manual verification**
+
+- Status: Partially run — render-mode transition and native stability confirmed
+- Last verified: 2026-09-08
+- Notes: Manually confirmed on a MacBook Pro with an M3 chip that changing
+  **Render** after creating the initial flatmap window no longer shuts down
+  napari. Automated tests cover retaining two populated viewers, active-viewer
+  scoping, per-window heatmap selection and gamma changes, independent plane
+  captions, retiring an older closed viewer without changing the active viewer,
+  stale-render generation guards, preserving a scene while **Render** changes,
+  and deferring incompatible GPU-layer removal outside Qt selection events. The
+  remaining UC-016 steps have not been manually run.
 
 ## Use-Case Template
 

@@ -852,9 +852,12 @@ class _FlatmapTab:
 def _flatmap_window_widget(main_viewer=None):
     widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
     widget.viewer = main_viewer or types.SimpleNamespace(layers=[])
+    widget._flatmap_viewers = []
     widget._flatmap_viewer = None
     widget._flatmap_viewer_pending_show = False
     widget._flatmap_viewer_generation = 0
+    widget._flatmap_viewer_serial = 0
+    widget._flatmap_hidden_viewer_ids = set()
     widget._flatmap_viewer_watch_timer = None
     widget._flatmap_close_guards = {}
     widget._flatmap_tab = _FlatmapTab()
@@ -898,6 +901,99 @@ def test_flatmap_display_provider_creates_hidden_secondary_viewer(
         "_stop_flatmap_status_thread",
     ):
         assert not hasattr(NeuronViewerWidget, obsolete_method)
+
+
+def test_flatmap_display_provider_keeps_two_windows_for_side_by_side_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    widget = _flatmap_window_widget()
+    created = []
+
+    def create_viewer(**kwargs):
+        viewer = _FlatmapViewer(**kwargs)
+        created.append(viewer)
+        return viewer
+
+    monkeypatch.setitem(
+        sys.modules, "napari", types.SimpleNamespace(Viewer=create_viewer)
+    )
+
+    first = widget._get_or_create_flatmap_viewer(create=True)
+    first_layer = _scene_layer("first", flatmap=True)
+    first.layers.append(first_layer)
+    widget._on_flatmap_display_viewer_ready(first, first_layer)
+
+    second = widget._create_new_flatmap_viewer()
+    second_layer = _scene_layer("second", flatmap=True)
+    second.layers.append(second_layer)
+    widget._on_flatmap_display_viewer_ready(second, second_layer)
+
+    assert created == [first, second]
+    assert first.title == "Neuron Navigator Flatmap"
+    assert second.title == "Neuron Navigator Flatmap 2"
+    assert first.layers == [first_layer]
+    assert second.layers == [second_layer]
+    assert first.show_calls == 1
+    assert second.show_calls == 1
+    assert widget._flatmap_viewers == [first, second]
+    assert widget._get_or_create_flatmap_viewer(create=False) is second
+
+
+def test_selectable_flatmap_viewers_excludes_hidden_and_pending_windows() -> None:
+    widget = _flatmap_window_widget()
+    first = _FlatmapViewer(
+        title="Neuron Navigator Flatmap",
+        ndisplay=3,
+        show=False,
+    )
+    hidden = _FlatmapViewer(
+        title="Neuron Navigator Flatmap 2",
+        ndisplay=3,
+        show=False,
+    )
+    pending = _FlatmapViewer(
+        title="Neuron Navigator Flatmap 3",
+        ndisplay=3,
+        show=False,
+    )
+    widget._flatmap_viewers = [first, hidden, pending]
+    widget._flatmap_viewer = pending
+    widget._flatmap_viewer_pending_show = True
+    widget._flatmap_hidden_viewer_ids = {id(hidden)}
+    widget._retire_closed_flatmap_viewers = lambda: pytest.fail(
+        "the selector provider must not re-enter window retirement"
+    )
+
+    assert widget._selectable_flatmap_viewers() == (first,)
+
+    widget._flatmap_viewer_pending_show = False
+
+    assert widget._selectable_flatmap_viewers() == (first, pending)
+
+
+def test_closing_older_flatmap_window_does_not_change_active_window() -> None:
+    widget = _flatmap_window_widget()
+    first = _FlatmapViewer(
+        title="Neuron Navigator Flatmap",
+        ndisplay=3,
+        show=False,
+    )
+    second = _FlatmapViewer(
+        title="Neuron Navigator Flatmap 2",
+        ndisplay=3,
+        show=False,
+    )
+    widget._flatmap_viewers = [first, second]
+    widget._flatmap_viewer = second
+    generation = widget._flatmap_viewer_generation
+    first.window.open = False
+
+    assert widget._retire_closed_flatmap_viewers() is True
+
+    assert widget._flatmap_viewers == [second]
+    assert widget._flatmap_viewer is second
+    assert widget._flatmap_viewer_generation == generation
+    assert widget._flatmap_tab.released == [first]
 
 
 def test_flatmap_viewer_shows_only_after_marked_layer_is_ready() -> None:
@@ -965,6 +1061,39 @@ def test_failed_first_render_closes_window_but_failed_rerender_keeps_it() -> Non
 
     assert replacement.close_calls == 0
     assert widget._flatmap_viewer is replacement
+
+
+def test_failed_new_comparison_window_preserves_previous_viewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    widget = _flatmap_window_widget()
+    first = _FlatmapViewer(
+        title="Neuron Navigator Flatmap",
+        ndisplay=3,
+        show=False,
+    )
+    first_layer = _scene_layer("first", flatmap=True)
+    first.layers.append(first_layer)
+    widget._flatmap_viewers = [first]
+    widget._flatmap_viewer = first
+    created = []
+
+    def create_viewer(**kwargs):
+        viewer = _FlatmapViewer(**kwargs)
+        created.append(viewer)
+        return viewer
+
+    monkeypatch.setitem(
+        sys.modules, "napari", types.SimpleNamespace(Viewer=create_viewer)
+    )
+
+    failed = widget._create_new_flatmap_viewer()
+    widget._on_flatmap_display_viewer_failed(failed, "projection_failed")
+
+    assert failed.close_calls == 1
+    assert first.layers == [first_layer]
+    assert widget._flatmap_viewers == [first]
+    assert widget._flatmap_viewer is first
 
 
 def test_close_flatmap_viewer_uses_public_close_off_macos_and_invalidates_generation(
@@ -1056,6 +1185,55 @@ def test_macos_window_close_event_uses_the_same_hide_path(
     assert viewer.close_calls == 0
     assert widget._flatmap_viewer is viewer
     assert widget._flatmap_viewer_pending_show is True
+
+
+def test_macos_close_event_can_hide_an_older_comparison_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CloseEvent:
+        def __init__(self) -> None:
+            self.ignored = False
+
+        def type(self):
+            return _FakeQEvent.Type.Close
+
+        def ignore(self) -> None:
+            self.ignored = True
+
+    method_globals = NeuronViewerWidget._close_flatmap_viewer.__globals__
+    monkeypatch.setitem(method_globals, "_IS_MACOS", True)
+    widget = _flatmap_window_widget()
+    first = _FlatmapViewer(
+        title="Neuron Navigator Flatmap",
+        ndisplay=3,
+        show=False,
+    )
+    second = _FlatmapViewer(
+        title="Neuron Navigator Flatmap 2",
+        ndisplay=3,
+        show=False,
+    )
+    first_layer = _scene_layer("first", flatmap=True)
+    second_layer = _scene_layer("second", flatmap=True)
+    first.layers.append(first_layer)
+    second.layers.append(second_layer)
+    widget._flatmap_viewers = [first, second]
+    widget._flatmap_viewer = second
+    widget._install_flatmap_macos_close_guard(first)
+    event = _CloseEvent()
+
+    consumed = first.window._qt_window.installed_filters[0].eventFilter(
+        first.window._qt_window,
+        event,
+    )
+
+    assert consumed is True
+    assert event.ignored is True
+    assert first.window._qt_window.hidden is True
+    assert first.layers == []
+    assert second.layers == [second_layer]
+    assert widget._flatmap_viewer is second
+    assert widget._flatmap_viewer_pending_show is False
 
 
 def test_macos_fullscreen_close_exits_fullscreen_before_hiding(

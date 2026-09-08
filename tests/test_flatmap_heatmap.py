@@ -6,6 +6,8 @@ import pandas as pd
 import pytest
 
 from napari_neuron_navigator.flatmap_heatmap import (
+    ALLEN_LAYER_OUTPUT_PROJECTION,
+    ALLEN_LAYER_OUTPUT_STACK,
     FLATMAP_HEATMAP_COLOR_CLUSTER,
     FLATMAP_HEATMAP_COLOR_INDIVIDUAL,
     FLATMAP_HEATMAP_COLOR_SINGLE,
@@ -14,6 +16,7 @@ from napari_neuron_navigator.flatmap_heatmap import (
     build_allen_layer_cluster_volumes,
     build_allen_layer_file_id_volumes,
     build_allen_layer_heatmap_volume_result,
+    build_allen_layer_render_from_projected_nodes,
     build_allen_layer_stack_from_projected_nodes,
     build_flatmap_cluster_volumes,
     build_flatmap_file_id_volumes,
@@ -727,6 +730,83 @@ def test_build_allen_layer_stack_counts_and_excludes_nodes() -> None:
     assert result.projected_nodes["render_valid"].sum() == 6
 
 
+def test_selected_allen_layers_build_compact_stack_and_exact_projection() -> None:
+    stack = build_allen_layer_render_from_projected_nodes(
+        _allen_layer_nodes(),
+        _allen_layer_map(),
+        y_bins=10,
+        x_bounds=(0.0, 10.0),
+        y_bounds=(0.0, 10.0),
+        selected_layer_indices=[4, 1, 4],
+        output_mode=ALLEN_LAYER_OUTPUT_STACK,
+    )
+    projection = build_allen_layer_render_from_projected_nodes(
+        _allen_layer_nodes(),
+        _allen_layer_map(),
+        y_bins=10,
+        x_bounds=(0.0, 10.0),
+        y_bounds=(0.0, 10.0),
+        selected_layer_indices=[1, 4],
+        output_mode=ALLEN_LAYER_OUTPUT_PROJECTION,
+    )
+
+    assert stack.volume.shape == (2, 10, 10)
+    assert stack.summary.selected_layer_indices == (1, 4)
+    assert stack.summary.layer_labels == ("L2/3", "L6a")
+    assert stack.summary.layer_node_counts == (1, 1)
+    assert stack.summary.excluded_unselected_layer_nodes == 4
+    assert stack.summary.excluded_non_layer_nodes == 1
+    assert stack.summary.invalid_flatmap_nodes == 1
+    assert stack.summary.excluded_nodes == 6
+    assert stack.summary.output_shape == stack.volume.shape
+    assert stack.summary.to_dict()["selected_layer_labels"] == ["L2/3", "L6a"]
+    assert stack.summary.to_dict()["output_mode"] == "stack"
+    assert projection.volume.shape == (10, 10)
+    np.testing.assert_array_equal(projection.volume, stack.volume.sum(axis=0))
+
+    table = stack.projected_nodes
+    assert table.loc[table["allen_layer_index"] == 1, "allen_layer_selected"].all()
+    assert table.loc[table["allen_layer_index"] == 4, "allen_layer_selected"].all()
+    assert set(
+        table.loc[table["render_valid"], "allen_layer_render_index"].tolist()
+    ) == {0, 1}
+    assert not table.loc[table["allen_layer_index"] == 0, "render_valid"].any()
+
+
+def test_selected_allen_layer_render_rejects_an_empty_selection() -> None:
+    with pytest.raises(ValueError, match="Select at least one Allen layer"):
+        build_allen_layer_render_from_projected_nodes(
+            _allen_layer_nodes(),
+            _allen_layer_map(),
+            y_bins=10,
+            x_bounds=(0.0, 10.0),
+            y_bounds=(0.0, 10.0),
+            selected_layer_indices=[],
+        )
+
+
+def test_projected_allen_individual_groups_stay_separated_by_file_id() -> None:
+    nodes = _allen_layer_nodes().iloc[:3].copy()
+    nodes["neuron_id"] = "duplicate-display-id"
+    result = build_allen_layer_render_from_projected_nodes(
+        nodes,
+        _allen_layer_map(),
+        y_bins=10,
+        x_bounds=(0.0, 10.0),
+        y_bounds=(0.0, 10.0),
+        selected_layer_indices=[0, 1],
+        output_mode=ALLEN_LAYER_OUTPUT_PROJECTION,
+    )
+
+    groups = build_allen_layer_file_id_volumes(
+        result.projected_nodes,
+        result.volume.shape,
+    )
+
+    assert [group.group_key for group in groups] == ["a.swc", "b.swc"]
+    assert [group.rendered_nodes for group in groups] == [2, 1]
+
+
 def test_allen_layer_grouped_volumes_preserve_counts() -> None:
     result = build_allen_layer_stack_from_projected_nodes(
         _allen_layer_nodes(),
@@ -1222,6 +1302,83 @@ def test_duckdb_allen_layer_stack_matches_pandas(tmp_path) -> None:
     )
     for grouped in (individual, cluster):
         combined = np.zeros(grouped.volume_shape, dtype=np.float32)
+        for group in grouped.grouped_volumes:
+            combined += group.volume
+        np.testing.assert_array_equal(combined, reference.volume)
+
+
+@pytest.mark.parametrize(
+    "output_mode",
+    [ALLEN_LAYER_OUTPUT_STACK, ALLEN_LAYER_OUTPUT_PROJECTION],
+)
+def test_duckdb_selected_allen_layers_match_pandas_for_all_color_modes(
+    tmp_path,
+    output_mode,
+) -> None:
+    frame = _v3_flatmap_frame(n=600)
+    frame["region_id"] = np.resize(
+        np.asarray([101, 102, 103, 104, 105, 106, 999]),
+        len(frame),
+    )
+    path = tmp_path / f"selected_allen_{output_mode}.parquet"
+    frame.to_parquet(path, index=False)
+    layer_map = _allen_layer_map()
+    projected = pd.DataFrame(
+        {
+            "file_id": frame["file_id"],
+            "x_flat": frame["x_flat_shaped"],
+            "y_flat": frame["y_flat_shaped"],
+            "flatmap_valid": frame["flatmap_shaped_valid"],
+            "region_id": frame["region_id"],
+        }
+    )
+    selected_indices = (1, 4)
+    reference = build_allen_layer_render_from_projected_nodes(
+        projected,
+        layer_map,
+        y_bins=20,
+        x_bounds=(0.0, 118.0),
+        y_bounds=(0.0, 88.0),
+        selected_layer_indices=selected_indices,
+        output_mode=output_mode,
+    )
+
+    conn = duckdb.connect()
+    try:
+        results = [
+            build_allen_layer_heatmap_volume_result(
+                conn,
+                str(path),
+                style_key="both_shaped",
+                color_mode=color_mode,
+                layer_map=layer_map,
+                x_bounds=(0.0, 118.0),
+                y_bounds=(0.0, 88.0),
+                y_bins=20,
+                selected_layer_indices=selected_indices,
+                output_mode=output_mode,
+                cluster_map={
+                    f"neuron_{index}": index % 2 for index in range(6)
+                },
+            )
+            for color_mode in (
+                FLATMAP_HEATMAP_COLOR_SINGLE,
+                FLATMAP_HEATMAP_COLOR_INDIVIDUAL,
+                FLATMAP_HEATMAP_COLOR_CLUSTER,
+            )
+        ]
+    finally:
+        conn.close()
+
+    single, *grouped_results = results
+    np.testing.assert_array_equal(single.volume, reference.volume)
+    assert single.summary.selected_layer_indices == selected_indices
+    assert single.summary.layer_labels == ("L2/3", "L6a")
+    assert single.summary.excluded_unselected_layer_nodes == (
+        reference.summary.excluded_unselected_layer_nodes
+    )
+    for grouped in grouped_results:
+        combined = np.zeros(reference.volume.shape, dtype=np.float32)
         for group in grouped.grouped_volumes:
             combined += group.volume
         np.testing.assert_array_equal(combined, reference.volume)
