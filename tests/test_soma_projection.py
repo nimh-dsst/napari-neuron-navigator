@@ -939,6 +939,38 @@ def test_flatmap_display_provider_keeps_two_windows_for_side_by_side_comparison(
     assert widget._get_or_create_flatmap_viewer(create=False) is second
 
 
+def test_selectable_flatmap_viewers_excludes_hidden_and_pending_windows() -> None:
+    widget = _flatmap_window_widget()
+    first = _FlatmapViewer(
+        title="Neuron Navigator Flatmap",
+        ndisplay=3,
+        show=False,
+    )
+    hidden = _FlatmapViewer(
+        title="Neuron Navigator Flatmap 2",
+        ndisplay=3,
+        show=False,
+    )
+    pending = _FlatmapViewer(
+        title="Neuron Navigator Flatmap 3",
+        ndisplay=3,
+        show=False,
+    )
+    widget._flatmap_viewers = [first, hidden, pending]
+    widget._flatmap_viewer = pending
+    widget._flatmap_viewer_pending_show = True
+    widget._flatmap_hidden_viewer_ids = {id(hidden)}
+    widget._retire_closed_flatmap_viewers = lambda: pytest.fail(
+        "the selector provider must not re-enter window retirement"
+    )
+
+    assert widget._selectable_flatmap_viewers() == (first,)
+
+    widget._flatmap_viewer_pending_show = False
+
+    assert widget._selectable_flatmap_viewers() == (first, pending)
+
+
 def test_closing_older_flatmap_window_does_not_change_active_window() -> None:
     widget = _flatmap_window_widget()
     first = _FlatmapViewer(

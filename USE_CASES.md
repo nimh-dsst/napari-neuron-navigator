@@ -1929,7 +1929,9 @@ compare different neuron selections, flatmap styles, render modes, clusters, or
 display settings side by side. **Project to Flatmap** continues to update the
 newest flatmap viewer, while **Project in New Window** preserves it and renders
 into another viewer. Older viewers remain independently navigable snapshots;
-the controls in the plugin's **Flatmap** tab target the newest viewer.
+projection, soma, and cached-region controls in the plugin's **Flatmap** tab
+target the newest viewer, while **Heatmap Appearance** can target any open
+viewer.
 
 **Prerequisites**
 
@@ -1946,13 +1948,18 @@ the controls in the plugin's **Flatmap** tab target the newest viewer.
    The main napari viewer is unchanged.
 2. **Action:** Change the selection, style, or render mode, then click **Project
    in New Window**.
-   **Expected:** A second populated viewer named **Neuron Navigator Flatmap 2**
-   appears. The first viewer, all of its layers, and its camera remain unchanged,
-   so the two projections can be arranged side by side.
-3. **Action:** In the plugin tab, use **Add Soma**, cached region actions, or
-   **Heatmap Appearance** where those controls apply.
-   **Expected:** The action changes only the newest flatmap viewer. It does not
-   add, remove, or restyle layers in the older comparison viewer.
+   **Expected:** Changing **Render** does not remove or alter the first viewer.
+   A second populated viewer named **Neuron Navigator Flatmap 2** appears after
+   projection. The first viewer, all of its layers, and its camera remain
+   unchanged, so the two projections can be arranged side by side.
+3. **Action:** In the plugin tab, expand **Heatmap Appearance**, choose each
+   viewer in **Window**, and select one or more of that viewer's heatmaps. Apply
+   **Enhance Fine Projections** or **Reset Gamma**. Then use **Add Soma** or a
+   cached region action.
+   **Expected:** The heatmap list changes to show only the selected window's
+   heatmaps, and the gamma action changes only the selected layers in that
+   window. Returning to a window restores its heatmap selection. **Add Soma**
+   and cached region actions continue to change only the newest flatmap viewer.
 4. **Action:** Move the plane slider and camera independently in both flatmap
    viewers.
    **Expected:** Each viewer keeps its own dimensions and camera. Its on-canvas
@@ -1970,13 +1977,16 @@ the controls in the plugin's **Flatmap** tab target the newest viewer.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: Added on 2026-09-08. Automated tests cover retaining two populated
-  viewers, active-viewer scoping, independent plane captions, retiring an older
-  closed viewer without changing the active viewer, and stale-render generation
-  guards. Side-by-side layout and native window behavior still require this
-  manual napari run.
+- Status: Partially run — render-mode transition and native stability confirmed
+- Last verified: 2026-09-08
+- Notes: Manually confirmed on a MacBook Pro with an M3 chip that changing
+  **Render** after creating the initial flatmap window no longer shuts down
+  napari. Automated tests cover retaining two populated viewers, active-viewer
+  scoping, per-window heatmap selection and gamma changes, independent plane
+  captions, retiring an older closed viewer without changing the active viewer,
+  stale-render generation guards, preserving a scene while **Render** changes,
+  and deferring incompatible GPU-layer removal outside Qt selection events. The
+  remaining UC-016 steps have not been manually run.
 
 ## Use-Case Template
 

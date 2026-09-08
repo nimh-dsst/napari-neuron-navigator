@@ -70,8 +70,9 @@ flatmap viewer is created hidden, populated, and then shown, so a long-running
 calculation does not expose a blank second window. Re-projecting reuses the open
 flatmap viewer. Use **Project in New Window** to preserve the current flatmap and
 render another one for side-by-side comparison. Flatmap controls such as **Add
-Soma**, cached region overlays, and heatmap appearance operate on the newest
-window; older comparison windows remain independently navigable. Selecting
+Soma** and cached region overlays operate on the newest window. In **Heatmap
+Appearance**, use **Window** to list and adjust heatmaps from any open flatmap
+viewer. Older comparison windows remain independently navigable. Selecting
 another plugin tab leaves every window available.
 
 Use the flatmap window's operating-system close control to discard its transient

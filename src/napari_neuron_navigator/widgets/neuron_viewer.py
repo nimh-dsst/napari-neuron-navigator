@@ -939,11 +939,6 @@ class NeuronViewerWidget(QWidget):
         if not any(candidate is viewer for candidate in managed):
             return False
 
-        flatmap_tab = getattr(self, "_flatmap_tab", None)
-        release = getattr(flatmap_tab, "_release_display_viewer", None)
-        if callable(release):
-            release(viewer)
-
         self._remove_flatmap_macos_close_guard(viewer)
         managed[:] = [candidate for candidate in managed if candidate is not viewer]
         hidden_ids = getattr(self, "_flatmap_hidden_viewer_ids", None)
@@ -961,6 +956,11 @@ class NeuronViewerWidget(QWidget):
             self._flatmap_viewer_generation = (
                 int(getattr(self, "_flatmap_viewer_generation", 0)) + 1
             )
+
+        flatmap_tab = getattr(self, "_flatmap_tab", None)
+        release = getattr(flatmap_tab, "_release_display_viewer", None)
+        if callable(release):
+            release(viewer)
 
         if close:
             self._close_flatmap_viewer_now(viewer)
@@ -990,6 +990,18 @@ class NeuronViewerWidget(QWidget):
     def _retire_closed_flatmap_viewer(self) -> bool:
         """Compatibility wrapper for the former single-viewer lifecycle."""
         return self._retire_closed_flatmap_viewers()
+
+    def _selectable_flatmap_viewers(self) -> tuple[object, ...]:
+        """Return populated, visible flatmap viewers in creation order."""
+        managed = getattr(self, "_flatmap_viewers", ())
+        hidden_ids = getattr(self, "_flatmap_hidden_viewer_ids", set())
+        active = getattr(self, "_flatmap_viewer", None)
+        pending = bool(getattr(self, "_flatmap_viewer_pending_show", False))
+        return tuple(
+            viewer
+            for viewer in managed
+            if id(viewer) not in hidden_ids and not (viewer is active and pending)
+        )
 
     def _get_or_create_flatmap_viewer(
         self,
@@ -1185,6 +1197,7 @@ class NeuronViewerWidget(QWidget):
                 selected_region_error_provider=self._active_flatmap_region_error,
                 region_appearance_provider=self._region_appearance_store,
                 display_viewer_provider=self._get_or_create_flatmap_viewer,
+                display_viewers_provider=self._selectable_flatmap_viewers,
                 new_display_viewer_callback=self._create_new_flatmap_viewer,
                 display_viewer_ready_callback=(self._on_flatmap_display_viewer_ready),
                 display_viewer_failed_callback=(self._on_flatmap_display_viewer_failed),

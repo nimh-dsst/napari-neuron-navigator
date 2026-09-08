@@ -226,6 +226,42 @@ class _DummyDataCombo:
         self.enabled = bool(enabled)
 
 
+class _DummyWindowCombo:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, object]] = []
+        self.index = -1
+        self.enabled = True
+        self.signals_blocked = False
+
+    def blockSignals(self, blocked: bool) -> bool:
+        previous = self.signals_blocked
+        self.signals_blocked = bool(blocked)
+        return previous
+
+    def clear(self) -> None:
+        self.items.clear()
+        self.index = -1
+
+    def addItem(self, label: str, data) -> None:
+        self.items.append((str(label), data))
+        self.index = max(self.index, 0)
+
+    def findData(self, data) -> int:
+        return next(
+            (index for index, item in enumerate(self.items) if item[1] == data),
+            -1,
+        )
+
+    def setCurrentIndex(self, index: int) -> None:
+        self.index = int(index)
+
+    def currentData(self):
+        return self.items[self.index][1] if self.index >= 0 else None
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+
+
 class _DummyLayer:
     def __init__(self, data, **kwargs) -> None:
         # Kept verbatim so a test can assert what was and was not passed at
@@ -1933,12 +1969,76 @@ def test_render_mode_change_removes_a_stale_soma_layer(monkeypatch) -> None:
     widget._render_mode_combo = types.SimpleNamespace(
         currentData=lambda: module._RENDER_FLAT_HEATMAP
     )
+    queued = []
+    widget._queue_gui_callback = queued.append
 
     widget._on_render_mode_changed()
 
-    # Depth-bin soma coordinates are meaningless in the new 2D space.
-    assert layer not in widget._viewer.layers
+    # Choosing settings for a possible new comparison window must leave the
+    # displayed depth-bin scene alone.
+    assert layer in widget._viewer.layers
+    assert layer.visible is True
+    assert widget._soma_layer is layer
+    assert widget._flatmap_render_mode_change_pending is True
+    assert queued == []
+
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    started = []
+    widget._start_precomputed_heatmap_worker = lambda: started.append(True)
+    widget._project()
+
+    # Re-projecting into this same viewer retires the stale grid safely.
+    assert layer.visible is False
     assert widget._soma_layer is None
+    assert len(queued) == 1
+    assert started == [True]
+
+    queued[0]()
+
+    assert layer not in widget._viewer.layers
+
+
+def test_render_mode_change_defers_gpu_layer_removal(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    layer = widget._viewer.add_image(
+        np.ones((2, 2)),
+        name=module._FLAT_HEATMAP_LAYER_NAME,
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    widget._projection_layer = layer
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    widget._update_render_mode_controls = lambda: None
+    widget._update_cached_region_controls = lambda: None
+    widget._notify_flatmap_correlation_source_changed = lambda: None
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    queued = []
+    widget._queue_gui_callback = queued.append
+
+    widget._on_render_mode_changed()
+
+    assert layer in widget._viewer.layers
+    assert layer.visible is True
+    assert widget._projection_layer is layer
+    assert widget._flatmap_render_mode_change_pending is True
+    assert queued == []
+
+    started = []
+    widget._start_precomputed_heatmap_worker = lambda: started.append(True)
+    widget._project()
+
+    assert layer.visible is False
+    assert widget._projection_layer is None
+    assert len(queued) == 1
+    assert started == [True]
+
+    queued[0]()
+
+    assert layer not in widget._viewer.layers
 
 
 def test_add_soma_without_soma_nodes_reports_and_adds_no_layer(
@@ -2689,6 +2789,50 @@ def test_project_in_new_window_activates_new_viewer_before_fast_worker(
     assert widget._last_display_viewer is second
 
 
+def test_project_in_new_window_preserves_scene_after_render_mode_change(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    old_layer = first.add_image(
+        np.ones((2, 2)),
+        name=module._FLAT_HEATMAP_LAYER_NAME,
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    second = _DummyViewer()
+    active = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+
+    def activate_second():
+        active["viewer"] = second
+        return second
+
+    widget._new_display_viewer_callback = activate_second
+    widget._last_display_viewer = first
+    widget._projection_layer = old_layer
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._flatmap_render_mode_change_pending = True
+    widget._queue_gui_callback = lambda _callback: pytest.fail(
+        "a new comparison window must not retire the old scene"
+    )
+    started_in = []
+    widget._start_precomputed_heatmap_worker = lambda: started_in.append(
+        widget._current_display_viewer()
+    )
+
+    widget._project(new_window=True)
+
+    assert first.layers == [old_layer]
+    assert old_layer.visible is True
+    assert second.layers == []
+    assert started_in == [second]
+    assert widget._flatmap_render_mode_change_pending is False
+
+
 def test_flatmap_heatmap_selector_lists_only_gamma_adjustable_heatmaps(
     monkeypatch,
 ) -> None:
@@ -2809,6 +2953,134 @@ def test_flatmap_heatmap_gamma_controls_disable_without_selection(monkeypatch) -
     assert widget._flatmap_heatmap_gamma_status_label.text == (
         "Select at least one flatmap heatmap layer."
     )
+
+
+def test_flatmap_heatmap_window_selector_scopes_layers_and_gamma(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    first.title = "Neuron Navigator Flatmap"
+    first_heatmap = first.add_image(
+        np.ones((2, 2)),
+        name="First window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    second = _DummyViewer()
+    second.title = "Neuron Navigator Flatmap 2"
+    second_heatmap = second.add_image(
+        np.ones((2, 2)),
+        name="Second window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    active = {"viewer": second}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+    widget._display_viewers_provider = lambda: (first, second)
+    widget._last_display_viewer = second
+    widget._flatmap_heatmap_window_combo = _DummyWindowCombo()
+    widget._flatmap_heatmap_layer_list = _DummyListWidget()
+    widget._flatmap_heatmap_gamma_status_label = _DummyLabel()
+    widget._flatmap_enhance_fine_projections_btn = _DummyButton()
+    widget._flatmap_reset_gamma_btn = _DummyButton()
+
+    widget._refresh_flatmap_heatmap_layer_list()
+
+    assert [label for label, _data in widget._flatmap_heatmap_window_combo.items] == [
+        "Neuron Navigator Flatmap",
+        "Neuron Navigator Flatmap 2",
+    ]
+    assert widget._flatmap_heatmap_window_combo.index == 1
+    assert [item.text() for item in widget._flatmap_heatmap_layer_list.items] == [
+        "Second window heatmap"
+    ]
+
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(0)
+    widget._on_flatmap_heatmap_window_changed(0)
+    widget._flatmap_heatmap_layer_list.item(0).setSelected(True)
+    widget._enhance_selected_flatmap_heatmap_projections()
+
+    assert first_heatmap.gamma == pytest.approx(0.2)
+    assert second_heatmap.gamma == pytest.approx(1.0)
+
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(1)
+    widget._on_flatmap_heatmap_window_changed(1)
+    assert [item.text() for item in widget._flatmap_heatmap_layer_list.items] == [
+        "Second window heatmap"
+    ]
+    assert widget._flatmap_heatmap_layer_list.selectedItems() == []
+
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(0)
+    widget._on_flatmap_heatmap_window_changed(0)
+    assert [
+        item.text() for item in widget._flatmap_heatmap_layer_list.selectedItems()
+    ] == ["First window heatmap"]
+
+
+def test_flatmap_heatmap_window_selector_drops_closed_window(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    first.title = "Neuron Navigator Flatmap"
+    first.add_image(
+        np.ones((2, 2)),
+        name="First window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    second = _DummyViewer()
+    second.title = "Neuron Navigator Flatmap 2"
+    second.add_image(
+        np.ones((2, 2)),
+        name="Second window heatmap",
+        metadata={"flatmap_render_mode": module._RENDER_FLAT_HEATMAP},
+    )
+    viewers = [first, second]
+    widget._display_viewer_provider = lambda create=True: second
+    widget._display_viewers_provider = lambda: tuple(viewers)
+    widget._flatmap_heatmap_window_combo = _DummyWindowCombo()
+    widget._flatmap_heatmap_layer_list = _DummyListWidget()
+    widget._flatmap_heatmap_gamma_status_label = _DummyLabel()
+    widget._flatmap_enhance_fine_projections_btn = _DummyButton()
+    widget._flatmap_reset_gamma_btn = _DummyButton()
+
+    widget._refresh_flatmap_heatmap_layer_list()
+    widget._flatmap_heatmap_window_combo.setCurrentIndex(0)
+    widget._on_flatmap_heatmap_window_changed(0)
+    viewers.remove(first)
+    widget._refresh_flatmap_heatmap_layer_list()
+
+    assert [label for label, _data in widget._flatmap_heatmap_window_combo.items] == [
+        "Neuron Navigator Flatmap 2"
+    ]
+    assert [item.text() for item in widget._flatmap_heatmap_layer_list.items] == [
+        "Second window heatmap"
+    ]
+
+    viewers.clear()
+    widget._refresh_flatmap_heatmap_layer_list()
+
+    assert widget._flatmap_heatmap_window_combo.items == []
+    assert widget._flatmap_heatmap_window_combo.enabled is False
+    assert widget._flatmap_heatmap_layer_list.items == []
+
+
+def test_flatmap_layer_events_defer_and_coalesce_selector_refresh(monkeypatch) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._flatmap_heatmap_refresh_pending = False
+    queued = []
+    refreshed = []
+    widget._queue_gui_callback = queued.append
+    widget._refresh_flatmap_heatmap_layer_list = lambda: refreshed.append(True)
+
+    widget._on_flatmap_display_layers_changed()
+    widget._on_flatmap_display_layers_changed()
+
+    assert len(queued) == 1
+    assert refreshed == []
+
+    queued[0]()
+
+    assert refreshed == [True]
+    assert widget._flatmap_heatmap_refresh_pending is False
 
 
 def _simple_projection_summary(module, total_nodes: int = 1):

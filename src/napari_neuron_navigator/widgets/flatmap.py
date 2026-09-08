@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from time import perf_counter
 from types import MethodType
@@ -235,6 +235,7 @@ class FlatmapProjectionWidget(QWidget):
         selected_region_error_provider: Callable[[], str | None] | None = None,
         region_appearance_provider: Callable[[], RegionAppearanceStore] | None = None,
         display_viewer_provider: Callable[..., object | None] | None = None,
+        display_viewers_provider: Callable[[], Iterable[object]] | None = None,
         new_display_viewer_callback: Callable[[], object | None] | None = None,
         display_viewer_ready_callback: Callable[[object, object], None] | None = None,
         display_viewer_failed_callback: Callable[[object, str], None] | None = None,
@@ -244,6 +245,7 @@ class FlatmapProjectionWidget(QWidget):
         super().__init__(parent)
         self._viewer = viewer
         self._display_viewer_provider = display_viewer_provider
+        self._display_viewers_provider = display_viewers_provider
         self._new_display_viewer_callback = new_display_viewer_callback
         self._display_viewer_ready_callback = display_viewer_ready_callback
         self._display_viewer_failed_callback = display_viewer_failed_callback
@@ -256,6 +258,13 @@ class FlatmapProjectionWidget(QWidget):
         self._flatmap_heatmap_name_event_connections: dict[
             int, tuple[object, object, object]
         ] = {}
+        self._flatmap_heatmap_viewers: dict[int, object] = {}
+        self._flatmap_heatmap_selected_names: dict[int, set[str]] = {}
+        self._flatmap_heatmap_list_viewer_id: int | None = None
+        self._preferred_flatmap_heatmap_viewer_id: int | None = None
+        self._refreshing_flatmap_heatmap_window_list = False
+        self._flatmap_heatmap_refresh_pending = False
+        self._flatmap_render_mode_change_pending = False
         self._database_provider = database_provider
         self._selected_file_ids_provider = selected_file_ids_provider
         self._table_file_ids_provider = table_file_ids_provider
@@ -345,7 +354,6 @@ class FlatmapProjectionWidget(QWidget):
         """Return the viewer used for flatmap display layers."""
         provider = getattr(self, "_display_viewer_provider", None)
         if callable(provider):
-            previous_viewer = getattr(self, "_last_display_viewer", None)
             try:
                 viewer = provider(create=create)
             except TypeError:
@@ -354,8 +362,6 @@ class FlatmapProjectionWidget(QWidget):
                 viewer = provider()
             if viewer is not None:
                 self._last_display_viewer = viewer
-                if viewer is not previous_viewer:
-                    self._connect_flatmap_display_layer_events(viewer)
             return viewer
         return getattr(self, "_viewer", None)
 
@@ -369,13 +375,22 @@ class FlatmapProjectionWidget(QWidget):
         """Forget layer handles when a flatmap display viewer closes."""
         self._clear_display_axis_annotations(viewer)
         self._disconnect_flatmap_display_layer_events(viewer)
-        if getattr(self, "_last_display_viewer", None) is not viewer:
-            return False
+        viewer_id = id(viewer)
+        getattr(self, "_flatmap_heatmap_viewers", {}).pop(viewer_id, None)
+        getattr(self, "_flatmap_heatmap_selected_names", {}).pop(viewer_id, None)
+        if getattr(self, "_flatmap_heatmap_list_viewer_id", None) == viewer_id:
+            self._flatmap_heatmap_list_viewer_id = None
+        if getattr(self, "_preferred_flatmap_heatmap_viewer_id", None) == viewer_id:
+            self._preferred_flatmap_heatmap_viewer_id = None
 
-        self._last_display_viewer = None
-        self._clear_display_layer_handles()
+        released_active = getattr(self, "_last_display_viewer", None) is viewer
+        if released_active:
+            self._last_display_viewer = None
+            self._clear_display_layer_handles()
         self._refresh_flatmap_heatmap_layer_list()
-        return True
+        if callable(getattr(self, "_display_viewer_provider", None)):
+            self._update_flatmap_render_mode_change_pending()
+        return released_active
 
     def _clear_display_layer_handles(self) -> None:
         """Forget layers controlled in the active flatmap viewer."""
@@ -398,10 +413,9 @@ class FlatmapProjectionWidget(QWidget):
         if viewer is previous:
             return viewer
 
-        self._disconnect_flatmap_display_layer_events(previous)
         self._last_display_viewer = viewer
+        self._preferred_flatmap_heatmap_viewer_id = id(viewer)
         self._clear_display_layer_handles()
-        self._connect_flatmap_display_layer_events(viewer)
         self._refresh_flatmap_heatmap_layer_list()
         return viewer
 
@@ -410,18 +424,16 @@ class FlatmapProjectionWidget(QWidget):
         viewer = self._current_display_viewer()
         if viewer is None or not self._layer_is_in_viewer(layer, viewer=viewer):
             return
-        self._connect_flatmap_display_layer_events(viewer)
-        self._refresh_flatmap_heatmap_layer_list()
         callback = getattr(self, "_display_viewer_ready_callback", None)
-        if not callable(callback):
-            return
-        try:
-            callback(viewer, layer)
-        except Exception:
-            logger.debug(
-                "Failed to report that the flatmap display viewer is ready.",
-                exc_info=True,
-            )
+        if callable(callback):
+            try:
+                callback(viewer, layer)
+            except Exception:
+                logger.debug(
+                    "Failed to report that the flatmap display viewer is ready.",
+                    exc_info=True,
+                )
+        self._refresh_flatmap_heatmap_layer_list()
 
     def _notify_display_viewer_failed(self, reason: str) -> None:
         """Report an unsuccessful first render so the main scene can recover."""
@@ -466,9 +478,93 @@ class FlatmapProjectionWidget(QWidget):
             in {_RENDER_HEATMAP, _RENDER_FLAT_HEATMAP, _RENDER_ALLEN_LAYERS}
         )
 
-    def _flatmap_heatmap_layers(self) -> list[object]:
-        """Return rendered flatmap heatmap layers from the display viewer."""
-        layers = self._display_layers(create=False) or ()
+    def _available_display_viewers(self) -> list[object]:
+        """Return live flatmap viewers available to appearance controls."""
+        provider = getattr(self, "_display_viewers_provider", None)
+        if callable(provider):
+            candidates = provider() or ()
+        else:
+            current = self._current_display_viewer()
+            candidates = (current,) if current is not None else ()
+
+        viewers: list[object] = []
+        viewer_ids: set[int] = set()
+        for viewer in candidates:
+            if viewer is None or id(viewer) in viewer_ids:
+                continue
+            viewers.append(viewer)
+            viewer_ids.add(id(viewer))
+        return viewers
+
+    @staticmethod
+    def _flatmap_display_viewer_label(viewer, index: int) -> str:
+        """Return the visible name for one selectable flatmap viewer."""
+        title = str(getattr(viewer, "title", "") or "").strip()
+        return title or f"Flatmap Window {index}"
+
+    def _refresh_flatmap_heatmap_window_list(self):
+        """Refresh the appearance window selector and return its viewer."""
+        combo = getattr(self, "_flatmap_heatmap_window_combo", None)
+        if combo is None:
+            return self._current_display_viewer()
+
+        previous_id = combo.currentData()
+        viewers = self._available_display_viewers()
+        viewer_map = {id(viewer): viewer for viewer in viewers}
+        self._flatmap_heatmap_viewers = viewer_map
+
+        preferred_id = getattr(
+            self,
+            "_preferred_flatmap_heatmap_viewer_id",
+            None,
+        )
+        current = self._current_display_viewer()
+        current_id = id(current) if current is not None else None
+        selected_id = next(
+            (
+                candidate_id
+                for candidate_id in (preferred_id, previous_id, current_id)
+                if candidate_id in viewer_map
+            ),
+            id(viewers[-1]) if viewers else None,
+        )
+
+        self._refreshing_flatmap_heatmap_window_list = True
+        signals_were_blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            for index, viewer in enumerate(viewers, start=1):
+                combo.addItem(
+                    self._flatmap_display_viewer_label(viewer, index),
+                    id(viewer),
+                )
+            selected_index = combo.findData(selected_id)
+            if selected_index >= 0:
+                combo.setCurrentIndex(selected_index)
+            combo.setEnabled(bool(viewers))
+        finally:
+            combo.blockSignals(signals_were_blocked)
+            self._refreshing_flatmap_heatmap_window_list = False
+
+        if selected_id == preferred_id:
+            self._preferred_flatmap_heatmap_viewer_id = None
+        return viewer_map.get(selected_id)
+
+    def _selected_flatmap_heatmap_viewer(self):
+        """Return the flatmap viewer selected in Heatmap Appearance."""
+        combo = getattr(self, "_flatmap_heatmap_window_combo", None)
+        viewer_map = getattr(self, "_flatmap_heatmap_viewers", {})
+        if combo is not None:
+            viewer = viewer_map.get(combo.currentData())
+            if viewer is not None:
+                return viewer
+        return self._current_display_viewer()
+
+    def _flatmap_heatmap_layers(self, *, viewer=None) -> list[object]:
+        """Return heatmap layers from the selected flatmap viewer."""
+        if viewer is None:
+            viewer = self._selected_flatmap_heatmap_viewer()
+        layers = getattr(viewer, "layers", ()) if viewer is not None else ()
         return [layer for layer in layers if self._is_flatmap_heatmap_layer(layer)]
 
     def _selected_flatmap_heatmap_layers(self) -> list[object]:
@@ -491,17 +587,35 @@ class FlatmapProjectionWidget(QWidget):
         if layer_list is None:
             return
 
+        previous_viewer_id = getattr(
+            self,
+            "_flatmap_heatmap_list_viewer_id",
+            None,
+        )
         previous = {item.text() for item in layer_list.selectedItems()}
-        layers = self._flatmap_heatmap_layers()
+        selections = getattr(self, "_flatmap_heatmap_selected_names", None)
+        if selections is None:
+            selections = {}
+            self._flatmap_heatmap_selected_names = selections
+        if previous_viewer_id is not None:
+            selections[previous_viewer_id] = previous
+
+        viewer = self._refresh_flatmap_heatmap_window_list()
+        viewer_id = id(viewer) if viewer is not None else None
+        layers = (
+            self._flatmap_heatmap_layers(viewer=viewer) if viewer is not None else []
+        )
+        selected_names = selections.get(viewer_id, set())
         layer_list.clear()
         for layer in layers:
             layer_list.addItem(str(getattr(layer, "name", "<unnamed>")))
         for index in range(layer_list.count()):
             item = layer_list.item(index)
-            if item.text() in previous:
+            if item.text() in selected_names:
                 item.setSelected(True)
+        self._flatmap_heatmap_list_viewer_id = viewer_id
 
-        self._sync_flatmap_heatmap_name_event_connections(layers)
+        self._connect_flatmap_display_layer_events(viewer)
         status = getattr(self, "_flatmap_heatmap_gamma_status_label", None)
         if status is not None:
             if layers:
@@ -509,6 +623,12 @@ class FlatmapProjectionWidget(QWidget):
             else:
                 status.setText("No rendered flatmap heatmaps are available.")
         self._update_flatmap_heatmap_gamma_controls()
+
+    def _on_flatmap_heatmap_window_changed(self, _index: int) -> None:
+        """Show heatmaps belonging to the selected flatmap window."""
+        if getattr(self, "_refreshing_flatmap_heatmap_window_list", False):
+            return
+        self._refresh_flatmap_heatmap_layer_list()
 
     def _update_flatmap_heatmap_gamma_controls(self, *_args) -> None:
         """Enable flatmap gamma actions only when heatmaps are selected."""
@@ -582,14 +702,31 @@ class FlatmapProjectionWidget(QWidget):
             self._refresh_flatmap_heatmap_layer_list()
 
     def _on_flatmap_display_layers_changed(self, _event=None) -> None:
-        """Refresh flatmap gamma controls after display-layer changes."""
-        self._refresh_flatmap_heatmap_layer_list()
+        """Refresh gamma controls after the layer event finishes dispatching."""
+        if getattr(self, "_flatmap_heatmap_refresh_pending", False):
+            return
+        self._flatmap_heatmap_refresh_pending = True
+        self._queue_gui_callback(self._run_pending_flatmap_heatmap_refresh)
+
+    def _run_pending_flatmap_heatmap_refresh(self) -> None:
+        """Apply one coalesced heatmap refresh from the Qt event loop."""
+        self._flatmap_heatmap_refresh_pending = False
+        try:
+            self._refresh_flatmap_heatmap_layer_list()
+        except RuntimeError:
+            logger.debug(
+                "Skipped a flatmap heatmap refresh after its Qt widget closed.",
+                exc_info=True,
+            )
 
     def _connect_flatmap_display_layer_events(self, viewer) -> None:
         """Follow additions, removals, and renames in the display viewer."""
+        if viewer is None:
+            self._disconnect_flatmap_display_layer_events()
+            return
         if getattr(self, "_flatmap_display_layer_event_viewer", None) is viewer:
             self._sync_flatmap_heatmap_name_event_connections(
-                self._flatmap_heatmap_layers()
+                self._flatmap_heatmap_layers(viewer=viewer)
             )
             return
 
@@ -615,7 +752,7 @@ class FlatmapProjectionWidget(QWidget):
                     connections.append((signal, callback))
         self._flatmap_display_layer_event_connections = connections
         self._sync_flatmap_heatmap_name_event_connections(
-            self._flatmap_heatmap_layers()
+            self._flatmap_heatmap_layers(viewer=viewer)
         )
 
     def _sync_flatmap_heatmap_name_event_connections(
@@ -1053,6 +1190,18 @@ class FlatmapProjectionWidget(QWidget):
             expanded=False,
         )
         appearance_layout = self._flatmap_heatmap_appearance_section.content_layout()
+        appearance_window_row = QHBoxLayout()
+        appearance_window_row.addWidget(QLabel("Window:"))
+        self._flatmap_heatmap_window_combo = QComboBox()
+        self._flatmap_heatmap_window_combo.setToolTip(
+            "Choose which open flatmap window supplies the heatmap layers below."
+        )
+        self._flatmap_heatmap_window_combo.currentIndexChanged.connect(
+            self._on_flatmap_heatmap_window_changed
+        )
+        appearance_window_row.addWidget(self._flatmap_heatmap_window_combo, 1)
+        appearance_layout.addLayout(appearance_window_row)
+
         appearance_hint = QLabel(
             "Select one or more rendered flatmap heatmaps to adjust together."
         )
@@ -2205,15 +2354,25 @@ class FlatmapProjectionWidget(QWidget):
         flat_mode = self._is_flat_render_mode()
         recompute_depth = depth_grid_mode and not precomputed
         allen_selection_ready = self._allen_layer_selection_ready()
+        render_mode_ready = not bool(
+            getattr(self, "_flatmap_render_mode_change_pending", False)
+        )
         return {
             "_region_labels_btn": (
                 cache_available or recompute_depth
-            ) and allen_selection_ready,
-            "_region_surfaces_btn": cache_available and depth_grid_mode,
-            "_region_outlines_btn": cache_available and (depth_grid_mode or flat_mode),
+            )
+            and allen_selection_ready
+            and render_mode_ready,
+            "_region_surfaces_btn": (
+                cache_available and depth_grid_mode and render_mode_ready
+            ),
+            "_region_outlines_btn": (
+                cache_available and (depth_grid_mode or flat_mode) and render_mode_ready
+            ),
             "_clear_region_geometry_btn": cache_available
-            and (depth_grid_mode or flat_mode),
-            "_region_label_atlas_combo": recompute_depth,
+            and (depth_grid_mode or flat_mode)
+            and render_mode_ready,
+            "_region_label_atlas_combo": recompute_depth and render_mode_ready,
         }
 
     def _update_cached_region_controls(self) -> None:
@@ -2543,8 +2702,38 @@ class FlatmapProjectionWidget(QWidget):
             return 2
         return 3
 
+    def _update_flatmap_render_mode_change_pending(self) -> bool:
+        """Record whether the active scene uses another render coordinate space."""
+        render_mode = self._current_render_mode()
+        render_layers = self._current_flatmap_render_layers()
+        render_mismatch = any(
+            (getattr(layer, "metadata", {}) or {}).get("flatmap_render_mode")
+            != render_mode
+            for layer in render_layers
+        )
+        soma_layer = self._cached_soma_layer()
+        soma_metadata = getattr(soma_layer, "metadata", {}) or {}
+        soma_mismatch = bool(
+            soma_layer is not None
+            and soma_metadata.get("flatmap_soma_space_render_mode") != render_mode
+        )
+        plane_mode = self._current_plane_mode()
+        region_mismatch = any(
+            (getattr(layer, "metadata", {}) or {}).get("flatmap_plane_mode")
+            not in {None, "", plane_mode}
+            for layer in self._current_cached_region_layers()
+        )
+        self._flatmap_render_mode_change_pending = bool(
+            render_mismatch or soma_mismatch or region_mismatch
+        )
+        return self._flatmap_render_mode_change_pending
+
     def _on_render_mode_changed(self, *_args) -> None:
-        self._invalidate_flatmap_grid_layers()
+        # Keep the displayed scene intact while the user chooses settings for
+        # a possible comparison window. If they re-project into this viewer,
+        # the stale grid is retired from the Project button callback instead
+        # of from this Qt combo-box callback.
+        self._update_flatmap_render_mode_change_pending()
         self._update_render_mode_controls()
         self._update_cached_region_controls()
         status = getattr(self, "_status_label", None)
@@ -2931,6 +3120,15 @@ class FlatmapProjectionWidget(QWidget):
         *current* render mode so they land in the coordinate space the visible
         render uses -- depth bins, Allen layer planes, or a single flat plane.
         """
+        if getattr(self, "_flatmap_render_mode_change_pending", False):
+            message = (
+                "Project the selected render mode before adding soma points, "
+                "or change Render back to the displayed mode."
+            )
+            self._status_label.setText(message)
+            show_warning(message)
+            return
+
         projection_source = self._current_projection_source()
         # Soma projection always renders per-node points, so the DuckDB
         # heatmap fast path (which cannot filter by node type) is skipped.
@@ -3005,6 +3203,13 @@ class FlatmapProjectionWidget(QWidget):
                 self._status_label.setText(f"Flatmap projection failed: {exc}")
                 show_warning(f"Flatmap projection failed: {exc}")
                 return
+            self._flatmap_render_mode_change_pending = False
+        elif getattr(self, "_flatmap_render_mode_change_pending", False):
+            # The user chose to replace the active scene. Hide its incompatible
+            # visuals now, then delete them after Qt has returned to its event
+            # loop so the macOS OpenGL compositor cannot repaint freed buffers.
+            self._defer_flatmap_grid_layer_removal()
+            self._flatmap_render_mode_change_pending = False
         projection_source = self._current_projection_source()
         if projection_source == _PROJECTION_SOURCE_PRECOMPUTED and (
             self._current_render_mode()
@@ -3811,11 +4016,20 @@ class FlatmapProjectionWidget(QWidget):
 
     def _set_projection_controls_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled and self._allen_layer_selection_ready())
-        for name in ("_project_btn", "_new_window_btn", "_add_soma_btn"):
+        for name in ("_project_btn", "_new_window_btn"):
             button = getattr(self, name, None)
             set_enabled = getattr(button, "setEnabled", None)
             if callable(set_enabled):
                 set_enabled(enabled)
+        add_soma = getattr(self, "_add_soma_btn", None)
+        set_add_soma_enabled = getattr(add_soma, "setEnabled", None)
+        if callable(set_add_soma_enabled):
+            set_add_soma_enabled(
+                enabled
+                and not bool(
+                    getattr(self, "_flatmap_render_mode_change_pending", False)
+                )
+            )
 
     def _set_projection_progress(
         self,
