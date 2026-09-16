@@ -41,6 +41,8 @@ Unless a use case says otherwise:
 | [UC-013](#uc-013-overlay-cached-brain-regions-on-a-2d-flat-map) | Overlay cached region fills and outlines on depth-free flatmap renders | Not run |
 | [UC-014](#uc-014-control-and-share-region-appearance-across-ccfv3-and-flatmap-views) | Assign, stage, share, save, and restore region colors and visibility across CCFv3 and flatmap overlays | Not run |
 | [UC-015](#uc-015-compare-cluster-assignments-in-an-interactive-board) | Compare flatmap and CCFv3 cluster mappings side by side in a linked grid | Not run |
+| [UC-016](#uc-016-compare-multiple-flatmap-windows-side-by-side) | Compare several independently navigable flatmap viewers side by side | Partially run |
+| [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -1987,6 +1989,59 @@ viewer.
   stale-render generation guards, preserving a scene while **Render** changes,
   and deferring incompatible GPU-layer removal outside Qt selection events. The
   remaining UC-016 steps have not been manually run.
+
+### UC-017: Resize the Floating Neuron Viewer Panel
+
+**Capability**
+
+The user can detach the **Neuron Viewer** panel from the main napari window and
+make the resulting floating window taller than its initial preferred height.
+This exposes more of long, scrollable tabs while preserving napari's normal
+layout policy whenever the panel is docked.
+
+**Prerequisites**
+
+- Use a display whose available work area is taller than the panel's opening
+  height.
+- To inspect table behavior, load a Parquet and populate **Selected Neurons**
+  with at least 20 rows while **Adaptive table height** is checked.
+- Start from a clean napari session with the **Neuron Viewer** panel open.
+
+**Steps and expected results**
+
+1. **Action:** Open the **Data** tab, then click the panel title bar's **float
+   this panel** control.
+   **Expected:** **Neuron Viewer** becomes a separate floating window without
+   changing the state of its controls or the main napari viewer.
+2. **Action:** Drag the floating window's bottom edge downward beyond its
+   opening height.
+   **Expected:** The window continues to grow up to the operating system's
+   available work area instead of stopping at its initial content size. Its
+   width does not change unless the user also drags a horizontal edge.
+3. **Action:** Inspect **Data**, **Analysis**, and **Histogram** at the larger
+   height, then make the window shorter again.
+   **Expected:** Each tab receives the available vertical space, existing
+   scroll areas remain usable, and controls are neither clipped nor stretched
+   to a fixed height. The Selected Neurons table retains its existing adaptive
+   row cap and its own scrolling behavior.
+4. **Action:** Click **dock this panel** in the floating title bar.
+   **Expected:** The panel returns to napari's dock area and follows napari's
+   original docked sizing behavior without forcing the main window taller.
+5. **Action:** Detach and enlarge the panel again, then close and reopen the
+   plugin from napari's **Plugins** menu and repeat the detach operation.
+   **Expected:** Every floating instance can be enlarged, no duplicate window
+   or resize handling appears, and reopening the plugin starts with normal
+   docked behavior.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Notes: Automated tests cover floating-policy activation, exact docked-policy
+  restoration, initial floating state, idempotent signal setup, and a missing
+  dock parent. Manual verification is still required on macOS and at least one
+  Windows or Linux system because native window-manager behavior is platform
+  dependent.
 
 ## Use-Case Template
 

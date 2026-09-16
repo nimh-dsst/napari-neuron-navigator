@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -38,6 +39,7 @@ from qtpy.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -650,6 +652,8 @@ class NeuronViewerWidget(QWidget):
             self._flatmap_hidden_viewer_ids: set[int] = set()
             self._flatmap_viewer_watch_timer = None
             self._flatmap_close_guards: dict[int, tuple[object, object]] = {}
+            self._dock_resize_policy_connected = False
+            self._docked_vertical_size_policy = None
 
             with startup_timing(
                 logger,
@@ -746,6 +750,44 @@ class NeuronViewerWidget(QWidget):
                 phase="schedule_cached_template_autoload",
             ):
                 QTimer.singleShot(0, self._start_cached_template_autoload)
+            # napari assigns contributed widgets a vertically bounded size
+            # policy after their constructor returns. Configure the containing
+            # dock once that wrapper exists so a floating panel can grow past
+            # its initial size hint.
+            QTimer.singleShot(0, self._configure_dock_resize_policy)
+
+    def _configure_dock_resize_policy(self) -> None:
+        """Allow this panel to grow vertically only while it is floating."""
+        if getattr(self, "_dock_resize_policy_connected", False):
+            return
+
+        parent_getter = getattr(self, "parent", None)
+        dock_widget = parent_getter() if callable(parent_getter) else None
+        if not isinstance(dock_widget, QDockWidget):
+            return
+
+        self._docked_vertical_size_policy = self.sizePolicy().verticalPolicy()
+        dock_widget.topLevelChanged.connect(self._on_dock_top_level_changed)
+        self._dock_resize_policy_connected = True
+        self._on_dock_top_level_changed(dock_widget.isFloating())
+
+    def _on_dock_top_level_changed(self, floating: bool) -> None:
+        """Switch between resizable floating and napari-managed dock policies."""
+        docked_policy = getattr(self, "_docked_vertical_size_policy", None)
+        if docked_policy is None:
+            return
+
+        size_policy = self.sizePolicy()
+        target_policy = QSizePolicy.Policy.Preferred if floating else docked_policy
+        if size_policy.verticalPolicy() != target_policy:
+            size_policy.setVerticalPolicy(target_policy)
+            self.setSizePolicy(size_policy)
+        self.updateGeometry()
+
+        parent_getter = getattr(self, "parent", None)
+        dock_widget = parent_getter() if callable(parent_getter) else None
+        if isinstance(dock_widget, QDockWidget):
+            dock_widget.updateGeometry()
 
     @staticmethod
     def _flatmap_viewer_is_open(viewer) -> bool:
