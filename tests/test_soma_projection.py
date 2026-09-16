@@ -133,6 +133,42 @@ class _FakeWidget:
         return None
 
 
+class _FakeSizePolicy:
+    class Policy:
+        Preferred = "preferred"
+        Maximum = "maximum"
+
+    def __init__(self, horizontal=Policy.Preferred, vertical=Policy.Maximum) -> None:
+        self._horizontal = horizontal
+        self._vertical = vertical
+
+    def horizontalPolicy(self):
+        return self._horizontal
+
+    def verticalPolicy(self):
+        return self._vertical
+
+    def setVerticalPolicy(self, policy) -> None:
+        self._vertical = policy
+
+
+class _FakeDockWidget(_FakeWidget):
+    def __init__(self, *, floating: bool = False) -> None:
+        self._floating = bool(floating)
+        self.topLevelChanged = _DummyAnalysisSignal()
+        self.geometry_updates = 0
+
+    def isFloating(self) -> bool:
+        return self._floating
+
+    def setFloating(self, floating: bool) -> None:
+        self._floating = bool(floating)
+        self.topLevelChanged.emit(self._floating)
+
+    def updateGeometry(self) -> None:
+        self.geometry_updates += 1
+
+
 class _FakeApplication(_FakeWidget):
     @staticmethod
     def processEvents() -> None:
@@ -155,6 +191,7 @@ for _name, _value in {
     "QCheckBox": _FakeWidget,
     "QComboBox": _FakeWidget,
     "QDoubleSpinBox": _FakeWidget,
+    "QDockWidget": _FakeDockWidget,
     "QFileDialog": _FakeWidget,
     "QGroupBox": _FakeWidget,
     "QHeaderView": _FakeWidget,
@@ -165,6 +202,7 @@ for _name, _value in {
     "QProgressBar": _FakeWidget,
     "QPushButton": _FakeWidget,
     "QScrollArea": _FakeWidget,
+    "QSizePolicy": _FakeSizePolicy,
     "QSlider": _FakeWidget,
     "QSpinBox": _FakeWidget,
     "QStackedWidget": _FakeWidget,
@@ -753,11 +791,78 @@ def test_widget_startup_schedules_cached_template_autoload_without_atlas_load(
 
     widget = NeuronViewerWidget(_DummyViewer())
 
-    assert len(single_shot_calls) == 1
-    assert single_shot_calls[0][0][0] == 0
-    assert single_shot_calls[0][0][1].__self__ is widget
-    assert single_shot_calls[0][0][1].__name__ == "_start_cached_template_autoload"
+    assert len(single_shot_calls) == 2
+    assert [call[0][0] for call in single_shot_calls] == [0, 0]
+    assert all(call[0][1].__self__ is widget for call in single_shot_calls)
+    assert [call[0][1].__name__ for call in single_shot_calls] == [
+        "_start_cached_template_autoload",
+        "_configure_dock_resize_policy",
+    ]
     atlas_factory.assert_not_called()
+
+
+def _floating_resize_widget(dock_widget: object):
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    policy = _FakeSizePolicy(horizontal="horizontal", vertical="docked")
+    widget._dock_resize_policy_connected = False
+    widget._docked_vertical_size_policy = None
+    widget.parent = lambda: dock_widget
+    widget.sizePolicy = lambda: policy
+    widget.setSizePolicy = MagicMock()
+    widget.updateGeometry = MagicMock()
+    return widget, policy
+
+
+def test_floating_dock_can_grow_and_redocking_restores_original_policy() -> None:
+    dock_widget = _FakeDockWidget(floating=False)
+    widget, policy = _floating_resize_widget(dock_widget)
+
+    widget._configure_dock_resize_policy()
+
+    assert widget._dock_resize_policy_connected is True
+    assert widget._docked_vertical_size_policy == "docked"
+    assert policy.verticalPolicy() == "docked"
+    assert len(dock_widget.topLevelChanged._callbacks) == 1
+
+    dock_widget.setFloating(True)
+
+    assert policy.verticalPolicy() == _FakeSizePolicy.Policy.Preferred
+    assert policy.horizontalPolicy() == "horizontal"
+
+    dock_widget.setFloating(False)
+
+    assert policy.verticalPolicy() == "docked"
+    assert policy.horizontalPolicy() == "horizontal"
+    assert widget.setSizePolicy.call_count == 2
+    assert widget.updateGeometry.call_count == 3
+    assert dock_widget.geometry_updates == 3
+
+    widget._configure_dock_resize_policy()
+
+    assert len(dock_widget.topLevelChanged._callbacks) == 1
+
+
+def test_already_floating_dock_gets_resizable_policy_during_setup() -> None:
+    dock_widget = _FakeDockWidget(floating=True)
+    widget, policy = _floating_resize_widget(dock_widget)
+
+    widget._configure_dock_resize_policy()
+
+    assert widget._docked_vertical_size_policy == "docked"
+    assert policy.verticalPolicy() == _FakeSizePolicy.Policy.Preferred
+    widget.setSizePolicy.assert_called_once_with(policy)
+
+
+def test_dock_resize_setup_without_dock_parent_is_a_noop() -> None:
+    widget, policy = _floating_resize_widget(object())
+
+    widget._configure_dock_resize_policy()
+
+    assert widget._dock_resize_policy_connected is False
+    assert widget._docked_vertical_size_policy is None
+    assert policy.verticalPolicy() == "docked"
+    widget.setSizePolicy.assert_not_called()
+    widget.updateGeometry.assert_not_called()
 
 
 class _SceneLayer:
