@@ -8,8 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .clustering import ClusterResult, compute_clustermap_data
 from ..flatmap_heatmap import FlatmapLookupStats
+from .clustering import ClusterResult, compute_clustermap_data
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +233,8 @@ def query_flatmap_soma_coordinates_and_count(
     *,
     style: str,
     file_ids: list[str] | None = None,
+    prepared_region_filter=None,
+    excluded_file_ids: set[str] | None = None,
 ) -> tuple[list[str], np.ndarray, int]:
     """Return per-neuron flatmap soma coordinates and contributing row count.
 
@@ -284,21 +286,26 @@ def query_flatmap_soma_coordinates_and_count(
         )
         x_ref = _sql_identifier(f"x_flat_{suffix}")
         y_ref = _sql_identifier(f"y_flat_{suffix}")
-        soma_where = (
-            f"type = 1 AND ({expressions['flatmap_valid']}) "
+        projected_soma = (
+            f"({expressions['flatmap_valid']}) "
             f"AND ({expressions['depth_valid']})"
         )
-        where_sql = _combine_where(soma_where, file_filter_sql)
+        where_sql = _combine_where("type = 1", file_filter_sql)
         query = f"""
             SELECT
                 file_id,
-                AVG({x_ref}) AS x_flat,
-                AVG({y_ref}) AS y_flat,
-                AVG(depth_um) AS depth_um,
-                COUNT(*)::BIGINT AS soma_node_count
+                AVG(CASE WHEN {projected_soma} THEN {x_ref} END) AS x_flat,
+                AVG(CASE WHEN {projected_soma} THEN {y_ref} END) AS y_flat,
+                AVG(CASE WHEN {projected_soma} THEN depth_um END) AS depth_um,
+                AVG(x) AS x,
+                AVG(y) AS y,
+                AVG(z) AS z,
+                COUNT(CASE WHEN {projected_soma} THEN 1 END)::BIGINT
+                    AS soma_node_count
             FROM {source_sql}
             WHERE {where_sql}
             GROUP BY file_id
+            HAVING COUNT(CASE WHEN {projected_soma} THEN 1 END) > 0
             ORDER BY file_id
         """
         soma_df = (
@@ -311,6 +318,23 @@ def query_flatmap_soma_coordinates_and_count(
 
     if soma_df.empty:
         return [], np.empty((0, 3), dtype=float), 0
+
+    if prepared_region_filter is not None:
+        from .region_filter import excluded_soma_file_ids, filter_soma_frame
+
+        soma_df = filter_soma_frame(soma_df, prepared_region_filter)
+        if excluded_file_ids is None:
+            excluded_file_ids = excluded_soma_file_ids(
+                parquet_path,
+                prepared_region_filter,
+                file_ids=file_ids,
+            )
+        if excluded_file_ids:
+            soma_df = soma_df[
+                ~soma_df["file_id"].astype(str).isin(excluded_file_ids)
+            ].reset_index(drop=True)
+        if soma_df.empty:
+            return [], np.empty((0, 3), dtype=float), 0
 
     coords = soma_df[["x_flat", "y_flat", "depth_um"]].to_numpy(dtype=float)
     finite = np.all(np.isfinite(coords), axis=1)
@@ -325,12 +349,16 @@ def query_flatmap_soma_coordinates(
     *,
     style: str,
     file_ids: list[str] | None = None,
+    prepared_region_filter=None,
+    excluded_file_ids: set[str] | None = None,
 ) -> tuple[list[str], np.ndarray]:
     """Return per-neuron soma coordinates in flatmap + depth space."""
     ids, coords, _node_count = query_flatmap_soma_coordinates_and_count(
         parquet_path,
         style=style,
         file_ids=file_ids,
+        prepared_region_filter=prepared_region_filter,
+        excluded_file_ids=excluded_file_ids,
     )
     return ids, coords
 
@@ -662,6 +690,7 @@ def count_flatmap_voxel_correlation_nodes(
     include_depth_minus_one: bool = True,
     file_ids: list[str] | None = None,
     collapse_depth: bool = False,
+    prepared_region_filter=None,
 ) -> int:
     """Return the exact rendered-node count for flatmap voxel correlation.
 
@@ -717,8 +746,19 @@ def count_flatmap_voxel_correlation_nodes(
     file_filter_sql, params = file_filter
 
     conn = duckdb.connect()
+    filter_view_name = "cluster_region_filtered_flatmap_count"
+    filter_relations: tuple[str, ...] = ()
     try:
         source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
+        if prepared_region_filter is not None:
+            from .region_filter import register_filtered_source_view
+
+            source_sql, filter_relations = register_filtered_source_view(
+                conn,
+                source_sql,
+                prepared_region_filter,
+                view_name=filter_view_name,
+            )
         expressions = _flatmap_sql_expressions(
             _duckdb_column_names(conn, source_sql),
             suffix=suffix,
@@ -742,6 +782,14 @@ def count_flatmap_voxel_correlation_nodes(
             else conn.execute(query).fetchone()
         )
     finally:
+        if filter_relations:
+            from .region_filter import cleanup_filtered_source_view
+
+            cleanup_filtered_source_view(
+                conn,
+                filter_view_name,
+                filter_relations,
+            )
         conn.close()
     return int(row[0] or 0) if row is not None else 0
 
@@ -758,6 +806,7 @@ def compute_flatmap_voxel_correlation_from_parquet(
     n_clusters: int = 5,
     file_ids: list[str] | None = None,
     collapse_depth: bool = False,
+    prepared_region_filter=None,
 ) -> tuple[ClusterResult, FlatmapCountMatrix, FlatmapParquetCorrelationProvenance]:
     """Cluster neurons by flatmap-space voxel correlation straight from Parquet.
 
@@ -829,8 +878,28 @@ def compute_flatmap_voxel_correlation_from_parquet(
     file_filter_sql, file_params = file_filter
 
     conn = duckdb.connect()
+    filter_view_name = "cluster_region_filtered_flatmap_source"
+    filter_relations: tuple[str, ...] = ()
+    all_input_file_ids: tuple[str, ...] | None = None
     try:
-        source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
+        raw_source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
+        if file_ids is None:
+            all_input_file_ids = tuple(
+                str(row[0])
+                for row in conn.execute(
+                    f"SELECT DISTINCT file_id FROM {raw_source_sql} ORDER BY file_id"
+                ).fetchall()
+            )
+        source_sql = raw_source_sql
+        if prepared_region_filter is not None:
+            from .region_filter import register_filtered_source_view
+
+            source_sql, filter_relations = register_filtered_source_view(
+                conn,
+                source_sql,
+                prepared_region_filter,
+                view_name=filter_view_name,
+            )
         column_names = _duckdb_column_names(conn, source_sql)
         expressions = _flatmap_sql_expressions(
             column_names,
@@ -858,10 +927,20 @@ def compute_flatmap_voxel_correlation_from_parquet(
             include_depth_bin=not collapse_depth,
         )
     finally:
+        if filter_relations:
+            from .region_filter import cleanup_filtered_source_view
+
+            cleanup_filtered_source_view(
+                conn,
+                filter_view_name,
+                filter_relations,
+            )
         conn.close()
 
     if file_ids is None:
-        input_file_ids = _unique_strings_in_order(counts["file_id"].tolist())
+        input_file_ids = all_input_file_ids or _unique_strings_in_order(
+            counts["file_id"].tolist()
+        )
     else:
         input_file_ids = tuple(str(file_id) for file_id in file_ids)
 
@@ -872,8 +951,8 @@ def compute_flatmap_voxel_correlation_from_parquet(
     )
     if len(count_data.neuron_ids) < 2:
         raise ValueError(
-            "Flatmap voxel correlation requires at least 2 neurons with valid "
-            "flatmap/depth coordinates."
+            "Flatmap voxel correlation requires at least 2 neurons with usable "
+            "nodes after applying region and coordinate filters."
         )
     if count_data.count_matrix.shape[1] == 0:
         raise ValueError(

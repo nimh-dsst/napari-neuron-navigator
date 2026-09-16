@@ -75,7 +75,23 @@ def test_store_round_trip_omits_runtime_result_and_preserves_stable_column() -> 
         input_file_ids=["n1", "n2"],
         unassigned_neuron_ids=["n2"],
         label_colors={3: [0.1, 0.2, 0.3, 1.0]},
-        run_metadata={"method": "soma"},
+        run_metadata={
+            "method": "soma",
+            "region_filter": {
+                "version": 1,
+                "overlap_policy": "exclude_wins",
+                "include_rules": [
+                    {"region_id": 184, "dilation_fraction": 0.2}
+                ],
+                "exclude_rules": [
+                    {
+                        "region_id": 500,
+                        "node_types": [2, 99],
+                        "minimum_node_count": 3,
+                    }
+                ],
+            },
+        },
         runtime_result=object(),
     )
     old_column = assignment.column_name
@@ -87,6 +103,9 @@ def test_store_round_trip_omits_runtime_result_and_preserves_stable_column() -> 
     assert restored.active.name == "Spatial groups"
     assert restored.active.column_name == old_column
     assert restored.active.label_colors == {3: [0.1, 0.2, 0.3, 1.0]}
+    assert restored.active.run_metadata["region_filter"] == (
+        assignment.run_metadata["region_filter"]
+    )
     assert restored.active.runtime_result is None
 
 

@@ -11,6 +11,7 @@ k-means, and DBSCAN algorithms.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -24,6 +25,22 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+
+
+def _normalise_int_tuple(values: Iterable[int]) -> tuple[int, ...]:
+    """Return stable unique integers while preserving input order."""
+    return tuple(dict.fromkeys(int(value) for value in values))
+
+
+def _normalise_str_tuple(values: Iterable[str]) -> tuple[str, ...]:
+    """Return stable unique non-empty strings while preserving input order."""
+    return tuple(
+        dict.fromkeys(
+            text
+            for value in values
+            if (text := str(value).strip())
+        )
+    )
 
 
 def _format_nbytes(num_bytes: int) -> str:
@@ -63,6 +80,197 @@ class ClusterRegionSelection:
 
 
 @dataclass(frozen=True)
+class ClusterRegionRule:
+    """One directly selected atlas region and its independent dilation."""
+
+    region_id: int
+    acronym: str
+    represented_region_ids: tuple[int, ...] = ()
+    represented_region_acronyms: tuple[str, ...] = ()
+    dilation_fraction: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "region_id", int(self.region_id))
+        object.__setattr__(self, "acronym", str(self.acronym).strip())
+        object.__setattr__(
+            self,
+            "represented_region_ids",
+            _normalise_int_tuple(self.represented_region_ids),
+        )
+        object.__setattr__(
+            self,
+            "represented_region_acronyms",
+            _normalise_str_tuple(self.represented_region_acronyms),
+        )
+        dilation = float(self.dilation_fraction)
+        if not np.isfinite(dilation) or not 0.0 <= dilation <= 1.0:
+            raise ValueError("dilation_fraction must be between 0.0 and 1.0")
+        object.__setattr__(self, "dilation_fraction", dilation)
+        if self.region_id <= 0:
+            raise ValueError("region_id must be positive")
+        if not self.acronym:
+            raise ValueError("acronym must not be empty")
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-safe rule mapping."""
+        return {
+            "region_id": int(self.region_id),
+            "acronym": self.acronym,
+            "represented_region_ids": [
+                int(value) for value in self.represented_region_ids
+            ],
+            "represented_region_acronyms": list(
+                self.represented_region_acronyms
+            ),
+            "dilation_fraction": float(self.dilation_fraction),
+        }
+
+
+@dataclass(frozen=True)
+class ClusterExclusionRule(ClusterRegionRule):
+    """A region rule that can reject a soma-clustering neuron by morphology."""
+
+    node_types: tuple[int, ...] | None = (1,)
+    minimum_node_count: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.node_types is not None:
+            object.__setattr__(
+                self,
+                "node_types",
+                _normalise_int_tuple(self.node_types),
+            )
+            if not self.node_types:
+                raise ValueError("node_types must contain at least one type or be None")
+        minimum = int(self.minimum_node_count)
+        if minimum < 1:
+            raise ValueError("minimum_node_count must be at least 1")
+        object.__setattr__(self, "minimum_node_count", minimum)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-safe exclusion-rule mapping."""
+        from ..swc import NodeType, node_type_labels
+
+        labels = (
+            None
+            if self.node_types is None
+            else [
+                "Axon-typed (type 2)"
+                if value == NodeType.AXON
+                else node_type_labels((value,))[0]
+                for value in self.node_types
+            ]
+        )
+
+        payload = super().to_dict()
+        payload.update(
+            {
+                "node_types": (
+                    None
+                    if self.node_types is None
+                    else [int(value) for value in self.node_types]
+                ),
+                "node_type_labels": labels,
+                "minimum_node_count": int(self.minimum_node_count),
+            }
+        )
+        return payload
+
+
+@dataclass(frozen=True)
+class ClusterRegionFilter:
+    """Complete include/exclude rule set for one clustering run."""
+
+    include_rules: tuple[ClusterRegionRule, ...] = ()
+    exclude_rules: tuple[ClusterExclusionRule, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "include_rules", tuple(self.include_rules))
+        object.__setattr__(self, "exclude_rules", tuple(self.exclude_rules))
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether the filter contains no include or exclude rules."""
+        return not self.include_rules and not self.exclude_rules
+
+    @classmethod
+    def from_legacy_selection(
+        cls,
+        selection: ClusterRegionSelection | None,
+        dilation_fraction: float = 0.0,
+    ) -> ClusterRegionFilter | None:
+        """Adapt the former union selection/global-dilation API."""
+        if selection is None or not selection.selected_region_ids:
+            return None
+
+        represented_by_id = dict(
+            zip(
+                selection.represented_region_ids,
+                selection.represented_region_acronyms,
+            )
+        )
+        rules: list[ClusterRegionRule] = []
+        for region_id, acronym in zip(
+            selection.selected_region_ids,
+            selection.selected_region_acronyms,
+        ):
+            rules.append(
+                ClusterRegionRule(
+                    region_id=int(region_id),
+                    acronym=str(acronym),
+                    represented_region_ids=tuple(represented_by_id),
+                    represented_region_acronyms=tuple(represented_by_id.values()),
+                    dilation_fraction=float(dilation_fraction),
+                )
+            )
+        return cls(include_rules=tuple(rules))
+
+    def legacy_selection(self) -> ClusterRegionSelection:
+        """Return aggregate included-region fields used by older exports."""
+        selected_ids = _normalise_int_tuple(
+            rule.region_id for rule in self.include_rules
+        )
+        selected_acronyms = _normalise_str_tuple(
+            rule.acronym for rule in self.include_rules
+        )
+        represented_ids = _normalise_int_tuple(
+            value
+            for rule in self.include_rules
+            for value in rule.represented_region_ids
+        )
+        represented_acronyms = _normalise_str_tuple(
+            value
+            for rule in self.include_rules
+            for value in rule.represented_region_acronyms
+        )
+        return ClusterRegionSelection(
+            selected_region_ids=list(selected_ids),
+            selected_region_acronyms=list(selected_acronyms),
+            represented_region_ids=list(represented_ids),
+            represented_region_acronyms=list(represented_acronyms),
+        )
+
+    @property
+    def legacy_dilation_fraction(self) -> float | None:
+        """Return a truthful legacy dilation value when all includes agree."""
+        if not self.include_rules:
+            return 0.0
+        values = {float(rule.dilation_fraction) for rule in self.include_rules}
+        return values.pop() if len(values) == 1 else None
+
+    def to_dict(self) -> dict[str, object]:
+        """Return authoritative JSON-safe filter provenance."""
+        return {
+            "version": 1,
+            "dilation_mode": "volume_increase_fraction",
+            "overlap_policy": "exclude_wins",
+            "include_rules": [rule.to_dict() for rule in self.include_rules],
+            "exclude_rules": [rule.to_dict() for rule in self.exclude_rules],
+        }
+
+
+@dataclass(frozen=True)
 class ClusterRunMetadata:
     """Parameters and provenance required to reproduce a clustering run."""
 
@@ -75,7 +283,8 @@ class ClusterRunMetadata:
     selected_region_acronyms: list[str] = field(default_factory=list)
     represented_region_ids: list[int] = field(default_factory=list)
     represented_region_acronyms: list[str] = field(default_factory=list)
-    dilation_fraction: float = 0.0
+    dilation_fraction: float | None = 0.0
+    region_filter: ClusterRegionFilter | None = None
     requested_cluster_count: int | None = None
     actual_cluster_count: int = 0
     dbscan_eps: float | None = None
@@ -96,7 +305,7 @@ class ClusterRunMetadata:
         distance_metric: str,
         clustering_linkage: str | None,
         dendrogram_linkage: str | None,
-        dilation_fraction: float,
+        dilation_fraction: float | None,
         requested_cluster_count: int | None,
         actual_cluster_count: int,
         dbscan_eps: float | None,
@@ -106,7 +315,7 @@ class ClusterRunMetadata:
         source_parquet_path: str | None,
         dendrogram_leaf_order: list[int],
         extra_metadata: dict[str, object] | None = None,
-    ) -> "ClusterRunMetadata":
+    ) -> ClusterRunMetadata:
         """Build metadata from a worker-region selection payload."""
         return cls(
             analysis_method=analysis_method,
@@ -120,7 +329,11 @@ class ClusterRunMetadata:
             represented_region_acronyms=list(
                 region_selection.represented_region_acronyms
             ),
-            dilation_fraction=float(dilation_fraction),
+            dilation_fraction=(
+                None
+                if dilation_fraction is None
+                else float(dilation_fraction)
+            ),
             requested_cluster_count=requested_cluster_count,
             actual_cluster_count=int(actual_cluster_count),
             dbscan_eps=dbscan_eps,
@@ -131,6 +344,31 @@ class ClusterRunMetadata:
             dendrogram_leaf_order=[int(value) for value in dendrogram_leaf_order],
             extra_metadata=dict(extra_metadata or {}),
         )
+
+    @classmethod
+    def from_region_filter(
+        cls,
+        *,
+        region_filter: ClusterRegionFilter | None,
+        **kwargs,
+    ) -> ClusterRunMetadata:
+        """Build metadata with canonical rules and legacy include aliases."""
+        effective = region_filter or ClusterRegionFilter()
+        selection = effective.legacy_selection()
+        return cls.from_region_selection(
+            region_selection=selection,
+            dilation_fraction=effective.legacy_dilation_fraction,
+            **kwargs,
+        )._with_region_filter(None if effective.is_empty else effective)
+
+    def _with_region_filter(
+        self,
+        region_filter: ClusterRegionFilter | None,
+    ) -> ClusterRunMetadata:
+        """Return this frozen metadata payload with canonical filter rules."""
+        from dataclasses import replace
+
+        return replace(self, region_filter=region_filter)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-safe mapping for workbook/parquet exports."""
@@ -150,7 +388,14 @@ class ClusterRunMetadata:
             "represented_region_acronyms": [
                 str(value) for value in self.represented_region_acronyms
             ],
-            "dilation_fraction": float(self.dilation_fraction),
+            "dilation_fraction": (
+                None
+                if self.dilation_fraction is None
+                else float(self.dilation_fraction)
+            ),
+            "region_filter": (
+                None if self.region_filter is None else self.region_filter.to_dict()
+            ),
             "requested_cluster_count": self.requested_cluster_count,
             "actual_cluster_count": int(self.actual_cluster_count),
             "dbscan_eps": self.dbscan_eps,
@@ -406,6 +651,8 @@ def query_ccf_soma_coordinates(
     resolution: float,
     file_ids: list[str] | tuple[str, ...] | None = None,
     voxel_id_map: NDArray[np.int32] | None = None,
+    prepared_region_filter=None,
+    excluded_file_ids: set[str] | None = None,
 ) -> tuple[list[str], NDArray[np.float64], int]:
     """Return scoped per-neuron CCF soma coordinates and contributing rows.
 
@@ -444,6 +691,23 @@ def query_ccf_soma_coordinates(
         )
     if soma_df.empty:
         return [], np.empty((0, 3), dtype=np.float64), 0
+
+    if prepared_region_filter is not None:
+        from .region_filter import excluded_soma_file_ids, filter_soma_frame
+
+        soma_df = filter_soma_frame(soma_df, prepared_region_filter)
+        if excluded_file_ids is None:
+            excluded_file_ids = excluded_soma_file_ids(
+                parquet_path,
+                prepared_region_filter,
+                file_ids=file_ids,
+            )
+        if excluded_file_ids:
+            soma_df = soma_df[
+                ~soma_df["file_id"].astype(str).isin(excluded_file_ids)
+            ].reset_index(drop=True)
+        if soma_df.empty:
+            return [], np.empty((0, 3), dtype=np.float64), 0
 
     coords = soma_df[["x", "y", "z"]].to_numpy(dtype=np.float64)
     retained = np.all(np.isfinite(coords), axis=1)

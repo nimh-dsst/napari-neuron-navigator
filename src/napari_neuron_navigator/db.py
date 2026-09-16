@@ -552,6 +552,19 @@ class NeuronDatabase:
 
         return stats
 
+    def get_unique_node_types(self) -> tuple[int, ...]:
+        """Return sorted SWC node-type codes represented in the dataset."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT type FROM neurons WHERE type IS NOT NULL ORDER BY type"
+        ).fetchall()
+        values: list[int] = []
+        for row in rows:
+            try:
+                values.append(int(row[0]))
+            except (TypeError, ValueError):
+                continue
+        return tuple(values)
+
     def get_neurons_by_mask(
         self,
         mask_volume: NDArray[np.bool_] | NDArray[np.uint8] | np.ndarray,

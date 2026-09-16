@@ -53,13 +53,18 @@ from ..flatmap_heatmap import (
 )
 from .collapsible_section import CollapsibleSection
 from .node_type_selector import NodeTypeSelectorComboBox
+from .region_filter_editor import RegionFilterEditorWidget
 from .region_selector import RegionSelectorWidget
 
 if TYPE_CHECKING:
     import napari
     from brainglobe_atlasapi import BrainGlobeAtlas
 
-    from ..analysis.clustering import ClusterRegionSelection, ClusterResult
+    from ..analysis.clustering import (
+        ClusterRegionFilter,
+        ClusterRegionSelection,
+        ClusterResult,
+    )
     from ..db import NeuronDatabase
 
 logger = logging.getLogger(__name__)
@@ -78,7 +83,8 @@ _FLATMAP_STYLE_LABELS = {
 }
 _FLATMAP_COORDS_INFO_TEXT = (
     "Clustering uses flatmap/depth coordinates in the loaded Parquet. "
-    "Target-region filtering in flat map space is not yet available."
+    "Region filters use each node's original CCFv3 coordinates before "
+    "flatmap binning or soma clustering."
 )
 _DEPTH_SCALE_TOOLTIP = (
     "Weight of cortical depth relative to flat map position.\n\n"
@@ -139,6 +145,7 @@ class _ClusteringRequest:
     scope: str
     file_ids: tuple[str, ...] | None
     region_selection: ClusterRegionSelection | None
+    region_filter: ClusterRegionFilter | None
     dilation_fraction: float
     linkage_method: str
     n_clusters: int
@@ -399,6 +406,7 @@ class AnalysisTabWidget(QWidget):
         self._heatmap_batch_mode: bool = False
         self._slice_projector = None
         self._dataset_region_ids: set[int] = set()
+        self._dataset_node_types: tuple[int, ...] = (1,)
         self._clustermap_rendered = False
         self._cluster_region_query_scope = _ANALYSIS_SCOPE_WHOLE
         self._current_table_file_ids_provider = None
@@ -427,6 +435,7 @@ class AnalysisTabWidget(QWidget):
         """Cache dataset region IDs and refresh analysis selectors."""
         if self._db is None:
             self._dataset_region_ids = set()
+            self._dataset_node_types = (1,)
             self._refresh_analysis_region_selectors()
             return
 
@@ -447,6 +456,11 @@ class AnalysisTabWidget(QWidget):
                 normalized_ids.add(value)
 
         self._dataset_region_ids = normalized_ids
+        get_types = getattr(self._db, "get_unique_node_types", None)
+        if callable(get_types):
+            self._dataset_node_types = tuple(get_types()) or (1,)
+        else:
+            self._dataset_node_types = (1,)
         self._refresh_analysis_region_selectors()
 
     def set_atlas(self, atlas: BrainGlobeAtlas) -> None:
@@ -654,16 +668,23 @@ class AnalysisTabWidget(QWidget):
         scope_row.addWidget(self._cluster_region_scope_combo)
         corr_layout.addLayout(scope_row)
 
-        # Target region
+        # Per-scope anatomical include/exclude rules.
         region_row = QHBoxLayout()
-        self._cluster_region_target_label = QLabel("Target region:")
+        self._cluster_region_target_label = QLabel("Included regions:")
         region_row.addWidget(self._cluster_region_target_label)
         self._cluster_region_summary_label = QLabel("None selected")
         region_row.addWidget(self._cluster_region_summary_label)
         corr_layout.addLayout(region_row)
 
+        exclude_region_row = QHBoxLayout()
+        self._cluster_exclude_region_label = QLabel("Excluded regions:")
+        exclude_region_row.addWidget(self._cluster_exclude_region_label)
+        self._cluster_exclude_region_summary_label = QLabel("None")
+        exclude_region_row.addWidget(self._cluster_exclude_region_summary_label)
+        corr_layout.addLayout(exclude_region_row)
+
         self._cluster_region_section = CollapsibleSection(
-            "Select Target Region",
+            "Region Filters",
             expanded=False,
         )
         cluster_region_layout = self._cluster_region_section.content_layout()
@@ -673,58 +694,63 @@ class AnalysisTabWidget(QWidget):
         whole_page = QWidget()
         whole_layout = QVBoxLayout(whole_page)
         whole_layout.setContentsMargins(0, 0, 0, 0)
-        self._whole_parquet_cluster_region_selector = RegionSelectorWidget(
-            single_select=False,
-            show_include_children=False,
-            force_include_children=True,
+        self._whole_parquet_region_filter_editor = RegionFilterEditorWidget(
+            node_types=self._dataset_node_types,
         )
-        self._whole_parquet_cluster_region_selector.selection_changed.connect(
-            self._on_cluster_region_selection_changed
+        self._whole_parquet_region_filter_editor.rules_changed.connect(
+            self._on_cluster_region_rules_changed
         )
-        whole_layout.addWidget(self._whole_parquet_cluster_region_selector)
+        whole_layout.addWidget(self._whole_parquet_region_filter_editor)
         self._cluster_region_scope_stack.addWidget(whole_page)
 
         current_page = QWidget()
         current_layout = QVBoxLayout(current_page)
         current_layout.setContentsMargins(0, 0, 0, 0)
-        self._current_table_cluster_region_selector = RegionSelectorWidget(
-            single_select=False,
-            show_include_children=False,
-            force_include_children=True,
+        self._current_table_region_filter_editor = RegionFilterEditorWidget(
+            node_types=self._dataset_node_types,
         )
-        self._current_table_cluster_region_selector.selection_changed.connect(
-            self._on_cluster_region_selection_changed
+        self._current_table_region_filter_editor.rules_changed.connect(
+            self._on_cluster_region_rules_changed
         )
-        current_layout.addWidget(self._current_table_cluster_region_selector)
+        current_layout.addWidget(self._current_table_region_filter_editor)
         self._cluster_region_scope_stack.addWidget(current_page)
 
         selected_page = QWidget()
         selected_layout = QVBoxLayout(selected_page)
         selected_layout.setContentsMargins(0, 0, 0, 0)
-        self._selected_rows_cluster_region_selector = RegionSelectorWidget(
-            single_select=False,
-            show_include_children=False,
-            force_include_children=True,
+        self._selected_rows_region_filter_editor = RegionFilterEditorWidget(
+            node_types=self._dataset_node_types,
         )
-        self._selected_rows_cluster_region_selector.selection_changed.connect(
-            self._on_cluster_region_selection_changed
+        self._selected_rows_region_filter_editor.rules_changed.connect(
+            self._on_cluster_region_rules_changed
         )
-        selected_layout.addWidget(self._selected_rows_cluster_region_selector)
+        selected_layout.addWidget(self._selected_rows_region_filter_editor)
         self._cluster_region_scope_stack.addWidget(selected_page)
+
+        # Compatibility aliases keep legacy inclusion-only helpers and callers
+        # working while the visible editor owns both sides of the filter.
+        self._whole_parquet_cluster_region_selector = (
+            self._whole_parquet_region_filter_editor.include_selector
+        )
+        self._current_table_cluster_region_selector = (
+            self._current_table_region_filter_editor.include_selector
+        )
+        self._selected_rows_cluster_region_selector = (
+            self._selected_rows_region_filter_editor.include_selector
+        )
 
         cluster_region_layout.addWidget(self._cluster_region_scope_stack)
         corr_layout.addWidget(self._cluster_region_section)
 
-        # Dilation fraction
-        dilation_row = QHBoxLayout()
+        # Hidden legacy controls support older programmatic callers. New UI
+        # stores dilation independently on each Region Filters table row.
         self._dilation_label = QLabel("Dilation %:")
-        dilation_row.addWidget(self._dilation_label)
+        self._dilation_label.setVisible(False)
         self._dilation_spin = QSpinBox()
         self._dilation_spin.setRange(0, 100)
         self._dilation_spin.setValue(0)
         self._dilation_spin.setSuffix("%")
-        dilation_row.addWidget(self._dilation_spin)
-        corr_layout.addLayout(dilation_row)
+        self._dilation_spin.setVisible(False)
 
         # Linkage method
         self._linkage_row = QHBoxLayout()
@@ -1059,18 +1085,35 @@ class AnalysisTabWidget(QWidget):
             if cluster_scope == _ANALYSIS_SCOPE_WHOLE
             else "All regions (optional)"
         )
-        self._cluster_region_summary_label.setText(
-            self._format_selected_region_text(
+        editor = self._active_region_filter_editor()
+        if editor is not None:
+            include_text = editor.summary(excluded=False)
+            if include_text == "None":
+                include_text = self._format_selected_region_text(
+                    self._active_cluster_region_selector(),
+                    empty_text=cluster_empty_text,
+                )
+            exclude_text = editor.summary(excluded=True)
+        else:
+            include_text = self._format_selected_region_text(
                 self._active_cluster_region_selector(),
                 empty_text=cluster_empty_text,
             )
+            exclude_text = "None"
+        self._cluster_region_summary_label.setText(include_text)
+        exclude_summary = getattr(
+            self,
+            "_cluster_exclude_region_summary_label",
+            None,
         )
+        if exclude_summary is not None:
+            exclude_summary.setText(exclude_text)
         target_label = getattr(self, "_cluster_region_target_label", None)
         if target_label is not None:
             target_label.setText(
-                "Target region:"
+                "Included regions:"
                 if cluster_scope == _ANALYSIS_SCOPE_WHOLE
-                else "Target region (optional):"
+                else "Included regions (optional):"
             )
         self._heat_region_summary_label.setText(
             self._format_selected_region_text(
@@ -1100,33 +1143,64 @@ class AnalysisTabWidget(QWidget):
     def _refresh_analysis_region_selectors(self) -> None:
         """Rebuild Analysis region selectors from atlas hierarchy and dataset IDs."""
         heat_selector = getattr(self, "_heat_region_selector", None)
+        editors = self._region_filter_editors()
         cluster_selectors = self._cluster_region_selectors()
         if not cluster_selectors or heat_selector is None:
             return
 
-        selectors = (*cluster_selectors, heat_selector)
-        previous_regions = [self._selected_regions(selector) for selector in selectors]
+        previous_heat_regions = self._selected_regions(heat_selector)
 
         if self._atlas is None or not self._dataset_region_ids:
-            for selector in selectors:
-                selector.clear()
+            if editors:
+                for editor in editors:
+                    editor.clear()
+            else:
+                for selector in cluster_selectors:
+                    selector.clear()
+            if heat_selector is not None:
+                heat_selector.clear()
             self._update_region_summary_labels()
             return
 
         allowed_ids = self._analysis_allowed_structure_ids()
-        for selector, prior_regions in zip(selectors, previous_regions):
-            selector.set_allowed_structure_ids(allowed_ids)
-            selector.set_atlas(self._atlas)
-            retained = [
-                (region_id, acronym)
-                for region_id, acronym in prior_regions
-                if region_id in allowed_ids
+        if editors:
+            for editor in editors:
+                editor.set_node_types(self._dataset_node_types)
+                editor.set_atlas_and_allowed_ids(self._atlas, allowed_ids)
+        else:
+            previous_regions = [
+                self._selected_regions(selector) for selector in cluster_selectors
             ]
-            if len(retained) > 1 and hasattr(selector, "select_regions"):
-                selector.select_regions([acronym for _region_id, acronym in retained])
-            else:
-                previous_id = retained[0][0] if retained else None
-                selector.select_region_by_id(previous_id)
+            for selector, prior_regions in zip(cluster_selectors, previous_regions):
+                selector.set_allowed_structure_ids(allowed_ids)
+                selector.set_atlas(self._atlas)
+                retained = [
+                    (region_id, acronym)
+                    for region_id, acronym in prior_regions
+                    if region_id in allowed_ids
+                ]
+                if len(retained) > 1 and hasattr(selector, "select_regions"):
+                    selector.select_regions(
+                        [acronym for _region_id, acronym in retained]
+                    )
+                else:
+                    previous_id = retained[0][0] if retained else None
+                    selector.select_region_by_id(previous_id)
+
+        heat_selector.set_allowed_structure_ids(allowed_ids)
+        heat_selector.set_atlas(self._atlas)
+        retained_heat = [
+            (region_id, acronym)
+            for region_id, acronym in previous_heat_regions
+            if region_id in allowed_ids
+        ]
+        if len(retained_heat) > 1 and hasattr(heat_selector, "select_regions"):
+            heat_selector.select_regions(
+                [acronym for _region_id, acronym in retained_heat]
+            )
+        else:
+            previous_id = retained_heat[0][0] if retained_heat else None
+            heat_selector.select_region_by_id(previous_id)
 
         self._update_region_summary_labels()
 
@@ -1179,6 +1253,29 @@ class AnalysisTabWidget(QWidget):
                 continue
             selectors.append(selector)
         return tuple(selectors)
+
+    def _region_filter_editors(self) -> tuple[RegionFilterEditorWidget, ...]:
+        """Return all scope-specific filter editors, de-duplicated."""
+        editors: list[RegionFilterEditorWidget] = []
+        for name in (
+            "_whole_parquet_region_filter_editor",
+            "_current_table_region_filter_editor",
+            "_selected_rows_region_filter_editor",
+        ):
+            editor = getattr(self, name, None)
+            if editor is not None and editor not in editors:
+                editors.append(editor)
+        return tuple(editors)
+
+    def _active_region_filter_editor(self) -> RegionFilterEditorWidget | None:
+        """Return the include/exclude editor for the selected input scope."""
+        scope = self._selected_cluster_region_scope()
+        name = {
+            _ANALYSIS_SCOPE_WHOLE: "_whole_parquet_region_filter_editor",
+            _ANALYSIS_SCOPE_CURRENT: "_current_table_region_filter_editor",
+            _ANALYSIS_SCOPE_SELECTED: "_selected_rows_region_filter_editor",
+        }.get(scope, "_whole_parquet_region_filter_editor")
+        return getattr(self, name, None)
 
     def _cluster_region_selector_for_scope(
         self,
@@ -1496,6 +1593,17 @@ class AnalysisTabWidget(QWidget):
             ],
         )
 
+    def _selected_cluster_region_filter(self):
+        """Return canonical include/exclude rules for the active scope."""
+        editor = self._active_region_filter_editor()
+        if editor is not None:
+            return editor.region_filter(self._represented_region_entries_for_selections)
+        return None
+
+    def _on_cluster_region_rules_changed(self) -> None:
+        """Keep summaries synchronized with per-region rule edits."""
+        self._update_region_summary_labels()
+
     def _on_cluster_region_selection_changed(self, _acronyms: list[str]) -> None:
         """Keep the clustering region summary in sync with tree selection."""
         self._update_region_summary_labels()
@@ -1528,17 +1636,19 @@ class AnalysisTabWidget(QWidget):
         if status_label is not None:
             status_label.setVisible(is_flatmap)
 
-        # CCFv3-only region + dilation controls (region filtering in flat map
-        # space is handled separately and not yet available).
+        # Region rules use CCF coordinates before either CCF or flatmap
+        # clustering, so the editor remains available in both spaces.
         for widget in (
             getattr(self, "_cluster_region_target_label", None),
             getattr(self, "_cluster_region_summary_label", None),
+            getattr(self, "_cluster_exclude_region_label", None),
+            getattr(self, "_cluster_exclude_region_summary_label", None),
             getattr(self, "_cluster_region_section", None),
-            getattr(self, "_dilation_label", None),
-            getattr(self, "_dilation_spin", None),
         ):
             if widget is not None:
-                widget.setVisible(not is_flatmap)
+                widget.setVisible(True)
+        for editor in self._region_filter_editors():
+            editor.set_soma_mode(is_soma)
 
         # Flatmap style selector (both flatmap methods need the column family).
         for widget in (
@@ -1697,20 +1807,44 @@ class AnalysisTabWidget(QWidget):
         coordinate_space = self._current_coordinate_space()
         clustering_method = self._clustering_method_combo.currentText()
         scope = self._selected_cluster_region_scope()
+        region_filter = self._selected_cluster_region_filter()
         region_selection = None
-        if coordinate_space == _COORD_SPACE_CCF:
+        if region_filter is not None:
+            region_selection = region_filter.legacy_selection()
+        elif coordinate_space == _COORD_SPACE_CCF:
             region_selection = self._selected_cluster_region_selection()
-            if region_selection is None and scope == _ANALYSIS_SCOPE_WHOLE:
-                self._progress_label.setText("Select at least one target region.")
-                return
-            if (
-                region_selection is not None
-                and not region_selection.represented_region_ids
-            ):
+
+        has_includes = bool(
+            region_filter.include_rules
+            if region_filter is not None
+            else region_selection is not None
+        )
+        if not has_includes and scope == _ANALYSIS_SCOPE_WHOLE:
+            self._progress_label.setText("Select at least one included region.")
+            return
+        if region_filter is not None:
+            empty_rules = [
+                rule.acronym
+                for rule in (
+                    *region_filter.include_rules,
+                    *region_filter.exclude_rules,
+                )
+                if not rule.represented_region_ids
+            ]
+            if empty_rules:
                 self._progress_label.setText(
-                    "Selected region(s) have no represented dataset regions."
+                    "Selected region(s) have no represented dataset regions: "
+                    + ", ".join(empty_rules)
                 )
                 return
+        elif (
+            region_selection is not None
+            and not region_selection.represented_region_ids
+        ):
+            self._progress_label.setText(
+                "Selected region(s) have no represented dataset regions."
+            )
+            return
 
         flatmap_style = None
         if coordinate_space == _COORD_SPACE_FLATMAP:
@@ -1736,9 +1870,10 @@ class AnalysisTabWidget(QWidget):
                 else tuple(str(file_id) for file_id in base_file_ids)
             ),
             region_selection=region_selection,
+            region_filter=region_filter,
             dilation_fraction=(
                 self._dilation_spin.value() / 100.0
-                if region_selection is not None
+                if region_selection is not None and region_filter is None
                 else 0.0
             ),
             linkage_method=self._method_combo.currentText(),
@@ -1775,6 +1910,7 @@ class AnalysisTabWidget(QWidget):
                 "soma" if request.clustering_method == _CLUSTER_METHOD_SOMA else "voxel"
             ),
             region_selection=request.region_selection,
+            region_filter=request.region_filter,
             dilation_fraction=request.dilation_fraction,
             file_ids=(None if request.file_ids is None else list(request.file_ids)),
             flatmap_style=request.flatmap_style,
@@ -1838,7 +1974,15 @@ class AnalysisTabWidget(QWidget):
             )
             self._update_button_states()
             return
-        self._launch_clustering_request(request, result.voxel_id_map)
+        prepared_region_filter = getattr(result, "prepared_region_filter", None)
+        if prepared_region_filter is None:
+            self._launch_clustering_request(request, result.voxel_id_map)
+        else:
+            self._launch_clustering_request(
+                request,
+                result.voxel_id_map,
+                prepared_region_filter,
+            )
 
     def _confirm_large_clustering_run(self, node_count: int) -> bool:
         """Ask whether a clustering input above the warning threshold may run."""
@@ -1858,6 +2002,7 @@ class AnalysisTabWidget(QWidget):
         self,
         request: _ClusteringRequest,
         voxel_id_map: np.ndarray | None,
+        prepared_region_filter=None,
     ) -> None:
         """Launch a previously counted immutable clustering request."""
         from ..workers import (
@@ -1872,6 +2017,11 @@ class AnalysisTabWidget(QWidget):
             "parquet_path": self._parquet_path,
             "atlas": self._atlas,
         }
+        filter_kwargs = {}
+        if request.region_filter is not None:
+            filter_kwargs["region_filter"] = request.region_filter
+        if prepared_region_filter is not None:
+            filter_kwargs["prepared_region_filter"] = prepared_region_filter
         if request.coordinate_space == _COORD_SPACE_FLATMAP:
             if request.clustering_method == _CLUSTER_METHOD_SOMA:
                 worker = FlatmapSomaClusterWorker(
@@ -1885,6 +2035,7 @@ class AnalysisTabWidget(QWidget):
                     file_ids=file_ids,
                     depth_scale=request.flatmap_depth_scale,
                     include_depth=request.flatmap_include_depth,
+                    **filter_kwargs,
                 )
             else:
                 worker = FlatmapParquetCorrelationWorker(
@@ -1897,6 +2048,7 @@ class AnalysisTabWidget(QWidget):
                     n_clusters=request.n_clusters,
                     file_ids=file_ids,
                     collapse_depth=not request.flatmap_include_depth,
+                    **filter_kwargs,
                 )
         elif request.clustering_method == _CLUSTER_METHOD_SOMA:
             worker = SomaClusterWorker(
@@ -1910,6 +2062,7 @@ class AnalysisTabWidget(QWidget):
                 min_samples=request.min_samples,
                 file_ids=file_ids,
                 voxel_id_map=voxel_id_map,
+                **filter_kwargs,
             )
         else:
             worker = CorrelationWorker(
@@ -1920,6 +2073,7 @@ class AnalysisTabWidget(QWidget):
                 n_clusters=request.n_clusters,
                 file_ids=file_ids,
                 voxel_id_map=voxel_id_map,
+                **filter_kwargs,
             )
         self._start_background_worker(worker, self._on_correlation_finished)
 
@@ -2346,6 +2500,11 @@ class AnalysisTabWidget(QWidget):
             f"Clustering complete: {len(result.neuron_ids)} neurons, "
             f"{cluster_msg}. Click Render Dendrogram to view. "
             "Table updated and sorted by cluster."
+        )
+        unassigned_count = len(getattr(result, "unassigned_neuron_ids", ()) or ())
+        progress_message += (
+            f" {unassigned_count} neuron(s) are unclustered after "
+            "region/coordinate filtering."
         )
         if color_summary.colored_count > 0 and color_summary.rendered_count > 0:
             neuron_word = "neuron" if color_summary.rendered_count == 1 else "neurons"
