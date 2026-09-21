@@ -40,6 +40,12 @@ from .region_filter import (
     PreparedClusterRegionFilter,
     prepare_cluster_region_filter,
 )
+from .voxel_filter import (
+    DendriteLabelCoverage,
+    PreparedVoxelNodeFilter,
+    VoxelNodeFilter,
+    query_dendrite_label_coverage,
+)
 
 __all__ = [
     "ClusterExclusionRule",
@@ -48,7 +54,10 @@ __all__ = [
     "ClusterRegionSelection",
     "ClusterResult",
     "ClusterRunMetadata",
+    "DendriteLabelCoverage",
     "PreparedClusterRegionFilter",
+    "PreparedVoxelNodeFilter",
+    "VoxelNodeFilter",
     "build_binary_mask_from_heatmap",
     "build_binary_mask_from_threshold_range",
     "build_node_counts_volume",
@@ -69,5 +78,6 @@ __all__ = [
     "merge_heatmap_volumes",
     "otsu_threshold_positive",
     "prepare_cluster_region_filter",
+    "query_dendrite_label_coverage",
     "smooth_heatmap_volume",
 ]

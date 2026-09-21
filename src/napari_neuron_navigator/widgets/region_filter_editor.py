@@ -32,8 +32,8 @@ from ..analysis.clustering import (
     ClusterRegionFilter,
     ClusterRegionRule,
 )
-from ..swc import NodeType, node_type_label
-from .node_type_selector import NodeTypeSelectorComboBox
+from ..swc import NodeType
+from .node_type_selector import NodeTypeSelectorComboBox, node_type_options
 from .region_selector import RegionSelectorWidget
 
 
@@ -44,16 +44,7 @@ class _RuleSettings:
     minimum_node_count: int = 1
 
 
-def _node_type_options(values: Iterable[int]) -> tuple[tuple[int, str], ...]:
-    options: list[tuple[int, str]] = []
-    for value in sorted({int(item) for item in values}):
-        label = node_type_label(value)
-        if value == NodeType.AXON:
-            label = "Axon-typed (type 2)"
-        elif label.startswith("Type "):
-            label = f"Type {value}"
-        options.append((value, label))
-    return tuple(options)
+_node_type_options = node_type_options
 
 
 class RegionFilterEditorWidget(QWidget):

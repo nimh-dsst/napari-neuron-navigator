@@ -565,6 +565,30 @@ class NeuronDatabase:
                 continue
         return tuple(values)
 
+    def get_dendrite_label_coverage(
+        self,
+        file_ids: list[str] | tuple[str, ...] | None = None,
+    ):
+        """Return whole-neuron basal/apical label coverage keyed by ``file_id``."""
+        from .analysis.voxel_filter import (
+            DendriteLabelCoverage,
+            VoxelNodeFilter,
+            prepare_voxel_node_filter,
+        )
+
+        settings = VoxelNodeFilter(require_dendrite_labels=True)
+        prepared = prepare_voxel_node_filter(
+            self.conn,
+            "neurons",
+            settings,
+            file_ids=file_ids,
+        )
+        return DendriteLabelCoverage(
+            input_file_ids=prepared.input_file_ids,
+            labeled_file_ids=prepared.dendrite_labeled_file_ids or (),
+            dendrite_node_types=settings.dendrite_node_types,
+        )
+
     def get_neurons_by_mask(
         self,
         mask_volume: NDArray[np.bool_] | NDArray[np.uint8] | np.ndarray,

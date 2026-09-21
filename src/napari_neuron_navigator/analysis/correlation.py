@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from .region_filter import PreparedClusterRegionFilter
+    from .voxel_filter import PreparedVoxelNodeFilter, VoxelNodeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,18 @@ def _prepare_region_nodes_view(
     resolution: float,
     file_ids: list[str] | tuple[str, ...] | None,
     prepared_region_filter: PreparedClusterRegionFilter | None = None,
-) -> tuple[bool, bool, str | None, tuple[str, ...]]:
+    voxel_node_filter: VoxelNodeFilter | None = None,
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
+) -> tuple[
+    bool,
+    bool,
+    str | None,
+    tuple[str, ...],
+    str | None,
+    tuple[str, ...],
+]:
     """Create the scoped node-to-voxel view used by counting and correlation."""
-    parquet_path_escaped = (
-        str(parquet_path).replace("\\", "/").replace("'", "''")
-    )
+    parquet_path_escaped = str(parquet_path).replace("\\", "/").replace("'", "''")
     scoped_file_ids = None
     if file_ids is not None:
         scoped_file_ids = list(dict.fromkeys(str(file_id) for file_id in file_ids))
@@ -46,7 +54,7 @@ def _prepare_region_nodes_view(
                 "SELECT CAST(NULL AS VARCHAR) AS swc_id, "
                 "CAST(NULL AS BIGINT) AS voxel_id WHERE FALSE"
             )
-            return False, False, None, ()
+            return False, False, None, (), None, ()
 
     scope_registered = scoped_file_ids is not None
     if scope_registered:
@@ -60,7 +68,8 @@ def _prepare_region_nodes_view(
         else ""
     )
 
-    source_sql = f"read_parquet('{parquet_path_escaped}')"
+    raw_source_sql = f"read_parquet('{parquet_path_escaped}')"
+    source_sql = raw_source_sql
     filter_view_name = None
     filter_relations: tuple[str, ...] = ()
     if prepared_region_filter is not None:
@@ -72,6 +81,33 @@ def _prepare_region_nodes_view(
             source_sql,
             prepared_region_filter,
             view_name=filter_view_name,
+        )
+
+    voxel_filter_view_name = None
+    voxel_filter_relations: tuple[str, ...] = ()
+    if voxel_node_filter is not None and not voxel_node_filter.is_empty:
+        from .voxel_filter import (
+            prepare_voxel_node_filter,
+            register_voxel_filtered_source_view,
+        )
+
+        if prepared_voxel_filter is None:
+            prepared_voxel_filter = prepare_voxel_node_filter(
+                conn,
+                raw_source_sql,
+                voxel_node_filter,
+                file_ids=file_ids,
+            )
+        elif prepared_voxel_filter.settings != voxel_node_filter:
+            raise ValueError(
+                "Prepared voxel filter does not match the requested settings."
+            )
+        voxel_filter_view_name = "cluster_voxel_filtered_ccf_source"
+        source_sql, voxel_filter_relations = register_voxel_filtered_source_view(
+            conn,
+            source_sql,
+            prepared_voxel_filter,
+            view_name=voxel_filter_view_name,
         )
 
     conn.execute(f"""
@@ -103,7 +139,14 @@ def _prepare_region_nodes_view(
             FROM base_nodes b
             JOIN occupied_voxels v USING (zi, yi, xi)
         """)
-        return False, scope_registered, filter_view_name, filter_relations
+        return (
+            False,
+            scope_registered,
+            filter_view_name,
+            filter_relations,
+            voxel_filter_view_name,
+            voxel_filter_relations,
+        )
 
     Z, Y, X = voxel_id_map.shape
     conn.register(
@@ -130,7 +173,14 @@ def _prepare_region_nodes_view(
         FROM mapped
         WHERE voxel_id >= 0
     """)
-    return True, scope_registered, filter_view_name, filter_relations
+    return (
+        True,
+        scope_registered,
+        filter_view_name,
+        filter_relations,
+        voxel_filter_view_name,
+        voxel_filter_relations,
+    )
 
 
 def _cleanup_region_nodes_view(
@@ -140,6 +190,8 @@ def _cleanup_region_nodes_view(
     scope_registered: bool,
     filter_view_name: str | None = None,
     filter_relations: tuple[str, ...] = (),
+    voxel_filter_view_name: str | None = None,
+    voxel_filter_relations: tuple[str, ...] = (),
 ) -> None:
     """Remove temporary relations and Arrow registrations."""
     for relation in ("region_nodes", "base_nodes", "occupied_voxels"):
@@ -158,6 +210,14 @@ def _cleanup_region_nodes_view(
             conn.unregister("scope_ids")
         except Exception:
             pass
+    if voxel_filter_view_name is not None:
+        from .voxel_filter import cleanup_voxel_filtered_source_view
+
+        cleanup_voxel_filtered_source_view(
+            conn,
+            voxel_filter_view_name,
+            voxel_filter_relations,
+        )
     if filter_view_name is not None:
         from .region_filter import cleanup_filtered_source_view
 
@@ -175,6 +235,8 @@ def count_correlation_input_nodes(
     resolution: float,
     file_ids: list[str] | tuple[str, ...] | None = None,
     prepared_region_filter: PreparedClusterRegionFilter | None = None,
+    voxel_node_filter: VoxelNodeFilter | None = None,
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
 ) -> int:
     """Return the exact node-row count used by CCF voxel correlation."""
     (
@@ -182,6 +244,8 @@ def count_correlation_input_nodes(
         scope_registered,
         filter_view_name,
         filter_relations,
+        voxel_filter_view_name,
+        voxel_filter_relations,
     ) = _prepare_region_nodes_view(
         conn,
         parquet_path,
@@ -189,6 +253,8 @@ def count_correlation_input_nodes(
         resolution,
         file_ids,
         prepared_region_filter,
+        voxel_node_filter,
+        prepared_voxel_filter,
     )
     try:
         row = conn.execute("SELECT COUNT(*) FROM region_nodes").fetchone()
@@ -200,6 +266,8 @@ def count_correlation_input_nodes(
             scope_registered=scope_registered,
             filter_view_name=filter_view_name,
             filter_relations=filter_relations,
+            voxel_filter_view_name=voxel_filter_view_name,
+            voxel_filter_relations=voxel_filter_relations,
         )
 
 
@@ -211,6 +279,8 @@ def compute_pearson_correlation_matrix(
     file_ids: list[str] | tuple[str, ...] | None = None,
     progress_callback: callable | None = None,
     prepared_region_filter: PreparedClusterRegionFilter | None = None,
+    voxel_node_filter: VoxelNodeFilter | None = None,
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
 ) -> pd.DataFrame:
     """Compute pairwise Pearson correlation of neuron node counts per voxel.
 
@@ -251,6 +321,8 @@ def compute_pearson_correlation_matrix(
         scope_registered,
         filter_view_name,
         filter_relations,
+        voxel_filter_view_name,
+        voxel_filter_relations,
     ) = _prepare_region_nodes_view(
         conn,
         parquet_path,
@@ -258,6 +330,8 @@ def compute_pearson_correlation_matrix(
         resolution,
         file_ids,
         prepared_region_filter,
+        voxel_node_filter,
+        prepared_voxel_filter,
     )
 
     _progress("Mapping nodes to voxel IDs", 2)
@@ -372,6 +446,8 @@ def compute_pearson_correlation_matrix(
         scope_registered=scope_registered,
         filter_view_name=filter_view_name,
         filter_relations=filter_relations,
+        voxel_filter_view_name=voxel_filter_view_name,
+        voxel_filter_relations=voxel_filter_relations,
     )
 
     n_neurons = result_df["swc_id_1"].nunique()

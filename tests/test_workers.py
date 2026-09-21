@@ -23,6 +23,7 @@ from napari_neuron_navigator.analysis.flatmap_correlation import (
     FlatmapVoxelCorrelationSource,
 )
 from napari_neuron_navigator.analysis.region_filter import PreparedClusterRegionFilter
+from napari_neuron_navigator.analysis.voxel_filter import VoxelNodeFilter
 from napari_neuron_navigator.isocortex_layers import AllenIsocortexLayerMap
 from napari_neuron_navigator.parquet import BatchParquetConversionSummary
 from napari_neuron_navigator.point_import import PointParquetAppendSummary
@@ -1227,6 +1228,74 @@ def test_clustering_preflight_prepares_new_filter_once_and_returns_it(monkeypatc
     assert finished[0].prepared_region_filter is prepared
 
 
+def test_clustering_preflight_prepares_voxel_filter_once_and_returns_it(
+    monkeypatch,
+) -> None:
+    workers = _import_workers_module()
+    settings = VoxelNodeFilter(node_type_mode="include", node_types=(2,))
+    prepared = object()
+    prepare = MagicMock(return_value=prepared)
+    count_helper = MagicMock(return_value=9)
+    monkeypatch.setattr(
+        "napari_neuron_navigator.analysis.voxel_filter."
+        "prepare_voxel_node_filter_from_parquet",
+        prepare,
+    )
+    monkeypatch.setattr(
+        "napari_neuron_navigator.analysis.correlation.count_correlation_input_nodes",
+        count_helper,
+    )
+    monkeypatch.setattr("duckdb.connect", lambda: _FakeDuckConnection())
+    worker = workers.ClusteringPreflightWorker(
+        parquet_path="neurons.parquet",
+        atlas=types.SimpleNamespace(resolution=(25.0, 25.0, 25.0)),
+        coordinate_space="ccf",
+        clustering_method="voxel",
+        file_ids=["n1", "n2"],
+        voxel_node_filter=settings,
+    )
+    finished: list = []
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    prepare.assert_called_once_with(
+        "neurons.parquet",
+        settings,
+        file_ids=["n1", "n2"],
+    )
+    assert count_helper.call_args.kwargs["voxel_node_filter"] is settings
+    assert count_helper.call_args.kwargs["prepared_voxel_filter"] is prepared
+    assert finished[0].node_count == 9
+    assert finished[0].prepared_voxel_filter is prepared
+
+
+def test_dendrite_coverage_worker_forwards_scope_and_types(monkeypatch) -> None:
+    workers = _import_workers_module()
+    expected = object()
+    query = MagicMock(return_value=expected)
+    monkeypatch.setattr(
+        "napari_neuron_navigator.analysis.voxel_filter.query_dendrite_label_coverage",
+        query,
+    )
+    worker = workers.DendriteCoverageWorker(
+        parquet_path="neurons.parquet",
+        file_ids=["a", "b"],
+        dendrite_node_types=(3,),
+    )
+    finished: list = []
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    query.assert_called_once_with(
+        "neurons.parquet",
+        file_ids=["a", "b"],
+        dendrite_node_types=(3,),
+    )
+    assert finished == [expected]
+
+
 def test_flatmap_correlation_worker_projects_region_mask_with_sentinel_plane(
     monkeypatch,
 ) -> None:
@@ -1328,9 +1397,7 @@ def test_flatmap_correlation_worker_applies_prepared_ccf_filter() -> None:
     excluded = np.zeros((4, 4, 4), dtype=bool)
     excluded[0, 0, 0] = True
     region_filter = ClusterRegionFilter(
-        exclude_rules=(
-            ClusterExclusionRule(region_id=10, acronym="EXC"),
-        )
+        exclude_rules=(ClusterExclusionRule(region_id=10, acronym="EXC"),)
     )
     prepared = PreparedClusterRegionFilter(
         region_filter=region_filter,

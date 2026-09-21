@@ -25,6 +25,7 @@ from napari_neuron_navigator.analysis.flatmap_correlation import (
     query_flatmap_soma_coordinates_and_count,
 )
 from napari_neuron_navigator.analysis.region_filter import PreparedClusterRegionFilter
+from napari_neuron_navigator.analysis.voxel_filter import VoxelNodeFilter
 from napari_neuron_navigator.flatmap_parquet import read_flatmap_parquet_transform_info
 
 _V3_COLUMNS = (
@@ -212,6 +213,73 @@ def test_flatmap_voxel_filter_uses_ccf_coordinates_before_binning(
     assert result.unassigned_neuron_ids == ["neuron_0"]
 
 
+def test_flatmap_voxel_node_filter_matches_preflight_and_marks_cohort_unassigned(
+    tmp_path,
+) -> None:
+    frame = _v3_augmented_frame()
+    # This neuron now has soma + axon-typed rows but no type 3/4 evidence.
+    neuron_zero_morphology = (frame["file_id"] == "neuron_0") & (frame["type"] != 1)
+    frame.loc[neuron_zero_morphology, "type"] = 2
+    path = tmp_path / "mixed_dendrite_coverage.parquet"
+    frame.to_parquet(path, index=False)
+    settings = VoxelNodeFilter(
+        node_type_mode="include",
+        node_types=(3,),
+        require_dendrite_labels=True,
+    )
+
+    count = count_flatmap_voxel_correlation_nodes(
+        str(path),
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        voxel_node_filter=settings,
+    )
+    result, count_data, _provenance = compute_flatmap_voxel_correlation_from_parquet(
+        str(path),
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        n_clusters=2,
+        voxel_node_filter=settings,
+    )
+
+    expected = int(((frame["file_id"] != "neuron_0") & (frame["type"] == 3)).sum())
+    assert count == expected
+    assert count_data.rendered_node_count == expected
+    assert result.neuron_ids == ["neuron_1", "neuron_2", "neuron_3"]
+    assert result.unassigned_neuron_ids == ["neuron_0"]
+
+
+def test_flatmap_soma_distance_filter_uses_raw_ccf_xyz_microns(
+    flatmap_parquet,
+) -> None:
+    frame, path = flatmap_parquet
+    settings = VoxelNodeFilter(exclude_within_soma_um=40.0)
+    soma = (
+        frame.loc[frame["type"] == 1, ["file_id", "x", "y", "z"]]
+        .set_index("file_id")
+        .rename(columns={"x": "sx", "y": "sy", "z": "sz"})
+    )
+    joined = frame.join(soma, on="file_id")
+    distance_squared = (
+        (joined["x"] - joined["sx"]) ** 2
+        + (joined["y"] - joined["sy"]) ** 2
+        + (joined["z"] - joined["sz"]) ** 2
+    )
+    expected = int((distance_squared > 40.0**2).sum())
+
+    count = count_flatmap_voxel_correlation_nodes(
+        path,
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        voxel_node_filter=settings,
+    )
+
+    assert count == expected
+
+
 def test_flatmap_soma_filter_rejects_neuron_by_morphology_rule(
     flatmap_parquet,
 ) -> None:
@@ -268,9 +336,7 @@ def test_flatmap_soma_exclusion_counts_nodes_without_flatmap_projection(
 
 def test_flatmap_soma_include_uses_all_soma_ccf_rows(tmp_path) -> None:
     frame = _v3_augmented_frame()
-    extra_soma = frame[
-        (frame["file_id"] == "neuron_0") & (frame["type"] == 1)
-    ].copy()
+    extra_soma = frame[(frame["file_id"] == "neuron_0") & (frame["type"] == 1)].copy()
     extra_soma.loc[:, "node_id"] = int(frame["node_id"].max()) + 1
     extra_soma.loc[:, ["x", "y", "z"]] = 1_000.0
     extra_soma.loc[:, "flatmap_shaped_valid"] = False

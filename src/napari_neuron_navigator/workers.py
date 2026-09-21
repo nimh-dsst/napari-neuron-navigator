@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         ClusterResult,
     )
     from .analysis.region_filter import PreparedClusterRegionFilter
+    from .analysis.voxel_filter import PreparedVoxelNodeFilter, VoxelNodeFilter
     from .isocortex_layers import AllenIsocortexLayerMap
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,7 @@ def _scoped_source_file_ids(
     conn = duckdb.connect()
     try:
         relation = conn.execute(
-            f"SELECT DISTINCT file_id FROM read_parquet('{source}') "
-            "ORDER BY file_id"
+            f"SELECT DISTINCT file_id FROM read_parquet('{source}') ORDER BY file_id"
         )
         fetchall = getattr(relation, "fetchall", None)
         if callable(fetchall):
@@ -345,6 +345,45 @@ class ClusteringPreflightResult:
     node_count: int
     voxel_id_map: np.ndarray | None = None
     prepared_region_filter: PreparedClusterRegionFilter | None = None
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None
+
+
+class DendriteCoverageWorker(QObject):
+    """Inspect complete neurons for standard dendrite node-type labels."""
+
+    progress = Signal(str, int, int)
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        parquet_path: str,
+        file_ids: list[str] | None = None,
+        dendrite_node_types: tuple[int, ...] = (3, 4),
+    ) -> None:
+        super().__init__()
+        self._parquet_path = str(parquet_path)
+        self._file_ids = (
+            None if file_ids is None else [str(value) for value in file_ids]
+        )
+        self._dendrite_node_types = tuple(int(value) for value in dendrite_node_types)
+
+    def run(self) -> None:
+        """Query dendrite-label coverage without filtering morphology rows first."""
+        try:
+            from .analysis.voxel_filter import query_dendrite_label_coverage
+
+            self.progress.emit("Scanning complete neuron node types...", 1, 1)
+            result = query_dendrite_label_coverage(
+                self._parquet_path,
+                file_ids=self._file_ids,
+                dendrite_node_types=self._dendrite_node_types,
+            )
+            self.finished.emit(result)
+        except Exception as error:
+            logger.exception("Dendrite-label coverage scan failed")
+            self.error.emit(str(error))
 
 
 class ClusteringPreflightWorker(QObject):
@@ -370,6 +409,7 @@ class ClusteringPreflightWorker(QObject):
         flatmap_depth_bin_um: float = 0.0,
         flatmap_include_depth_minus_one: bool = True,
         flatmap_collapse_depth: bool = False,
+        voxel_node_filter: VoxelNodeFilter | None = None,
     ) -> None:
         super().__init__()
         self._parquet_path = str(parquet_path)
@@ -389,13 +429,30 @@ class ClusteringPreflightWorker(QObject):
         # Collapsing does not change the node count, but it shrinks the voxel
         # grid the size guard checks, so the preflight must agree with the run.
         self._flatmap_collapse_depth = bool(flatmap_collapse_depth)
+        self._voxel_node_filter = voxel_node_filter
 
     def run(self) -> None:
         """Prepare an optional region map and count method-specific node rows."""
         try:
             voxel_id_map = None
             prepared_region_filter = None
+            prepared_voxel_filter = None
             resolution = float(self._atlas.resolution[0])
+            if (
+                self._clustering_method == "voxel"
+                and self._voxel_node_filter is not None
+                and not self._voxel_node_filter.is_empty
+            ):
+                from .analysis.voxel_filter import (
+                    prepare_voxel_node_filter_from_parquet,
+                )
+
+                self.progress.emit("Preparing voxel node filters...", 1, 2)
+                prepared_voxel_filter = prepare_voxel_node_filter_from_parquet(
+                    self._parquet_path,
+                    self._voxel_node_filter,
+                    file_ids=self._file_ids,
+                )
             if self._region_filter is not None and not self._region_filter.is_empty:
                 from .analysis.region_filter import prepare_cluster_region_filter
 
@@ -429,6 +486,12 @@ class ClusteringPreflightWorker(QObject):
                         if prepared_region_filter is not None:
                             count_kwargs["prepared_region_filter"] = (
                                 prepared_region_filter
+                            )
+                        if self._voxel_node_filter is not None:
+                            count_kwargs["voxel_node_filter"] = self._voxel_node_filter
+                        if prepared_voxel_filter is not None:
+                            count_kwargs["prepared_voxel_filter"] = (
+                                prepared_voxel_filter
                             )
                         node_count = count_correlation_input_nodes(
                             conn,
@@ -470,6 +533,10 @@ class ClusteringPreflightWorker(QObject):
                 }
                 if prepared_region_filter is not None:
                     flatmap_kwargs["prepared_region_filter"] = prepared_region_filter
+                if self._voxel_node_filter is not None:
+                    flatmap_kwargs["voxel_node_filter"] = self._voxel_node_filter
+                if prepared_voxel_filter is not None:
+                    flatmap_kwargs["prepared_voxel_filter"] = prepared_voxel_filter
                 node_count = count_flatmap_voxel_correlation_nodes(
                     self._parquet_path,
                     **flatmap_kwargs,
@@ -499,6 +566,7 @@ class ClusteringPreflightWorker(QObject):
                     node_count=int(node_count),
                     voxel_id_map=voxel_id_map,
                     prepared_region_filter=prepared_region_filter,
+                    prepared_voxel_filter=prepared_voxel_filter,
                 )
             )
         except Exception as e:
@@ -1088,6 +1156,8 @@ class CorrelationWorker(QObject):
         file_ids: list[str] | None = None,
         voxel_id_map: np.ndarray | None = None,
         prepared_region_filter: PreparedClusterRegionFilter | None = None,
+        voxel_node_filter: VoxelNodeFilter | None = None,
+        prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
     ):
         super().__init__()
         self._parquet_path = parquet_path
@@ -1102,6 +1172,8 @@ class CorrelationWorker(QObject):
         )
         self._voxel_id_map = voxel_id_map
         self._prepared_region_filter = prepared_region_filter
+        self._voxel_node_filter = voxel_node_filter
+        self._prepared_voxel_filter = prepared_voxel_filter
 
     def run(self) -> None:
         """Execute the full pipeline."""
@@ -1153,6 +1225,12 @@ class CorrelationWorker(QObject):
                     correlation_kwargs["prepared_region_filter"] = (
                         prepared_region_filter
                     )
+                if self._voxel_node_filter is not None:
+                    correlation_kwargs["voxel_node_filter"] = self._voxel_node_filter
+                if self._prepared_voxel_filter is not None:
+                    correlation_kwargs["prepared_voxel_filter"] = (
+                        self._prepared_voxel_filter
+                    )
                 corr_df = compute_pearson_correlation_matrix(
                     conn,
                     self._parquet_path,
@@ -1180,13 +1258,26 @@ class CorrelationWorker(QObject):
             )
             input_ids = (
                 _scoped_source_file_ids(self._parquet_path, self._file_ids)
-                if self._file_ids is not None or self._region_filter is not None
+                if (
+                    self._file_ids is not None
+                    or self._region_filter is not None
+                    or self._voxel_node_filter is not None
+                )
                 else list(result.neuron_ids)
             )
             clustered_ids = set(result.neuron_ids)
             result.unassigned_neuron_ids = [
                 file_id for file_id in input_ids if file_id not in clustered_ids
             ]
+            extra_metadata = None
+            if self._voxel_node_filter is not None:
+                extra_metadata = {
+                    "voxel_node_filter": (
+                        self._prepared_voxel_filter.metadata()
+                        if self._prepared_voxel_filter is not None
+                        else self._voxel_node_filter.to_dict()
+                    )
+                }
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,
@@ -1204,6 +1295,7 @@ class CorrelationWorker(QObject):
                     else 0.0
                 ),
                 requested_cluster_count=self._n_clusters,
+                extra_metadata=extra_metadata,
             )
 
             self.progress.emit("Done", 5, total)
@@ -1469,9 +1561,10 @@ class FlatmapCorrelationWorker(QObject):
                         prepared_region_filter,
                     ),
                 )
-                region_mask, region_metadata = None, {
-                    "flatmap_region_source": "ccf_region_filter_masks"
-                }
+                region_mask, region_metadata = (
+                    None,
+                    {"flatmap_region_source": "ccf_region_filter_masks"},
+                )
             else:
                 region_mask, region_metadata = self._build_region_mask()
 
@@ -1565,6 +1658,8 @@ class FlatmapParquetCorrelationWorker(QObject):
         collapse_depth: bool = False,
         region_filter: ClusterRegionFilter | None = None,
         prepared_region_filter: PreparedClusterRegionFilter | None = None,
+        voxel_node_filter: VoxelNodeFilter | None = None,
+        prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
     ):
         super().__init__()
         self._parquet_path = parquet_path
@@ -1581,6 +1676,8 @@ class FlatmapParquetCorrelationWorker(QObject):
         self._collapse_depth = bool(collapse_depth)
         self._region_filter = region_filter
         self._prepared_region_filter = prepared_region_filter
+        self._voxel_node_filter = voxel_node_filter
+        self._prepared_voxel_filter = prepared_voxel_filter
 
     def run(self) -> None:
         """Execute the parquet-driven flatmap correlation pipeline."""
@@ -1611,6 +1708,8 @@ class FlatmapParquetCorrelationWorker(QObject):
                     file_ids=self._file_ids,
                     collapse_depth=self._collapse_depth,
                     prepared_region_filter=prepared_region_filter,
+                    voxel_node_filter=self._voxel_node_filter,
+                    prepared_voxel_filter=self._prepared_voxel_filter,
                 )
             )
 
@@ -1636,6 +1735,12 @@ class FlatmapParquetCorrelationWorker(QObject):
                 "flatmap_rendered_node_count": int(count_data.rendered_node_count),
                 "flatmap_occupied_voxel_count": int(len(count_data.voxel_ids)),
             }
+            if self._voxel_node_filter is not None:
+                extra_metadata["voxel_node_filter"] = (
+                    self._prepared_voxel_filter.metadata()
+                    if self._prepared_voxel_filter is not None
+                    else self._voxel_node_filter.to_dict()
+                )
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,
@@ -2329,9 +2434,7 @@ class FlatmapHeatmapWorker(QObject):
                         cluster_map=self._cluster_map,
                         progress_callback=self.progress.emit,
                         progress_total=total_steps,
-                        collapse_depth=(
-                            self._plane_mode == FLATMAP_PLANE_MODE_FLAT
-                        ),
+                        collapse_depth=(self._plane_mode == FLATMAP_PLANE_MODE_FLAT),
                     )
             finally:
                 conn.close()

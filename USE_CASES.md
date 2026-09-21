@@ -44,6 +44,7 @@ Unless a use case says otherwise:
 | [UC-016](#uc-016-compare-multiple-flatmap-windows-side-by-side) | Compare several independently navigable flatmap viewers side by side | Partially run |
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
 | [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
+| [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2164,6 +2165,114 @@ is always evaluated from CCFv3 node coordinates.
   precedence, exclusion-only out-of-atlas behavior, per-rule soma thresholds
   keyed by `file_id`, CCFv3 and flatmap voxel filtering, flatmap soma exclusion,
   exact preflight counts, unclustered neurons, and legacy inclusion adapters.
+
+### UC-019: Filter Voxel Correlation by Node Type, Dendrite-Label Coverage, or Soma Distance
+
+**Capability**
+
+The user can restrict which morphology nodes contribute to **Voxel
+Correlation** without changing the source Parquet or the Selected Neurons
+table. Node types can be included or excluded explicitly. For mixed-annotation
+datasets, a button can retain only neurons that contain at least one basal or
+apical dendrite label. As an independent geometric fallback, nodes at or within
+a physical radius of each neuron's soma centroid can be excluded before CCFv3
+voxelization or flatmap binning.
+
+These controls do not establish biological compartment identity. Type `2`
+means axon-typed, not verified axon, and some source neurons have dendritic
+projections typed `2`. Finding one type `3` or `4` node proves only that a
+neuron contains a dendrite label; it does not prove every dendrite was labelled
+correctly. Soma distance is likewise a geometric proxy that can remove proximal
+axon and retain dendrites extending beyond the chosen radius.
+
+**Prerequisites**
+
+- Load an Allen mouse atlas and a neuron Parquet with valid `file_id`, `type`,
+  and CCFv3 `x`, `y`, and `z` columns.
+- Include at least three neurons. At least one should contain type `3` or `4`
+  nodes, one should contain only soma plus axon-typed or undefined morphology,
+  and one should contain no valid soma node for the missing-soma check.
+- Include a node exactly on a chosen soma-distance boundary and nodes just
+  inside and outside it.
+- For Flat map + Depth checks, use a version-3 Parquet containing valid shaped
+  or square flatmap and depth columns.
+- Confirm the expected source annotation policy independently before treating
+  any type-filtered result as an axon-only biological result.
+
+**Steps and expected results**
+
+1. **Action:** Open **Analysis** > **Clustering**, choose **Voxel Correlation**,
+   and expand **Voxel Node Filters**.
+   **Expected:** **Node-type filter** defaults to **Off**. The soma-distance
+   option is unchecked, no dendrite-label cohort restriction is active, and
+   clustering with these defaults follows the prior unfiltered behavior. The
+   section hides for **Soma Location** and returns with its values intact when
+   **Voxel Correlation** is restored.
+2. **Action:** Inspect the node-type choices.
+   **Expected:** Only numeric `type` values represented in the loaded Parquet
+   appear. Standard values have readable names, type `2` is labelled
+   **Axon-typed (type 2)**, and nonstandard values appear as **Type N**. The
+   visible caution explains that labels must be verified and that type `0` or
+   type `2` can contain dendrites.
+3. **Action:** Select **Include selected**, choose **Axon-typed (type 2)**, and
+   run CCFv3 voxel correlation. Repeat using **Exclude selected** with **Soma**
+   and every represented dendrite type.
+   **Expected:** The first run uses only type `2` rows. The second removes the
+   explicitly selected types but retains other represented and missing types.
+   The exact preflight count and large-run warning, if shown, use the surviving
+   rows. A run leaving fewer than two neurons with usable nodes stops without
+   creating an assignment.
+4. **Action:** Click **Find and exclude neurons lacking dendrite labels**.
+   **Expected:** A background scan examines the complete morphology of every
+   neuron in the active **Input neurons** scope, grouping by `file_id` rather
+   than `neuron_id`. It reports retained and excluded neuron counts and
+   activates the restriction only when at least one neuron contains a
+   represented type `3` or `4`. Region, node-type, and coordinate filters do
+   not hide dendrite labels from this whole-neuron check.
+5. **Action:** Run voxel correlation with the dendrite-label restriction active,
+   then click **Clear restriction** and rerun.
+   **Expected:** Neurons lacking type `3` or `4` are unclustered in the first
+   run rather than deleted from the table. Clearing restores them to the input
+   cohort. Changing **Input neurons** clears the scanned restriction and asks
+   for a new scope-specific scan.
+6. **Action:** Enable **Exclude nodes within soma distance**, enter a test
+   radius in microns, turn the node-type filter **Off**, and run CCFv3 voxel
+   correlation.
+   **Expected:** Each soma centroid is averaged from all finite type `1` rows
+   in that `file_id`. Nodes whose raw CCFv3 Euclidean distance is less than or
+   equal to the radius are excluded; nodes just outside remain. A neuron with
+   no valid soma is unclustered and counted in exported provenance. The
+   geometric-proxy warning remains visible.
+7. **Action:** Enable both a node-type rule and soma-distance exclusion, with
+   the dendrite-label restriction active, then run again.
+   **Expected:** The three restrictions compose: a row contributes only when
+   its neuron passes the whole-neuron coverage rule, its node type passes the
+   include/exclude rule, and its distance is greater than the chosen radius.
+   Anatomical Region Filters also compose with these rules.
+8. **Action:** Repeat steps 3, 5, and 7 in **Flat map + Depth**, both with and
+   without **Ignore depth (flat map X/Y only)**.
+   **Expected:** The same source rows survive as in CCFv3 before projection.
+   Soma distance is always measured in raw CCFv3 XYZ microns, never distorted
+   flatmap coordinates. Collapsing depth changes voxel identity but not the
+   filtered source-node count.
+9. **Action:** Save a project, a cluster workbook, a distance workbook, and an
+   Enhanced Parquet; inspect the run metadata and reopen the project.
+   **Expected:** Provenance records the versioned node-type mode, numeric types
+   and labels, dendrite-label codes and cohort counts, soma radius, inclusive
+   exclusion boundary, CCFv3 micron coordinate space, valid/missing soma counts,
+   and all existing region and flatmap settings. Restored assignments retain
+   this provenance.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Notes: Automated tests cover dataset-backed choices, `file_id`-scoped
+  dendrite coverage, duplicate display IDs, type include/exclude behavior,
+  exact soma-distance boundaries, missing somas, combined filters, CCFv3 and
+  flatmap agreement, preflight reuse, unclustered neurons, and metadata. Manual
+  napari verification is still required for the warnings, background-scan
+  interaction, visible status counts, and biological/geometric interpretation.
 
 ## Use-Case Template
 

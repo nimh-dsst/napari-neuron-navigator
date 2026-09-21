@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
 from ..flatmap_heatmap import FlatmapLookupStats
 from .clustering import ClusterResult, compute_clustermap_data
+
+if TYPE_CHECKING:
+    from .voxel_filter import PreparedVoxelNodeFilter, VoxelNodeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -287,8 +291,7 @@ def query_flatmap_soma_coordinates_and_count(
         x_ref = _sql_identifier(f"x_flat_{suffix}")
         y_ref = _sql_identifier(f"y_flat_{suffix}")
         projected_soma = (
-            f"({expressions['flatmap_valid']}) "
-            f"AND ({expressions['depth_valid']})"
+            f"({expressions['flatmap_valid']}) AND ({expressions['depth_valid']})"
         )
         where_sql = _combine_where("type = 1", file_filter_sql)
         query = f"""
@@ -691,6 +694,8 @@ def count_flatmap_voxel_correlation_nodes(
     file_ids: list[str] | None = None,
     collapse_depth: bool = False,
     prepared_region_filter=None,
+    voxel_node_filter: VoxelNodeFilter | None = None,
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
 ) -> int:
     """Return the exact rendered-node count for flatmap voxel correlation.
 
@@ -748,8 +753,12 @@ def count_flatmap_voxel_correlation_nodes(
     conn = duckdb.connect()
     filter_view_name = "cluster_region_filtered_flatmap_count"
     filter_relations: tuple[str, ...] = ()
+    voxel_filter_view_name = "cluster_voxel_filtered_flatmap_count"
+    voxel_filter_relations: tuple[str, ...] = ()
+    voxel_filter_active = False
     try:
-        source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
+        raw_source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
+        source_sql = raw_source_sql
         if prepared_region_filter is not None:
             from .region_filter import register_filtered_source_view
 
@@ -759,6 +768,30 @@ def count_flatmap_voxel_correlation_nodes(
                 prepared_region_filter,
                 view_name=filter_view_name,
             )
+        if voxel_node_filter is not None and not voxel_node_filter.is_empty:
+            from .voxel_filter import (
+                prepare_voxel_node_filter,
+                register_voxel_filtered_source_view,
+            )
+
+            if prepared_voxel_filter is None:
+                prepared_voxel_filter = prepare_voxel_node_filter(
+                    conn,
+                    raw_source_sql,
+                    voxel_node_filter,
+                    file_ids=file_ids,
+                )
+            elif prepared_voxel_filter.settings != voxel_node_filter:
+                raise ValueError(
+                    "Prepared voxel filter does not match the requested settings."
+                )
+            source_sql, voxel_filter_relations = register_voxel_filtered_source_view(
+                conn,
+                source_sql,
+                prepared_voxel_filter,
+                view_name=voxel_filter_view_name,
+            )
+            voxel_filter_active = True
         expressions = _flatmap_sql_expressions(
             _duckdb_column_names(conn, source_sql),
             suffix=suffix,
@@ -782,6 +815,14 @@ def count_flatmap_voxel_correlation_nodes(
             else conn.execute(query).fetchone()
         )
     finally:
+        if voxel_filter_active:
+            from .voxel_filter import cleanup_voxel_filtered_source_view
+
+            cleanup_voxel_filtered_source_view(
+                conn,
+                voxel_filter_view_name,
+                voxel_filter_relations,
+            )
         if filter_relations:
             from .region_filter import cleanup_filtered_source_view
 
@@ -807,6 +848,8 @@ def compute_flatmap_voxel_correlation_from_parquet(
     file_ids: list[str] | None = None,
     collapse_depth: bool = False,
     prepared_region_filter=None,
+    voxel_node_filter: VoxelNodeFilter | None = None,
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
 ) -> tuple[ClusterResult, FlatmapCountMatrix, FlatmapParquetCorrelationProvenance]:
     """Cluster neurons by flatmap-space voxel correlation straight from Parquet.
 
@@ -880,6 +923,9 @@ def compute_flatmap_voxel_correlation_from_parquet(
     conn = duckdb.connect()
     filter_view_name = "cluster_region_filtered_flatmap_source"
     filter_relations: tuple[str, ...] = ()
+    voxel_filter_view_name = "cluster_voxel_filtered_flatmap_source"
+    voxel_filter_relations: tuple[str, ...] = ()
+    voxel_filter_active = False
     all_input_file_ids: tuple[str, ...] | None = None
     try:
         raw_source_sql = f"read_parquet('{_duckdb_source_path(parquet_path)}')"
@@ -900,6 +946,30 @@ def compute_flatmap_voxel_correlation_from_parquet(
                 prepared_region_filter,
                 view_name=filter_view_name,
             )
+        if voxel_node_filter is not None and not voxel_node_filter.is_empty:
+            from .voxel_filter import (
+                prepare_voxel_node_filter,
+                register_voxel_filtered_source_view,
+            )
+
+            if prepared_voxel_filter is None:
+                prepared_voxel_filter = prepare_voxel_node_filter(
+                    conn,
+                    raw_source_sql,
+                    voxel_node_filter,
+                    file_ids=file_ids,
+                )
+            elif prepared_voxel_filter.settings != voxel_node_filter:
+                raise ValueError(
+                    "Prepared voxel filter does not match the requested settings."
+                )
+            source_sql, voxel_filter_relations = register_voxel_filtered_source_view(
+                conn,
+                source_sql,
+                prepared_voxel_filter,
+                view_name=voxel_filter_view_name,
+            )
+            voxel_filter_active = True
         column_names = _duckdb_column_names(conn, source_sql)
         expressions = _flatmap_sql_expressions(
             column_names,
@@ -927,6 +997,14 @@ def compute_flatmap_voxel_correlation_from_parquet(
             include_depth_bin=not collapse_depth,
         )
     finally:
+        if voxel_filter_active:
+            from .voxel_filter import cleanup_voxel_filtered_source_view
+
+            cleanup_voxel_filtered_source_view(
+                conn,
+                voxel_filter_view_name,
+                voxel_filter_relations,
+            )
         if filter_relations:
             from .region_filter import cleanup_filtered_source_view
 

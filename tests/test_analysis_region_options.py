@@ -777,13 +777,14 @@ def test_analysis_region_sections_are_collapsed_by_default():
     assert titles == [
         "Clustering",
         "Region Filters",
+        "Voxel Node Filters",
         "Node Count Heatmap",
         "Select Heatmap Region",
         "Progress",
         "Clustermap",
         "Export Results",
     ]
-    assert expanded == [True, False, True, False, True, False, False]
+    assert expanded == [True, False, False, True, False, True, False, False]
 
 
 def test_analysis_tab_wraps_content_in_scroll_area():
@@ -850,6 +851,62 @@ def test_analysis_tab_defaults_soma_distance_filter_off():
 
     widget._heat_soma_radius_spin.setValue(0.0)
     assert widget._selected_heatmap_soma_radius_um() is None
+
+
+def test_voxel_node_filters_default_off_and_are_voxel_only() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+
+    assert widget._voxel_node_type_mode_combo.currentData() == "all"
+    assert not widget._voxel_node_type_combo.isEnabled()
+    assert not widget._voxel_node_type_warning_label._visible
+    assert not widget._voxel_soma_distance_enabled_cb.isChecked()
+    assert not widget._voxel_soma_distance_spin.isEnabled()
+    assert widget._voxel_node_filter_section._visible
+
+    widget._clustering_method_combo.setCurrentText("Soma Location")
+    assert not widget._voxel_node_filter_section._visible
+
+
+def test_voxel_node_filter_builds_independent_type_distance_and_cohort_rules() -> None:
+    module = _import_analysis_tab_module()
+    AnalysisTabWidget = module.AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    widget._dataset_node_types = (0, 1, 2, 3)
+    widget._voxel_node_type_combo.set_options(module.node_type_options((0, 1, 2, 3)))
+    widget._voxel_node_type_mode_combo.setCurrentIndex(1)
+    widget._voxel_node_type_combo.set_selected_node_types((2,))
+    widget._voxel_soma_distance_enabled_cb.setChecked(True)
+    widget._voxel_soma_distance_spin.setValue(150.0)
+    widget._voxel_dendrite_filter_active = True
+
+    settings = widget._selected_voxel_node_filter()
+
+    assert settings.node_type_mode == "include"
+    assert settings.node_types == (2,)
+    assert settings.require_dendrite_labels is True
+    assert settings.dendrite_node_types == (3,)
+    assert settings.exclude_within_soma_um == 150.0
+
+
+def test_dendrite_coverage_result_activates_reversible_scope_filter() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    widget._dendrite_scan_scope = "whole"
+    coverage = types.SimpleNamespace(
+        input_neuron_count=10,
+        labeled_neuron_count=3,
+        excluded_neuron_count=7,
+    )
+
+    widget._on_dendrite_coverage_finished(coverage)
+
+    assert widget._voxel_dendrite_filter_active is True
+    assert "3 of 10" in widget._voxel_dendrite_status_label.text()
+    assert "label presence" in widget._voxel_dendrite_status_label.text()
+
+    widget._clear_dendrite_label_restriction()
+    assert widget._voxel_dendrite_filter_active is False
 
 
 def test_analysis_tab_export_section_omits_y_label_field():
@@ -987,6 +1044,12 @@ def test_region_filter_node_types_come_from_loaded_dataset() -> None:
 
     for editor in widget._region_filter_editors():
         assert editor._node_types == (0, 1, 2, 99)
+    assert dict(widget._voxel_node_type_combo._options) == {
+        0: "Undefined",
+        1: "Soma",
+        2: "Axon-typed (type 2)",
+        99: "Type 99",
+    }
     option_builder = type(
         widget._whole_parquet_region_filter_editor
     ).set_node_types.__globals__["_node_type_options"]
@@ -1614,6 +1677,30 @@ def test_preflight_hands_prepared_region_filter_to_clustering_worker() -> None:
     )
 
 
+def test_preflight_hands_prepared_voxel_filter_to_clustering_worker() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    request = _captured_unfiltered_request(widget)
+    prepared_voxel = object()
+    widget._pending_clustering_request = request
+    widget._pending_clustering_preflight = types.SimpleNamespace(
+        node_count=25,
+        voxel_id_map=None,
+        prepared_region_filter=None,
+        prepared_voxel_filter=prepared_voxel,
+    )
+    widget._launch_clustering_request = MagicMock()
+
+    widget._on_clustering_preflight_thread_finished()
+
+    widget._launch_clustering_request.assert_called_once_with(
+        request,
+        None,
+        None,
+        prepared_voxel,
+    )
+
+
 def _enable_flatmap_coords(widget, styles=("both_shaped", "both_square")):
     """Force the widget to treat the loaded Parquet as flatmap-capable."""
     widget._detect_flatmap_coordinates = lambda: (True, styles)
@@ -1671,9 +1758,7 @@ def test_flatmap_voxel_keeps_region_filters_and_shows_binning() -> None:
     assert widget._cluster_region_scope_combo._visible is True
     assert widget._cluster_region_section._visible is True
     assert widget._cluster_exclude_region_label._visible is True
-    assert all(
-        not editor._soma_mode for editor in widget._region_filter_editors()
-    )
+    assert all(not editor._soma_mode for editor in widget._region_filter_editors())
     assert widget._dilation_label._visible is False
     assert widget._dilation_spin._visible is False
     assert widget._flatmap_style_combo._visible is True

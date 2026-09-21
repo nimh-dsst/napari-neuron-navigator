@@ -24,6 +24,8 @@ from qtpy.QtWidgets import QComboBox
 
 from ..swc import (
     STANDARD_NODE_TYPE_OPTIONS,
+    NodeType,
+    node_type_label,
     node_type_labels,
     normalize_node_types,
 )
@@ -34,6 +36,17 @@ _QT_UNCHECKED = getattr(Qt, "Unchecked", 0)
 _QT_CHECK_STATE_ROLE = getattr(Qt, "CheckStateRole", 10)
 _QT_ITEM_IS_USER_CHECKABLE = getattr(Qt, "ItemIsUserCheckable", 1)
 _QT_ITEM_IS_ENABLED = getattr(Qt, "ItemIsEnabled", 2)
+
+
+def node_type_options(values: Iterable[int]) -> tuple[tuple[int, str], ...]:
+    """Return display options for the node types represented in a dataset."""
+    options: list[tuple[int, str]] = []
+    for value in sorted({int(item) for item in values}):
+        label = node_type_label(value)
+        if value == NodeType.AXON:
+            label = "Axon-typed (type 2)"
+        options.append((value, label))
+    return tuple(options)
 
 
 class NodeTypeSelectorComboBox(QComboBox):
@@ -48,7 +61,9 @@ class NodeTypeSelectorComboBox(QComboBox):
         options: Iterable[tuple[int, str]] | None = None,
     ):
         super().__init__(parent)
-        self._options = tuple(options or STANDARD_NODE_TYPE_OPTIONS)
+        self._options = tuple(
+            STANDARD_NODE_TYPE_OPTIONS if options is None else options
+        )
         self._option_labels = {
             int(node_type): str(label) for node_type, label in self._options
         }
@@ -79,6 +94,20 @@ class NodeTypeSelectorComboBox(QComboBox):
             connect(self._restore_display_text)
 
         self._populate()
+
+    def set_options(self, options: Iterable[tuple[int, str]]) -> None:
+        """Replace the available node types, retaining valid selections."""
+        previous = self.selected_node_types()
+        self._options = tuple((int(value), str(label)) for value, label in options)
+        self._option_labels = {
+            int(node_type): str(label) for node_type, label in self._options
+        }
+        self._populate()
+        if previous is None:
+            return
+        available = {value for value, _label in self._options}
+        retained = tuple(value for value in previous if value in available)
+        self.set_selected_node_types(retained or None)
 
     def addItem(self, *args) -> None:
         """Add an item while tracking fallback data for test doubles."""
