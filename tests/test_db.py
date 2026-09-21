@@ -61,3 +61,46 @@ def test_has_column_reports_parquet_schema_membership(tmp_path) -> None:
         assert db.has_column("region_id") is False
     finally:
         db.close()
+
+
+def test_get_unique_node_types_returns_dataset_codes_in_order(tmp_path) -> None:
+    path = tmp_path / "neurons.parquet"
+    frame = pd.DataFrame(
+        {
+            "file_id": ["a", "a", "b", "b", "c"],
+            "type": [2, 99, 0, 2, 1],
+            "x": [0.0] * 5,
+            "y": [0.0] * 5,
+            "z": [0.0] * 5,
+        }
+    )
+    frame.to_parquet(path, index=False)
+    db = NeuronDatabase(path)
+    try:
+        values = db.get_unique_node_types()
+    finally:
+        db.close()
+
+    assert values == (0, 1, 2, 99)
+
+
+def test_get_dendrite_label_coverage_uses_file_id(tmp_path) -> None:
+    path = tmp_path / "neurons.parquet"
+    pd.DataFrame(
+        {
+            "file_id": ["a", "a", "b", "b"],
+            "neuron_id": ["duplicate"] * 4,
+            "type": [1, 3, 1, 2],
+            "x": [0.0] * 4,
+            "y": [0.0] * 4,
+            "z": [0.0] * 4,
+        }
+    ).to_parquet(path, index=False)
+    db = NeuronDatabase(path)
+    try:
+        coverage = db.get_dendrite_label_coverage()
+    finally:
+        db.close()
+
+    assert coverage.input_file_ids == ("a", "b")
+    assert coverage.labeled_file_ids == ("a",)

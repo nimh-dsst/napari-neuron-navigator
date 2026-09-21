@@ -13,14 +13,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from napari_neuron_navigator.analysis.clustering import (
+    ClusterExclusionRule,
+    ClusterRegionFilter,
+    ClusterRegionRule,
+)
 from napari_neuron_navigator.analysis.flatmap_correlation import (
     compute_flatmap_voxel_correlation_from_parquet,
     count_flatmap_voxel_correlation_nodes,
     query_flatmap_soma_coordinates,
     query_flatmap_soma_coordinates_and_count,
 )
+from napari_neuron_navigator.analysis.region_filter import PreparedClusterRegionFilter
+from napari_neuron_navigator.analysis.voxel_filter import VoxelNodeFilter
 from napari_neuron_navigator.flatmap_parquet import read_flatmap_parquet_transform_info
-
 
 _V3_COLUMNS = (
     "file_id",
@@ -155,6 +161,212 @@ def test_compute_flatmap_voxel_correlation_from_parquet(flatmap_parquet) -> None
     assert provenance.volume_shape[-2:] == (32, 41)
     assert provenance.volume_shape[1] == 32
     assert result.metadata is None  # metadata attached by the worker, not here
+
+
+def _exclude_first_neuron_filter() -> PreparedClusterRegionFilter:
+    mask = np.zeros((100, 100, 100), dtype=bool)
+    mask[:8, :8, :8] = True
+    rule = ClusterExclusionRule(
+        region_id=10,
+        acronym="TEST",
+        represented_region_ids=(10,),
+        represented_region_acronyms=("TEST",),
+        node_types=(3,),
+        minimum_node_count=1,
+    )
+    return PreparedClusterRegionFilter(
+        region_filter=ClusterRegionFilter(exclude_rules=(rule,)),
+        resolution_um=(25.0, 25.0, 25.0),
+        atlas_shape=mask.shape,
+        include_mask=None,
+        exclude_masks=(mask,),
+        exclude_mask=mask,
+    )
+
+
+def test_flatmap_voxel_filter_uses_ccf_coordinates_before_binning(
+    flatmap_parquet,
+) -> None:
+    frame, path = flatmap_parquet
+    prepared = _exclude_first_neuron_filter()
+
+    count = count_flatmap_voxel_correlation_nodes(
+        path,
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        prepared_region_filter=prepared,
+    )
+    result, count_data, _provenance = compute_flatmap_voxel_correlation_from_parquet(
+        path,
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        n_clusters=2,
+        prepared_region_filter=prepared,
+    )
+
+    expected = int((frame["file_id"] != "neuron_0").sum())
+    assert count == expected
+    assert count_data.rendered_node_count == expected
+    assert result.neuron_ids == ["neuron_1", "neuron_2", "neuron_3"]
+    assert result.unassigned_neuron_ids == ["neuron_0"]
+
+
+def test_flatmap_voxel_node_filter_matches_preflight_and_marks_cohort_unassigned(
+    tmp_path,
+) -> None:
+    frame = _v3_augmented_frame()
+    # This neuron now has soma + axon-typed rows but no type 3/4 evidence.
+    neuron_zero_morphology = (frame["file_id"] == "neuron_0") & (frame["type"] != 1)
+    frame.loc[neuron_zero_morphology, "type"] = 2
+    path = tmp_path / "mixed_dendrite_coverage.parquet"
+    frame.to_parquet(path, index=False)
+    settings = VoxelNodeFilter(
+        node_type_mode="include",
+        node_types=(3,),
+        require_dendrite_labels=True,
+    )
+
+    count = count_flatmap_voxel_correlation_nodes(
+        str(path),
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        voxel_node_filter=settings,
+    )
+    result, count_data, _provenance = compute_flatmap_voxel_correlation_from_parquet(
+        str(path),
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        n_clusters=2,
+        voxel_node_filter=settings,
+    )
+
+    expected = int(((frame["file_id"] != "neuron_0") & (frame["type"] == 3)).sum())
+    assert count == expected
+    assert count_data.rendered_node_count == expected
+    assert result.neuron_ids == ["neuron_1", "neuron_2", "neuron_3"]
+    assert result.unassigned_neuron_ids == ["neuron_0"]
+
+
+def test_flatmap_soma_distance_filter_uses_raw_ccf_xyz_microns(
+    flatmap_parquet,
+) -> None:
+    frame, path = flatmap_parquet
+    settings = VoxelNodeFilter(exclude_within_soma_um=40.0)
+    soma = (
+        frame.loc[frame["type"] == 1, ["file_id", "x", "y", "z"]]
+        .set_index("file_id")
+        .rename(columns={"x": "sx", "y": "sy", "z": "sz"})
+    )
+    joined = frame.join(soma, on="file_id")
+    distance_squared = (
+        (joined["x"] - joined["sx"]) ** 2
+        + (joined["y"] - joined["sy"]) ** 2
+        + (joined["z"] - joined["sz"]) ** 2
+    )
+    expected = int((distance_squared > 40.0**2).sum())
+
+    count = count_flatmap_voxel_correlation_nodes(
+        path,
+        style="both_shaped",
+        y_bins=32,
+        depth_bin_um=50.0,
+        voxel_node_filter=settings,
+    )
+
+    assert count == expected
+
+
+def test_flatmap_soma_filter_rejects_neuron_by_morphology_rule(
+    flatmap_parquet,
+) -> None:
+    _frame, path = flatmap_parquet
+    prepared = _exclude_first_neuron_filter()
+
+    ids, coords, count = query_flatmap_soma_coordinates_and_count(
+        path,
+        style="both_shaped",
+        prepared_region_filter=prepared,
+    )
+
+    assert ids == ["neuron_1", "neuron_2", "neuron_3"]
+    assert coords.shape == (3, 3)
+    assert count == 3
+
+
+def test_flatmap_soma_exclusion_counts_nodes_without_flatmap_projection(
+    tmp_path,
+) -> None:
+    frame = _v3_augmented_frame()
+    morphology = (frame["file_id"] == "neuron_0") & (frame["type"] == 3)
+    frame.loc[morphology, "flatmap_shaped_valid"] = False
+    frame.loc[morphology, "flatmap_shaped_projection_valid"] = False
+    path = tmp_path / "invalid_morphology_projection.parquet"
+    frame.to_parquet(path, index=False)
+
+    mask = np.zeros((100, 100, 100), dtype=bool)
+    mask[:8, :8, :8] = True
+    rule = ClusterExclusionRule(
+        region_id=10,
+        acronym="TEST",
+        node_types=(3,),
+        minimum_node_count=int(morphology.sum()),
+    )
+    prepared = PreparedClusterRegionFilter(
+        region_filter=ClusterRegionFilter(exclude_rules=(rule,)),
+        resolution_um=(25.0, 25.0, 25.0),
+        atlas_shape=mask.shape,
+        include_mask=None,
+        exclude_masks=(mask,),
+        exclude_mask=mask,
+    )
+
+    ids, _coords, count = query_flatmap_soma_coordinates_and_count(
+        str(path),
+        style="both_shaped",
+        prepared_region_filter=prepared,
+    )
+
+    assert ids == ["neuron_1", "neuron_2", "neuron_3"]
+    assert count == 3
+
+
+def test_flatmap_soma_include_uses_all_soma_ccf_rows(tmp_path) -> None:
+    frame = _v3_augmented_frame()
+    extra_soma = frame[(frame["file_id"] == "neuron_0") & (frame["type"] == 1)].copy()
+    extra_soma.loc[:, "node_id"] = int(frame["node_id"].max()) + 1
+    extra_soma.loc[:, ["x", "y", "z"]] = 1_000.0
+    extra_soma.loc[:, "flatmap_shaped_valid"] = False
+    extra_soma.loc[:, "flatmap_shaped_projection_valid"] = False
+    frame = pd.concat([frame, extra_soma], ignore_index=True)
+    path = tmp_path / "multiple_soma_rows.parquet"
+    frame.to_parquet(path, index=False)
+
+    include = np.zeros((100, 100, 100), dtype=bool)
+    include[:8, :8, :8] = True
+    rule = ClusterRegionRule(region_id=10, acronym="TEST")
+    prepared = PreparedClusterRegionFilter(
+        region_filter=ClusterRegionFilter(include_rules=(rule,)),
+        resolution_um=(25.0, 25.0, 25.0),
+        atlas_shape=include.shape,
+        include_mask=include,
+        exclude_masks=(),
+        exclude_mask=None,
+    )
+
+    ids, coords, count = query_flatmap_soma_coordinates_and_count(
+        str(path),
+        style="both_shaped",
+        file_ids=["neuron_0"],
+        prepared_region_filter=prepared,
+    )
+
+    assert ids == []
+    assert coords.shape == (0, 3)
+    assert count == 0
 
 
 def _layered_frame() -> pd.DataFrame:

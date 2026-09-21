@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from qtpy.QtCore import Signal
 
@@ -24,6 +24,8 @@ from qtpy.QtWidgets import QComboBox
 
 from ..swc import (
     STANDARD_NODE_TYPE_OPTIONS,
+    NodeType,
+    node_type_label,
     node_type_labels,
     normalize_node_types,
 )
@@ -36,13 +38,35 @@ _QT_ITEM_IS_USER_CHECKABLE = getattr(Qt, "ItemIsUserCheckable", 1)
 _QT_ITEM_IS_ENABLED = getattr(Qt, "ItemIsEnabled", 2)
 
 
+def node_type_options(values: Iterable[int]) -> tuple[tuple[int, str], ...]:
+    """Return display options for the node types represented in a dataset."""
+    options: list[tuple[int, str]] = []
+    for value in sorted({int(item) for item in values}):
+        label = node_type_label(value)
+        if value == NodeType.AXON:
+            label = "Axon-typed (type 2)"
+        options.append((value, label))
+    return tuple(options)
+
+
 class NodeTypeSelectorComboBox(QComboBox):
     """Checkable combo box for SWC node-type filtering."""
 
     selection_changed = Signal(object)
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        options: Iterable[tuple[int, str]] | None = None,
+    ):
         super().__init__(parent)
+        self._options = tuple(
+            STANDARD_NODE_TYPE_OPTIONS if options is None else options
+        )
+        self._option_labels = {
+            int(node_type): str(label) for node_type, label in self._options
+        }
         self._updating = False
         self._fallback_data: list[object] = []
         self._fallback_checked: dict[int, object] = {}
@@ -71,6 +95,20 @@ class NodeTypeSelectorComboBox(QComboBox):
 
         self._populate()
 
+    def set_options(self, options: Iterable[tuple[int, str]]) -> None:
+        """Replace the available node types, retaining valid selections."""
+        previous = self.selected_node_types()
+        self._options = tuple((int(value), str(label)) for value, label in options)
+        self._option_labels = {
+            int(node_type): str(label) for node_type, label in self._options
+        }
+        self._populate()
+        if previous is None:
+            return
+        available = {value for value, _label in self._options}
+        retained = tuple(value for value in previous if value in available)
+        self.set_selected_node_types(retained or None)
+
     def addItem(self, *args) -> None:
         """Add an item while tracking fallback data for test doubles."""
         if len(args) == 1:
@@ -83,8 +121,7 @@ class NodeTypeSelectorComboBox(QComboBox):
         add_item = getattr(super(), "addItem", None)
         if callable(add_item):
             add_item(*args)
-        if self._fallback_current_index < 0:
-            self._fallback_current_index = 0
+        self._fallback_current_index = max(self._fallback_current_index, 0)
 
     def clear(self) -> None:
         """Clear items while supporting minimal QComboBox doubles."""
@@ -220,7 +257,7 @@ class NodeTypeSelectorComboBox(QComboBox):
         self.clear()
         self._fallback_checked.clear()
         self._add_check_item("All node types", _ALL_NODE_TYPES, checked=True)
-        for node_type, label in STANDARD_NODE_TYPE_OPTIONS:
+        for node_type, label in self._options:
             self._add_check_item(label, int(node_type), checked=False)
         self.setCurrentIndex(0)
         self._update_display_text()
@@ -235,9 +272,7 @@ class NodeTypeSelectorComboBox(QComboBox):
         item = item_getter(index, self.modelColumn()) if callable(item_getter) else None
         if item is not None:
             item.setFlags(
-                item.flags()
-                | _QT_ITEM_IS_USER_CHECKABLE
-                | _QT_ITEM_IS_ENABLED
+                item.flags() | _QT_ITEM_IS_USER_CHECKABLE | _QT_ITEM_IS_ENABLED
             )
 
     def _item_checked(self, index: int) -> bool:
@@ -264,12 +299,21 @@ class NodeTypeSelectorComboBox(QComboBox):
             row = self._event_row(event)
             event_type_getter = getattr(event, "type", None)
             event_type = event_type_getter() if callable(event_type_getter) else None
-            if QEvent is not None and row is not None and event_type in (
-                QEvent.MouseButtonPress,
-                QEvent.MouseButtonDblClick,
+            if (
+                QEvent is not None
+                and row is not None
+                and event_type
+                in (
+                    QEvent.MouseButtonPress,
+                    QEvent.MouseButtonDblClick,
+                )
             ):
                 return True
-            if QEvent is not None and row is not None and event_type == QEvent.MouseButtonRelease:
+            if (
+                QEvent is not None
+                and row is not None
+                and event_type == QEvent.MouseButtonRelease
+            ):
                 self._toggle_item_at_row(row)
                 return True
         parent_event_filter = getattr(super(), "eventFilter", None)
@@ -347,4 +391,20 @@ class NodeTypeSelectorComboBox(QComboBox):
             set_tool_tip(text)
 
     def _update_display_text(self) -> None:
-        self._set_line_text(self.selection_text(self.selected_node_types()))
+        selected = self.selected_node_types()
+        if selected is None:
+            text = "All node types"
+        else:
+            labels = [
+                self._option_labels.get(node_type, f"Type {node_type}")
+                for node_type in selected
+            ]
+            if not labels:
+                text = "No node types"
+            elif len(labels) == 1:
+                text = labels[0]
+            elif len(labels) == 2:
+                text = f"{labels[0]} + {labels[1]}"
+            else:
+                text = f"{len(labels)} node types"
+        self._set_line_text(text)

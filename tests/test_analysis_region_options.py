@@ -776,14 +776,15 @@ def test_analysis_region_sections_are_collapsed_by_default():
 
     assert titles == [
         "Clustering",
-        "Select Target Region",
+        "Region Filters",
+        "Voxel Node Filters",
         "Node Count Heatmap",
         "Select Heatmap Region",
         "Progress",
         "Clustermap",
         "Export Results",
     ]
-    assert expanded == [True, False, True, False, True, False, False]
+    assert expanded == [True, False, False, True, False, True, False, False]
 
 
 def test_analysis_tab_wraps_content_in_scroll_area():
@@ -819,7 +820,7 @@ def test_analysis_tab_input_scope_precedes_target_region_summary():
     ]
 
     assert clustering_labels.index("Input neurons:") < clustering_labels.index(
-        "Target region:"
+        "Included regions:"
     )
 
 
@@ -850,6 +851,62 @@ def test_analysis_tab_defaults_soma_distance_filter_off():
 
     widget._heat_soma_radius_spin.setValue(0.0)
     assert widget._selected_heatmap_soma_radius_um() is None
+
+
+def test_voxel_node_filters_default_off_and_are_voxel_only() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+
+    assert widget._voxel_node_type_mode_combo.currentData() == "all"
+    assert not widget._voxel_node_type_combo.isEnabled()
+    assert not widget._voxel_node_type_warning_label._visible
+    assert not widget._voxel_soma_distance_enabled_cb.isChecked()
+    assert not widget._voxel_soma_distance_spin.isEnabled()
+    assert widget._voxel_node_filter_section._visible
+
+    widget._clustering_method_combo.setCurrentText("Soma Location")
+    assert not widget._voxel_node_filter_section._visible
+
+
+def test_voxel_node_filter_builds_independent_type_distance_and_cohort_rules() -> None:
+    module = _import_analysis_tab_module()
+    AnalysisTabWidget = module.AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    widget._dataset_node_types = (0, 1, 2, 3)
+    widget._voxel_node_type_combo.set_options(module.node_type_options((0, 1, 2, 3)))
+    widget._voxel_node_type_mode_combo.setCurrentIndex(1)
+    widget._voxel_node_type_combo.set_selected_node_types((2,))
+    widget._voxel_soma_distance_enabled_cb.setChecked(True)
+    widget._voxel_soma_distance_spin.setValue(150.0)
+    widget._voxel_dendrite_filter_active = True
+
+    settings = widget._selected_voxel_node_filter()
+
+    assert settings.node_type_mode == "include"
+    assert settings.node_types == (2,)
+    assert settings.require_dendrite_labels is True
+    assert settings.dendrite_node_types == (3,)
+    assert settings.exclude_within_soma_um == 150.0
+
+
+def test_dendrite_coverage_result_activates_reversible_scope_filter() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    widget._dendrite_scan_scope = "whole"
+    coverage = types.SimpleNamespace(
+        input_neuron_count=10,
+        labeled_neuron_count=3,
+        excluded_neuron_count=7,
+    )
+
+    widget._on_dendrite_coverage_finished(coverage)
+
+    assert widget._voxel_dendrite_filter_active is True
+    assert "3 of 10" in widget._voxel_dendrite_status_label.text()
+    assert "label presence" in widget._voxel_dendrite_status_label.text()
+
+    widget._clear_dendrite_label_restriction()
+    assert widget._voxel_dendrite_filter_active is False
 
 
 def test_analysis_tab_export_section_omits_y_label_field():
@@ -963,6 +1020,45 @@ def test_refresh_analysis_region_selectors_populates_both_selectors_from_dataset
     assert widget._heat_region_selector.allowed_ids == expected
     assert widget._cluster_region_selector.atlas is widget._atlas
     assert widget._heat_region_selector.atlas is widget._atlas
+
+
+def test_region_filter_node_types_come_from_loaded_dataset() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    widget._db = types.SimpleNamespace(
+        get_unique_regions=lambda: {"region_id": [184]},
+        get_unique_node_types=lambda: (0, 1, 2, 99),
+    )
+    widget._atlas = _FakeAtlas(
+        {
+            184: {
+                "id": 184,
+                "acronym": "FRP",
+                "name": "Frontal pole",
+                "structure_id_path": [184],
+            }
+        }
+    )
+
+    widget.refresh_available_regions_from_database()
+
+    for editor in widget._region_filter_editors():
+        assert editor._node_types == (0, 1, 2, 99)
+    assert dict(widget._voxel_node_type_combo._options) == {
+        0: "Undefined",
+        1: "Soma",
+        2: "Axon-typed (type 2)",
+        99: "Type 99",
+    }
+    option_builder = type(
+        widget._whole_parquet_region_filter_editor
+    ).set_node_types.__globals__["_node_type_options"]
+    assert dict(option_builder((0, 1, 2, 99))) == {
+        0: "Undefined",
+        1: "Soma",
+        2: "Axon-typed (type 2)",
+        99: "Type 99",
+    }
 
 
 def test_refresh_analysis_region_selectors_preserves_independent_selections():
@@ -1092,6 +1188,98 @@ def test_active_cluster_selector_switches_with_scope() -> None:
     assert widget._selected_cluster_region() == (184, "FRP")
     assert widget._cluster_region_scope_stack.index == 2
     assert widget._cluster_region_summary_label.text() == "FRP (Frontal pole)"
+
+
+def test_region_filter_editor_copies_defaults_and_keeps_rule_values() -> None:
+    """Defaults affect new rules while existing include/exclude rows stay editable."""
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    editor = widget._current_table_region_filter_editor
+    structures = {
+        184: {"name": "Frontal pole", "acronym": "FRP"},
+        500: {"name": "Caudoputamen", "acronym": "CP"},
+    }
+    editor.include_selector._structure_map = structures
+    editor.exclude_selector._structure_map = structures
+
+    editor.include_default_dilation.setValue(20)
+    editor.include_selector.selected_ids = [184]
+    editor._on_selection_changed(False)
+    editor.include_default_dilation.setValue(40)
+    editor.include_selector.selected_ids = [184, 500]
+    editor._on_selection_changed(False)
+    editor._set_dilation(False, 184, 10)
+
+    editor.exclude_default_dilation.setValue(15)
+    editor.exclude_selector.selected_ids = [500]
+    editor._on_selection_changed(True)
+    editor._set_node_types(500, (0, 2, 99))
+    editor._set_minimum(500, 3)
+
+    soma_setting_control = _DummyWidget()
+    editor._exclude_soma_widgets = [soma_setting_control]
+    widget._clustering_method_combo.setCurrentText("Voxel Correlation")
+    assert not editor._soma_mode
+    assert not soma_setting_control.isEnabled()
+    widget._clustering_method_combo.setCurrentText("Soma Location")
+    assert editor._soma_mode
+    assert soma_setting_control.isEnabled()
+    assert editor._exclude_settings[500].node_types == (0, 2, 99)
+    assert editor._exclude_settings[500].minimum_node_count == 3
+
+    region_filter = editor.region_filter(
+        lambda region_ids: [
+            (int(region_id), structures[int(region_id)]["acronym"])
+            for region_id in region_ids
+        ]
+    )
+
+    assert region_filter is not None
+    assert [rule.dilation_fraction for rule in region_filter.include_rules] == [
+        0.1,
+        0.4,
+    ]
+    exclusion = region_filter.exclude_rules[0]
+    assert exclusion.dilation_fraction == 0.15
+    assert exclusion.node_types == (0, 2, 99)
+    assert exclusion.minimum_node_count == 3
+
+
+def test_region_filter_state_is_independent_for_each_input_scope() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    structures = {
+        184: {"name": "Frontal pole", "acronym": "FRP"},
+        500: {"name": "Caudoputamen", "acronym": "CP"},
+    }
+    whole = widget._whole_parquet_region_filter_editor
+    current = widget._current_table_region_filter_editor
+    selected = widget._selected_rows_region_filter_editor
+    for editor in (whole, current, selected):
+        editor.include_selector._structure_map = structures
+        editor.exclude_selector._structure_map = structures
+
+    whole.include_selector.selected_ids = [184]
+    whole._on_selection_changed(False)
+    current.exclude_selector.selected_ids = [500]
+    current._on_selection_changed(True)
+    selected.include_selector.selected_ids = [500]
+    selected._on_selection_changed(False)
+
+    widget._cluster_region_scope_combo.setCurrentText("Whole Parquet")
+    assert widget._active_region_filter_editor() is whole
+    assert set(whole._include_settings) == {184}
+    assert not whole._exclude_settings
+
+    widget._cluster_region_scope_combo.setCurrentText("Current Table")
+    assert widget._active_region_filter_editor() is current
+    assert not current._include_settings
+    assert set(current._exclude_settings) == {500}
+
+    widget._cluster_region_scope_combo.setCurrentText("Selected Rows")
+    assert widget._active_region_filter_editor() is selected
+    assert set(selected._include_settings) == {500}
+    assert not selected._exclude_settings
 
 
 def test_represented_region_ids_for_selection_expands_parent_to_dataset_descendants():
@@ -1224,7 +1412,7 @@ def test_current_table_clustering_allows_no_target_region() -> None:
     assert request.region_selection is None
     assert request.dilation_fraction == 0.0
     assert widget._cluster_region_summary_label.text() == "All regions (optional)"
-    assert widget._cluster_region_target_label.text() == "Target region (optional):"
+    assert widget._cluster_region_target_label.text() == "Included regions (optional):"
 
 
 def test_selected_rows_clustering_allows_no_target_region() -> None:
@@ -1244,6 +1432,39 @@ def test_selected_rows_clustering_allows_no_target_region() -> None:
     assert request.region_selection is None
 
 
+def test_current_table_clustering_allows_exclusion_only_region_filter() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    atlas = _FakeAtlas(
+        {
+            500: {
+                "id": 500,
+                "acronym": "CP",
+                "name": "Caudoputamen",
+                "structure_id_path": [500],
+            }
+        }
+    )
+    widget._db = object()
+    widget._atlas = atlas
+    widget._dataset_region_ids = {500}
+    widget.set_current_table_file_ids_provider(lambda: ["n1", "n2"])
+    widget._cluster_region_scope_combo.setCurrentText("Current Table")
+    editor = widget._current_table_region_filter_editor
+    editor.exclude_selector._structure_map = atlas.structures
+    editor.exclude_selector.selected_ids = [500]
+    editor._on_selection_changed(True)
+    widget._start_clustering_preflight = MagicMock()
+
+    widget._run_clustering_pipeline()
+
+    request = widget._start_clustering_preflight.call_args.args[0]
+    assert request.region_filter is not None
+    assert request.region_filter.include_rules == ()
+    assert [rule.region_id for rule in request.region_filter.exclude_rules] == [500]
+    assert request.file_ids == ("n1", "n2")
+
+
 def test_whole_parquet_clustering_still_requires_target_region() -> None:
     AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
     widget = AnalysisTabWidget(_DummyViewer())
@@ -1254,7 +1475,7 @@ def test_whole_parquet_clustering_still_requires_target_region() -> None:
 
     widget._run_clustering_pipeline()
 
-    assert widget._progress_label.text() == "Select at least one target region."
+    assert widget._progress_label.text() == "Select at least one included region."
     widget._start_clustering_preflight.assert_not_called()
 
 
@@ -1433,6 +1654,53 @@ def test_large_preflight_confirmation_launches_prepared_request() -> None:
     )
 
 
+def test_preflight_hands_prepared_region_filter_to_clustering_worker() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    request = _captured_unfiltered_request(widget)
+    prepared = object()
+    widget._pending_clustering_request = request
+    widget._pending_clustering_preflight = types.SimpleNamespace(
+        node_count=25,
+        voxel_id_map=None,
+        prepared_region_filter=prepared,
+    )
+    widget._confirm_large_clustering_run = MagicMock(return_value=True)
+    widget._launch_clustering_request = MagicMock()
+
+    widget._on_clustering_preflight_thread_finished()
+
+    widget._launch_clustering_request.assert_called_once_with(
+        request,
+        None,
+        prepared,
+    )
+
+
+def test_preflight_hands_prepared_voxel_filter_to_clustering_worker() -> None:
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    request = _captured_unfiltered_request(widget)
+    prepared_voxel = object()
+    widget._pending_clustering_request = request
+    widget._pending_clustering_preflight = types.SimpleNamespace(
+        node_count=25,
+        voxel_id_map=None,
+        prepared_region_filter=None,
+        prepared_voxel_filter=prepared_voxel,
+    )
+    widget._launch_clustering_request = MagicMock()
+
+    widget._on_clustering_preflight_thread_finished()
+
+    widget._launch_clustering_request.assert_called_once_with(
+        request,
+        None,
+        None,
+        prepared_voxel,
+    )
+
+
 def _enable_flatmap_coords(widget, styles=("both_shaped", "both_square")):
     """Force the widget to treat the loaded Parquet as flatmap-capable."""
     widget._detect_flatmap_coordinates = lambda: (True, styles)
@@ -1478,8 +1746,8 @@ def test_flatmap_space_removed_when_coordinates_absent() -> None:
     assert widget._current_coordinate_space() == "CCFv3 Coordinates"
 
 
-def test_flatmap_voxel_hides_region_controls_and_shows_binning() -> None:
-    """Flat map + Depth voxel mode hides CCFv3 controls and shows binning."""
+def test_flatmap_voxel_keeps_region_filters_and_shows_binning() -> None:
+    """Flatmap voxel mode keeps anatomical filters and disables soma settings."""
     AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
     widget = AnalysisTabWidget(_DummyViewer())
     _enable_flatmap_coords(widget, styles=("both_shaped",))
@@ -1488,6 +1756,9 @@ def test_flatmap_voxel_hides_region_controls_and_shows_binning() -> None:
 
     assert widget._cluster_region_scope_label._visible is True
     assert widget._cluster_region_scope_combo._visible is True
+    assert widget._cluster_region_section._visible is True
+    assert widget._cluster_exclude_region_label._visible is True
+    assert all(not editor._soma_mode for editor in widget._region_filter_editors())
     assert widget._dilation_label._visible is False
     assert widget._dilation_spin._visible is False
     assert widget._flatmap_style_combo._visible is True
@@ -1510,6 +1781,8 @@ def test_flatmap_soma_hides_binning_and_shows_algorithm() -> None:
     assert widget._flatmap_y_bins_spin._visible is False
     assert widget._flatmap_depth_bin_spin._visible is False
     assert widget._flatmap_include_depth_minus_one_cb._visible is False
+    assert widget._cluster_region_section._visible is True
+    assert all(editor._soma_mode for editor in widget._region_filter_editors())
 
 
 def test_depth_scale_is_soma_only_but_ignore_depth_serves_both() -> None:
@@ -1569,6 +1842,8 @@ def test_collapse_depth_reaches_the_correlation_worker(monkeypatch) -> None:
     widget._db = object()
     widget._atlas = object()
     widget._parquet_path = "neurons.parquet"
+    widget.set_current_table_file_ids_provider(lambda: ["n1", "n2"])
+    widget._cluster_region_scope_combo.setCurrentText("Current Table")
     _enable_flatmap_coords(widget, styles=("both_shaped",))
     widget._coordinate_space_combo.setCurrentText("Flat map + Depth")
     widget._clustering_method_combo.setCurrentText("Voxel Correlation")
@@ -1649,6 +1924,8 @@ def test_ignore_depth_reaches_the_clustering_request() -> None:
     widget._db = object()
     widget._atlas = object()
     widget._parquet_path = "neurons.parquet"
+    widget.set_current_table_file_ids_provider(lambda: ["n1", "n2"])
+    widget._cluster_region_scope_combo.setCurrentText("Current Table")
     _enable_flatmap_coords(widget, styles=("both_shaped",))
     widget._coordinate_space_combo.setCurrentText("Flat map + Depth")
     widget._clustering_method_combo.setCurrentText("Soma Location")
@@ -1731,6 +2008,8 @@ def test_flatmap_voxel_dispatch_constructs_parquet_worker(monkeypatch) -> None:
     widget._db = object()
     widget._atlas = object()
     widget._parquet_path = "neurons.parquet"
+    widget.set_current_table_file_ids_provider(lambda: ["n1", "n2"])
+    widget._cluster_region_scope_combo.setCurrentText("Current Table")
     _enable_flatmap_coords(widget, styles=("both_shaped",))
     widget._coordinate_space_combo.setCurrentText("Flat map + Depth")
     widget._clustering_method_combo.setCurrentText("Voxel Correlation")
@@ -1772,7 +2051,7 @@ def test_flatmap_voxel_dispatch_constructs_parquet_worker(monkeypatch) -> None:
         "include_depth_minus_one": False,
         "linkage_method": "complete",
         "n_clusters": 7,
-        "file_ids": None,
+        "file_ids": ["n1", "n2"],
         "collapse_depth": False,
     }
     widget._start_background_worker.assert_called_once_with(
@@ -1788,6 +2067,8 @@ def test_flatmap_soma_dispatch_constructs_soma_worker(monkeypatch) -> None:
     widget._db = object()
     widget._atlas = object()
     widget._parquet_path = "neurons.parquet"
+    widget.set_current_table_file_ids_provider(lambda: ["n1", "n2"])
+    widget._cluster_region_scope_combo.setCurrentText("Current Table")
     _enable_flatmap_coords(widget, styles=("both_shaped",))
     widget._coordinate_space_combo.setCurrentText("Flat map + Depth")
     widget._clustering_method_combo.setCurrentText("Soma Location")
@@ -1827,7 +2108,7 @@ def test_flatmap_soma_dispatch_constructs_soma_worker(monkeypatch) -> None:
         "n_clusters": 4,
         "eps": 120.0,
         "min_samples": 6,
-        "file_ids": None,
+        "file_ids": ["n1", "n2"],
         "depth_scale": 1.0,
         "include_depth": True,
     }
@@ -1998,6 +2279,10 @@ def test_on_correlation_finished_leaves_clustermap_unrendered():
         "Clustering complete. Click Render Dendrogram to view."
     ]
     assert "Table updated and sorted by cluster." in widget._progress_label.text()
+    assert (
+        "0 neuron(s) are unclustered after region/coordinate filtering."
+        in widget._progress_label.text()
+    )
     assert "Auto-colored" not in widget._progress_label.text()
 
 

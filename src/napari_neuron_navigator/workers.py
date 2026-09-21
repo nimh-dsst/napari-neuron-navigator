@@ -7,12 +7,12 @@ connections since DuckDB connections are not thread-safe.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
 import logging
 import os
-from pathlib import Path
 import tempfile
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -28,10 +28,44 @@ from .logging_utils import startup_timing
 if TYPE_CHECKING:
     from brainglobe_atlasapi import BrainGlobeAtlas
 
-    from .analysis.clustering import ClusterRegionSelection, ClusterResult
+    from .analysis.clustering import (
+        ClusterRegionFilter,
+        ClusterRegionSelection,
+        ClusterResult,
+    )
+    from .analysis.region_filter import PreparedClusterRegionFilter
+    from .analysis.voxel_filter import PreparedVoxelNodeFilter, VoxelNodeFilter
     from .isocortex_layers import AllenIsocortexLayerMap
 
 logger = logging.getLogger(__name__)
+
+
+def _scoped_source_file_ids(
+    parquet_path: str | Path,
+    file_ids: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    """Return the ordered input cohort, always keyed by ``file_id``."""
+    if file_ids is not None:
+        return list(dict.fromkeys(str(value) for value in file_ids))
+
+    import duckdb
+
+    source = str(parquet_path).replace("\\", "/").replace("'", "''")
+    conn = duckdb.connect()
+    try:
+        relation = conn.execute(
+            f"SELECT DISTINCT file_id FROM read_parquet('{source}') ORDER BY file_id"
+        )
+        fetchall = getattr(relation, "fetchall", None)
+        if callable(fetchall):
+            return [str(row[0]) for row in fetchall()]
+        fetchdf = getattr(relation, "fetchdf", None)
+        frame = fetchdf() if callable(fetchdf) else None
+        if frame is not None and "file_id" in frame:
+            return list(dict.fromkeys(frame["file_id"].astype(str).tolist()))
+        return []
+    finally:
+        conn.close()
 
 
 def cached_brainglobe_atlas_dir(
@@ -258,7 +292,8 @@ def _attach_cluster_run_metadata(
     *,
     atlas,
     parquet_path: str,
-    region_selection,
+    region_selection=None,
+    region_filter=None,
     analysis_method: str,
     clustering_algorithm: str,
     distance_metric: str,
@@ -271,19 +306,23 @@ def _attach_cluster_run_metadata(
     extra_metadata: dict[str, object] | None = None,
 ):
     """Populate the cluster result with reproducibility metadata."""
-    from .analysis.clustering import ClusterRegionSelection, ClusterRunMetadata
+    from .analysis.clustering import (
+        ClusterRegionFilter,
+        ClusterRunMetadata,
+    )
 
-    if region_selection is None:
-        region_selection = ClusterRegionSelection()
-
-    result.metadata = ClusterRunMetadata.from_region_selection(
-        region_selection=region_selection,
+    if region_filter is None:
+        region_filter = ClusterRegionFilter.from_legacy_selection(
+            region_selection,
+            dilation_fraction,
+        )
+    result.metadata = ClusterRunMetadata.from_region_filter(
+        region_filter=region_filter,
         analysis_method=analysis_method,
         clustering_algorithm=clustering_algorithm,
         distance_metric=distance_metric,
         clustering_linkage=clustering_linkage,
         dendrogram_linkage=dendrogram_linkage,
-        dilation_fraction=dilation_fraction,
         requested_cluster_count=requested_cluster_count,
         actual_cluster_count=len(np.unique(result.labels)),
         dbscan_eps=dbscan_eps,
@@ -305,6 +344,46 @@ class ClusteringPreflightResult:
 
     node_count: int
     voxel_id_map: np.ndarray | None = None
+    prepared_region_filter: PreparedClusterRegionFilter | None = None
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None
+
+
+class DendriteCoverageWorker(QObject):
+    """Inspect complete neurons for standard dendrite node-type labels."""
+
+    progress = Signal(str, int, int)
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        parquet_path: str,
+        file_ids: list[str] | None = None,
+        dendrite_node_types: tuple[int, ...] = (3, 4),
+    ) -> None:
+        super().__init__()
+        self._parquet_path = str(parquet_path)
+        self._file_ids = (
+            None if file_ids is None else [str(value) for value in file_ids]
+        )
+        self._dendrite_node_types = tuple(int(value) for value in dendrite_node_types)
+
+    def run(self) -> None:
+        """Query dendrite-label coverage without filtering morphology rows first."""
+        try:
+            from .analysis.voxel_filter import query_dendrite_label_coverage
+
+            self.progress.emit("Scanning complete neuron node types...", 1, 1)
+            result = query_dendrite_label_coverage(
+                self._parquet_path,
+                file_ids=self._file_ids,
+                dendrite_node_types=self._dendrite_node_types,
+            )
+            self.finished.emit(result)
+        except Exception as error:
+            logger.exception("Dendrite-label coverage scan failed")
+            self.error.emit(str(error))
 
 
 class ClusteringPreflightWorker(QObject):
@@ -322,6 +401,7 @@ class ClusteringPreflightWorker(QObject):
         coordinate_space: str,
         clustering_method: str,
         region_selection: ClusterRegionSelection | None = None,
+        region_filter: ClusterRegionFilter | None = None,
         dilation_fraction: float = 0.0,
         file_ids: list[str] | None = None,
         flatmap_style: str | None = None,
@@ -329,6 +409,7 @@ class ClusteringPreflightWorker(QObject):
         flatmap_depth_bin_um: float = 0.0,
         flatmap_include_depth_minus_one: bool = True,
         flatmap_collapse_depth: bool = False,
+        voxel_node_filter: VoxelNodeFilter | None = None,
     ) -> None:
         super().__init__()
         self._parquet_path = str(parquet_path)
@@ -336,6 +417,7 @@ class ClusteringPreflightWorker(QObject):
         self._coordinate_space = str(coordinate_space)
         self._clustering_method = str(clustering_method)
         self._region_selection = region_selection
+        self._region_filter = region_filter
         self._dilation_fraction = float(dilation_fraction)
         self._file_ids = (
             None if file_ids is None else [str(file_id) for file_id in file_ids]
@@ -347,13 +429,39 @@ class ClusteringPreflightWorker(QObject):
         # Collapsing does not change the node count, but it shrinks the voxel
         # grid the size guard checks, so the preflight must agree with the run.
         self._flatmap_collapse_depth = bool(flatmap_collapse_depth)
+        self._voxel_node_filter = voxel_node_filter
 
     def run(self) -> None:
         """Prepare an optional region map and count method-specific node rows."""
         try:
             voxel_id_map = None
+            prepared_region_filter = None
+            prepared_voxel_filter = None
             resolution = float(self._atlas.resolution[0])
-            if self._coordinate_space == "ccf" and self._region_selection is not None:
+            if (
+                self._clustering_method == "voxel"
+                and self._voxel_node_filter is not None
+                and not self._voxel_node_filter.is_empty
+            ):
+                from .analysis.voxel_filter import (
+                    prepare_voxel_node_filter_from_parquet,
+                )
+
+                self.progress.emit("Preparing voxel node filters...", 1, 2)
+                prepared_voxel_filter = prepare_voxel_node_filter_from_parquet(
+                    self._parquet_path,
+                    self._voxel_node_filter,
+                    file_ids=self._file_ids,
+                )
+            if self._region_filter is not None and not self._region_filter.is_empty:
+                from .analysis.region_filter import prepare_cluster_region_filter
+
+                self.progress.emit("Preparing region-filter masks...", 1, 2)
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._region_filter,
+                )
+            elif self._coordinate_space == "ccf" and self._region_selection is not None:
                 from .analysis.mask import get_expanded_region_voxel_ids_for_regions
 
                 self.progress.emit("Preparing target-region mask...", 1, 2)
@@ -374,23 +482,39 @@ class ClusteringPreflightWorker(QObject):
 
                     conn = duckdb.connect()
                     try:
+                        count_kwargs = {"file_ids": self._file_ids}
+                        if prepared_region_filter is not None:
+                            count_kwargs["prepared_region_filter"] = (
+                                prepared_region_filter
+                            )
+                        if self._voxel_node_filter is not None:
+                            count_kwargs["voxel_node_filter"] = self._voxel_node_filter
+                        if prepared_voxel_filter is not None:
+                            count_kwargs["prepared_voxel_filter"] = (
+                                prepared_voxel_filter
+                            )
                         node_count = count_correlation_input_nodes(
                             conn,
                             self._parquet_path,
                             voxel_id_map,
                             resolution,
-                            file_ids=self._file_ids,
+                            **count_kwargs,
                         )
                     finally:
                         conn.close()
                 else:
                     from .analysis.clustering import query_ccf_soma_coordinates
 
+                    soma_kwargs = {
+                        "resolution": resolution,
+                        "file_ids": self._file_ids,
+                        "voxel_id_map": voxel_id_map,
+                    }
+                    if prepared_region_filter is not None:
+                        soma_kwargs["prepared_region_filter"] = prepared_region_filter
                     _ids, _coords, node_count = query_ccf_soma_coordinates(
                         self._parquet_path,
-                        resolution=resolution,
-                        file_ids=self._file_ids,
-                        voxel_id_map=voxel_id_map,
+                        **soma_kwargs,
                     )
             elif self._clustering_method == "voxel":
                 from .analysis.flatmap_correlation import (
@@ -399,14 +523,23 @@ class ClusteringPreflightWorker(QObject):
 
                 if self._flatmap_style is None:
                     raise ValueError("No flatmap style is available for clustering.")
+                flatmap_kwargs = {
+                    "style": self._flatmap_style,
+                    "y_bins": self._flatmap_y_bins,
+                    "depth_bin_um": self._flatmap_depth_bin_um,
+                    "include_depth_minus_one": self._flatmap_include_depth_minus_one,
+                    "file_ids": self._file_ids,
+                    "collapse_depth": self._flatmap_collapse_depth,
+                }
+                if prepared_region_filter is not None:
+                    flatmap_kwargs["prepared_region_filter"] = prepared_region_filter
+                if self._voxel_node_filter is not None:
+                    flatmap_kwargs["voxel_node_filter"] = self._voxel_node_filter
+                if prepared_voxel_filter is not None:
+                    flatmap_kwargs["prepared_voxel_filter"] = prepared_voxel_filter
                 node_count = count_flatmap_voxel_correlation_nodes(
                     self._parquet_path,
-                    style=self._flatmap_style,
-                    y_bins=self._flatmap_y_bins,
-                    depth_bin_um=self._flatmap_depth_bin_um,
-                    include_depth_minus_one=(self._flatmap_include_depth_minus_one),
-                    file_ids=self._file_ids,
-                    collapse_depth=self._flatmap_collapse_depth,
+                    **flatmap_kwargs,
                 )
             else:
                 from .analysis.flatmap_correlation import (
@@ -415,16 +548,25 @@ class ClusteringPreflightWorker(QObject):
 
                 if self._flatmap_style is None:
                     raise ValueError("No flatmap style is available for clustering.")
+                flatmap_soma_kwargs = {
+                    "style": self._flatmap_style,
+                    "file_ids": self._file_ids,
+                }
+                if prepared_region_filter is not None:
+                    flatmap_soma_kwargs["prepared_region_filter"] = (
+                        prepared_region_filter
+                    )
                 _ids, _coords, node_count = query_flatmap_soma_coordinates_and_count(
                     self._parquet_path,
-                    style=self._flatmap_style,
-                    file_ids=self._file_ids,
+                    **flatmap_soma_kwargs,
                 )
 
             self.finished.emit(
                 ClusteringPreflightResult(
                     node_count=int(node_count),
                     voxel_id_map=voxel_id_map,
+                    prepared_region_filter=prepared_region_filter,
+                    prepared_voxel_filter=prepared_voxel_filter,
                 )
             )
         except Exception as e:
@@ -1007,16 +1149,21 @@ class CorrelationWorker(QObject):
         parquet_path: str,
         atlas: BrainGlobeAtlas,
         region_selection: ClusterRegionSelection | None,
+        region_filter: ClusterRegionFilter | None = None,
         dilation_fraction: float = 0.2,
         linkage_method: str = "average",
         n_clusters: int = 5,
         file_ids: list[str] | None = None,
         voxel_id_map: np.ndarray | None = None,
+        prepared_region_filter: PreparedClusterRegionFilter | None = None,
+        voxel_node_filter: VoxelNodeFilter | None = None,
+        prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
     ):
         super().__init__()
         self._parquet_path = parquet_path
         self._atlas = atlas
         self._region_selection = region_selection
+        self._region_filter = region_filter
         self._dilation_fraction = dilation_fraction
         self._linkage_method = linkage_method
         self._n_clusters = n_clusters
@@ -1024,6 +1171,9 @@ class CorrelationWorker(QObject):
             None if file_ids is None else [str(file_id) for file_id in file_ids]
         )
         self._voxel_id_map = voxel_id_map
+        self._prepared_region_filter = prepared_region_filter
+        self._voxel_node_filter = voxel_node_filter
+        self._prepared_voxel_filter = prepared_voxel_filter
 
     def run(self) -> None:
         """Execute the full pipeline."""
@@ -1038,7 +1188,20 @@ class CorrelationWorker(QObject):
 
             total = 5
             voxel_id_map = self._voxel_id_map
-            if voxel_id_map is None and self._region_selection is not None:
+            prepared_region_filter = self._prepared_region_filter
+            if prepared_region_filter is None and self._region_filter is not None:
+                from .analysis.region_filter import prepare_cluster_region_filter
+
+                self.progress.emit("Preparing region-filter masks...", 1, total)
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._region_filter,
+                )
+            elif (
+                prepared_region_filter is None
+                and voxel_id_map is None
+                and self._region_selection is not None
+            ):
                 from .analysis.mask import get_expanded_region_voxel_ids_for_regions
 
                 self.progress.emit("Extracting and dilating region mask...", 1, total)
@@ -1054,18 +1217,37 @@ class CorrelationWorker(QObject):
             conn = duckdb.connect()
             try:
                 resolution = float(self._atlas.resolution[0])
+                correlation_kwargs = {
+                    "resolution": resolution,
+                    "file_ids": self._file_ids,
+                }
+                if prepared_region_filter is not None:
+                    correlation_kwargs["prepared_region_filter"] = (
+                        prepared_region_filter
+                    )
+                if self._voxel_node_filter is not None:
+                    correlation_kwargs["voxel_node_filter"] = self._voxel_node_filter
+                if self._prepared_voxel_filter is not None:
+                    correlation_kwargs["prepared_voxel_filter"] = (
+                        self._prepared_voxel_filter
+                    )
                 corr_df = compute_pearson_correlation_matrix(
                     conn,
                     self._parquet_path,
                     voxel_id_map,
-                    resolution=resolution,
-                    file_ids=self._file_ids,
+                    **correlation_kwargs,
                 )
             finally:
                 conn.close()
 
             self.progress.emit("Building correlation matrix...", 3, total)
             mat_df, mat = correlation_long_to_matrix(corr_df)
+            if len(mat_df.columns) < 2:
+                self.error.emit(
+                    "Voxel correlation requires at least 2 neurons with usable "
+                    "nodes after applying region and coordinate filters."
+                )
+                return
 
             self.progress.emit("Clustering...", 4, total)
             result = compute_clustermap_data(
@@ -1074,11 +1256,34 @@ class CorrelationWorker(QObject):
                 method=self._linkage_method,
                 n_clusters=self._n_clusters,
             )
+            input_ids = (
+                _scoped_source_file_ids(self._parquet_path, self._file_ids)
+                if (
+                    self._file_ids is not None
+                    or self._region_filter is not None
+                    or self._voxel_node_filter is not None
+                )
+                else list(result.neuron_ids)
+            )
+            clustered_ids = set(result.neuron_ids)
+            result.unassigned_neuron_ids = [
+                file_id for file_id in input_ids if file_id not in clustered_ids
+            ]
+            extra_metadata = None
+            if self._voxel_node_filter is not None:
+                extra_metadata = {
+                    "voxel_node_filter": (
+                        self._prepared_voxel_filter.metadata()
+                        if self._prepared_voxel_filter is not None
+                        else self._voxel_node_filter.to_dict()
+                    )
+                }
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,
                 parquet_path=self._parquet_path,
                 region_selection=self._region_selection,
+                region_filter=self._region_filter,
                 analysis_method="voxel_correlation",
                 clustering_algorithm="hierarchical",
                 distance_metric="one_minus_pearson_r",
@@ -1090,6 +1295,7 @@ class CorrelationWorker(QObject):
                     else 0.0
                 ),
                 requested_cluster_count=self._n_clusters,
+                extra_metadata=extra_metadata,
             )
 
             self.progress.emit("Done", 5, total)
@@ -1114,6 +1320,8 @@ class FlatmapCorrelationWorker(QObject):
         atlas: BrainGlobeAtlas,
         parquet_path: str,
         region_selection: ClusterRegionSelection | None = None,
+        region_filter: ClusterRegionFilter | None = None,
+        prepared_region_filter: PreparedClusterRegionFilter | None = None,
         linkage_method: str = "average",
         n_clusters: int = 5,
     ):
@@ -1122,6 +1330,8 @@ class FlatmapCorrelationWorker(QObject):
         self._atlas = atlas
         self._parquet_path = parquet_path
         self._region_selection = region_selection
+        self._region_filter = region_filter
+        self._prepared_region_filter = prepared_region_filter
         self._linkage_method = linkage_method
         self._n_clusters = n_clusters
 
@@ -1330,18 +1540,43 @@ class FlatmapCorrelationWorker(QObject):
 
             total = 4
             self.progress.emit("Preparing flatmap voxel source...", 1, total)
-            region_mask, region_metadata = self._build_region_mask()
+            source = self._source
+            prepared_region_filter = self._prepared_region_filter
+            if prepared_region_filter is None and self._region_filter is not None:
+                from .analysis.region_filter import prepare_cluster_region_filter
+
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._region_filter,
+                )
+            if prepared_region_filter is not None:
+                from dataclasses import replace
+
+                from .analysis.region_filter import filter_voxel_frame
+
+                source = replace(
+                    source,
+                    projected_nodes=filter_voxel_frame(
+                        source.projected_nodes,
+                        prepared_region_filter,
+                    ),
+                )
+                region_mask, region_metadata = (
+                    None,
+                    {"flatmap_region_source": "ccf_region_filter_masks"},
+                )
+            else:
+                region_mask, region_metadata = self._build_region_mask()
 
             self.progress.emit("Computing flatmap voxel correlations...", 2, total)
             result, count_data = compute_flatmap_voxel_correlation_result(
-                self._source,
+                source,
                 method=self._linkage_method,
                 n_clusters=self._n_clusters,
                 region_mask=region_mask,
             )
 
             self.progress.emit("Recording flatmap clustering metadata...", 3, total)
-            source = self._source
             extra_metadata = {
                 "flatmap_style": source.flatmap_style,
                 "flatmap_coordinate_mode": source.coordinate_mode,
@@ -1370,6 +1605,7 @@ class FlatmapCorrelationWorker(QObject):
                 atlas=self._atlas,
                 parquet_path=self._parquet_path,
                 region_selection=self._region_selection,
+                region_filter=self._region_filter,
                 analysis_method="flatmap_voxel_correlation",
                 clustering_algorithm="hierarchical",
                 distance_metric="one_minus_pearson_r",
@@ -1420,6 +1656,10 @@ class FlatmapParquetCorrelationWorker(QObject):
         n_clusters: int = 5,
         file_ids: list[str] | None = None,
         collapse_depth: bool = False,
+        region_filter: ClusterRegionFilter | None = None,
+        prepared_region_filter: PreparedClusterRegionFilter | None = None,
+        voxel_node_filter: VoxelNodeFilter | None = None,
+        prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
     ):
         super().__init__()
         self._parquet_path = parquet_path
@@ -1434,6 +1674,10 @@ class FlatmapParquetCorrelationWorker(QObject):
             None if file_ids is None else [str(file_id) for file_id in file_ids]
         )
         self._collapse_depth = bool(collapse_depth)
+        self._region_filter = region_filter
+        self._prepared_region_filter = prepared_region_filter
+        self._voxel_node_filter = voxel_node_filter
+        self._prepared_voxel_filter = prepared_voxel_filter
 
     def run(self) -> None:
         """Execute the parquet-driven flatmap correlation pipeline."""
@@ -1443,6 +1687,14 @@ class FlatmapParquetCorrelationWorker(QObject):
             )
 
             total = 3
+            prepared_region_filter = self._prepared_region_filter
+            if prepared_region_filter is None and self._region_filter is not None:
+                from .analysis.region_filter import prepare_cluster_region_filter
+
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._region_filter,
+                )
             self.progress.emit("Binning flatmap coordinates in DuckDB...", 1, total)
             result, count_data, provenance = (
                 compute_flatmap_voxel_correlation_from_parquet(
@@ -1455,6 +1707,9 @@ class FlatmapParquetCorrelationWorker(QObject):
                     n_clusters=self._n_clusters,
                     file_ids=self._file_ids,
                     collapse_depth=self._collapse_depth,
+                    prepared_region_filter=prepared_region_filter,
+                    voxel_node_filter=self._voxel_node_filter,
+                    prepared_voxel_filter=self._prepared_voxel_filter,
                 )
             )
 
@@ -1480,11 +1735,18 @@ class FlatmapParquetCorrelationWorker(QObject):
                 "flatmap_rendered_node_count": int(count_data.rendered_node_count),
                 "flatmap_occupied_voxel_count": int(len(count_data.voxel_ids)),
             }
+            if self._voxel_node_filter is not None:
+                extra_metadata["voxel_node_filter"] = (
+                    self._prepared_voxel_filter.metadata()
+                    if self._prepared_voxel_filter is not None
+                    else self._voxel_node_filter.to_dict()
+                )
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,
                 parquet_path=self._parquet_path,
                 region_selection=None,
+                region_filter=self._region_filter,
                 analysis_method="flatmap_voxel_correlation",
                 clustering_algorithm="hierarchical",
                 distance_metric=(
@@ -1512,8 +1774,8 @@ class FlatmapSomaClusterWorker(QObject):
 
     Mirrors :class:`SomaClusterWorker` but computes Euclidean distances in
     flatmap ``(x_flat, y_flat, depth_um)`` space using the precomputed
-    Parquet columns.  Region filtering is intentionally not applied here; it
-    is handled separately for flatmap space.
+    Parquet columns. Anatomical eligibility is applied first from CCF node
+    coordinates, then retained somas are clustered in flatmap space.
 
     The raw columns mix units — ``x_flat``/``y_flat`` are normalized floats
     while ``depth_um`` is microns — so coordinates are rescaled before any
@@ -1543,6 +1805,8 @@ class FlatmapSomaClusterWorker(QObject):
         file_ids: list[str] | None = None,
         depth_scale: float = DEFAULT_FLATMAP_DEPTH_SCALE,
         include_depth: bool = True,
+        region_filter: ClusterRegionFilter | None = None,
+        prepared_region_filter: PreparedClusterRegionFilter | None = None,
     ):
         super().__init__()
         self._parquet_path = parquet_path
@@ -1558,6 +1822,8 @@ class FlatmapSomaClusterWorker(QObject):
         )
         self._depth_scale = float(depth_scale)
         self._include_depth = bool(include_depth)
+        self._region_filter = region_filter
+        self._prepared_region_filter = prepared_region_filter
 
     def run(self) -> None:
         """Execute the flatmap-space soma clustering pipeline."""
@@ -1574,17 +1840,27 @@ class FlatmapSomaClusterWorker(QObject):
             )
 
             total = 3
+            prepared_region_filter = self._prepared_region_filter
+            if prepared_region_filter is None and self._region_filter is not None:
+                from .analysis.region_filter import prepare_cluster_region_filter
+
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._region_filter,
+                )
             self.progress.emit("Querying soma flatmap coordinates...", 1, total)
             filtered_ids, raw_coords = query_flatmap_soma_coordinates(
                 self._parquet_path,
                 style=self._style,
                 file_ids=self._file_ids,
+                prepared_region_filter=prepared_region_filter,
             )
 
             if len(filtered_ids) < 2:
                 self.error.emit(
-                    f"Only {len(filtered_ids)} soma(s) have valid flatmap/depth "
-                    "coordinates — need at least 2 for clustering."
+                    f"Only {len(filtered_ids)} soma(s) remain after applying "
+                    "region and flatmap/depth coordinate filters — need at "
+                    "least 2 for clustering."
                 )
                 return
 
@@ -1641,11 +1917,18 @@ class FlatmapSomaClusterWorker(QObject):
                 self.error.emit(f"Unknown algorithm: {self._algorithm}")
                 return
 
+            input_ids = _scoped_source_file_ids(self._parquet_path, self._file_ids)
+            clustered_ids = set(result.neuron_ids)
+            result.unassigned_neuron_ids = [
+                file_id for file_id in input_ids if file_id not in clustered_ids
+            ]
+
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,
                 parquet_path=self._parquet_path,
                 region_selection=None,
+                region_filter=self._region_filter,
                 analysis_method="flatmap_soma_location",
                 clustering_algorithm=self._algorithm,
                 # Renamed away from "unit_hemisphere" when the two flat map axes
@@ -1712,6 +1995,7 @@ class SomaClusterWorker(QObject):
         parquet_path: str,
         atlas: BrainGlobeAtlas,
         region_selection: ClusterRegionSelection | None,
+        region_filter: ClusterRegionFilter | None = None,
         dilation_fraction: float = 0.2,
         algorithm: str = "hierarchical",
         linkage_method: str = "ward",
@@ -1720,11 +2004,13 @@ class SomaClusterWorker(QObject):
         min_samples: int = 5,
         file_ids: list[str] | None = None,
         voxel_id_map: np.ndarray | None = None,
+        prepared_region_filter: PreparedClusterRegionFilter | None = None,
     ):
         super().__init__()
         self._parquet_path = parquet_path
         self._atlas = atlas
         self._region_selection = region_selection
+        self._region_filter = region_filter
         self._dilation_fraction = dilation_fraction
         self._algorithm = algorithm
         self._linkage_method = linkage_method
@@ -1735,6 +2021,7 @@ class SomaClusterWorker(QObject):
             None if file_ids is None else [str(file_id) for file_id in file_ids]
         )
         self._voxel_id_map = voxel_id_map
+        self._prepared_region_filter = prepared_region_filter
 
     def run(self) -> None:
         """Execute the soma clustering pipeline."""
@@ -1750,9 +2037,16 @@ class SomaClusterWorker(QObject):
             run_start = perf_counter()
             resolution = float(self._atlas.resolution[0])
             region_label = (
-                ",".join(self._region_selection.selected_region_acronyms)
-                if self._region_selection is not None
-                else "all scoped CCF coordinates"
+                (
+                    f"{len(self._region_filter.include_rules)} include / "
+                    f"{len(self._region_filter.exclude_rules)} exclude rule(s)"
+                )
+                if self._region_filter is not None
+                else (
+                    ",".join(self._region_selection.selected_region_acronyms)
+                    if self._region_selection is not None
+                    else "all scoped CCF coordinates"
+                )
             )
             logger.debug(
                 "SomaClusterWorker start: algorithm=%s linkage=%s n_clusters=%d eps=%s min_samples=%d region=%s dilation_fraction=%.3f resolution=%.3f parquet=%s",
@@ -1767,7 +2061,20 @@ class SomaClusterWorker(QObject):
                 self._parquet_path,
             )
             voxel_id_map = self._voxel_id_map
-            if voxel_id_map is None and self._region_selection is not None:
+            prepared_region_filter = self._prepared_region_filter
+            if prepared_region_filter is None and self._region_filter is not None:
+                from .analysis.region_filter import prepare_cluster_region_filter
+
+                self.progress.emit("Preparing region-filter masks...", 1, total)
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._region_filter,
+                )
+            elif (
+                prepared_region_filter is None
+                and voxel_id_map is None
+                and self._region_selection is not None
+            ):
                 from .analysis.mask import get_expanded_region_voxel_ids_for_regions
 
                 self.progress.emit("Extracting and dilating region mask...", 1, total)
@@ -1788,11 +2095,16 @@ class SomaClusterWorker(QObject):
 
             self.progress.emit("Querying soma locations...", 2, total)
             query_start = perf_counter()
+            query_kwargs = {
+                "resolution": resolution,
+                "file_ids": self._file_ids,
+                "voxel_id_map": voxel_id_map,
+            }
+            if prepared_region_filter is not None:
+                query_kwargs["prepared_region_filter"] = prepared_region_filter
             filtered_ids, filtered_coords, _node_count = query_ccf_soma_coordinates(
                 self._parquet_path,
-                resolution=resolution,
-                file_ids=self._file_ids,
-                voxel_id_map=voxel_id_map,
+                **query_kwargs,
             )
             logger.debug(
                 "SomaClusterWorker soma query complete: rows=%d elapsed=%.3fs",
@@ -1801,7 +2113,10 @@ class SomaClusterWorker(QObject):
             )
 
             if not filtered_ids:
-                self.error.emit("No soma nodes found in the dataset.")
+                self.error.emit(
+                    "No somas remain after applying the input scope, region, "
+                    "and coordinate filters."
+                )
                 return
 
             logger.info(
@@ -1812,8 +2127,8 @@ class SomaClusterWorker(QObject):
 
             if len(filtered_ids) < 2:
                 self.error.emit(
-                    f"Only {len(filtered_ids)} soma(s) found in '{region_label}' "
-                    "— need at least 2 for clustering."
+                    f"Only {len(filtered_ids)} soma(s) remain for '{region_label}' "
+                    "after filtering — need at least 2 for clustering."
                 )
                 return
 
@@ -1854,11 +2169,22 @@ class SomaClusterWorker(QObject):
                 self.error.emit(f"Unknown algorithm: {self._algorithm}")
                 return
 
+            input_ids = (
+                _scoped_source_file_ids(self._parquet_path, self._file_ids)
+                if self._file_ids is not None or self._region_filter is not None
+                else list(result.neuron_ids)
+            )
+            clustered_ids = set(result.neuron_ids)
+            result.unassigned_neuron_ids = [
+                file_id for file_id in input_ids if file_id not in clustered_ids
+            ]
+
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,
                 parquet_path=self._parquet_path,
                 region_selection=self._region_selection,
+                region_filter=self._region_filter,
                 analysis_method="soma_location",
                 clustering_algorithm=self._algorithm,
                 distance_metric="euclidean_um",
@@ -2108,9 +2434,7 @@ class FlatmapHeatmapWorker(QObject):
                         cluster_map=self._cluster_map,
                         progress_callback=self.progress.emit,
                         progress_total=total_steps,
-                        collapse_depth=(
-                            self._plane_mode == FLATMAP_PLANE_MODE_FLAT
-                        ),
+                        collapse_depth=(self._plane_mode == FLATMAP_PLANE_MODE_FLAT),
                     )
             finally:
                 conn.close()

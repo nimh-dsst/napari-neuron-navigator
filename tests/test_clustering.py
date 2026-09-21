@@ -6,6 +6,12 @@ import numpy as np
 import pandas as pd
 
 from napari_neuron_navigator.analysis import clustering
+from napari_neuron_navigator.analysis.clustering import (
+    ClusterExclusionRule,
+    ClusterRegionFilter,
+    ClusterRegionRule,
+)
+from napari_neuron_navigator.analysis.region_filter import PreparedClusterRegionFilter
 
 
 def test_query_ccf_soma_coordinates_counts_retained_source_rows(tmp_path) -> None:
@@ -52,6 +58,55 @@ def test_query_ccf_soma_coordinates_applies_optional_region_map(tmp_path) -> Non
     )
 
     assert ids == ["inside"]
+    assert node_count == 1
+
+
+def test_query_ccf_soma_coordinates_applies_include_and_per_rule_exclusion(
+    tmp_path,
+) -> None:
+    path = tmp_path / "somas.parquet"
+    pd.DataFrame(
+        {
+            "file_id": ["a", "a", "a", "b", "b", "c"],
+            "neuron_id": [1, 1, 1, 1, 1, 2],
+            "node_id": [1, 7, 8, 1, 7, 1],
+            "type": [1, 99, 99, 1, 99, 1],
+            "x": [10.0, 10.0, 10.0, 10.0, 10.0, 80.0],
+            "y": [10.0, 10.0, 10.0, 10.0, 10.0, 80.0],
+            "z": [10.0, 10.0, 10.0, 10.0, 10.0, 80.0],
+        }
+    ).to_parquet(path, index=False)
+    include = np.zeros((4, 4, 4), dtype=bool)
+    include[0, 0, 0] = True
+    exclude = include.copy()
+    region_filter = ClusterRegionFilter(
+        include_rules=(ClusterRegionRule(region_id=10, acronym="INC"),),
+        exclude_rules=(
+            ClusterExclusionRule(
+                region_id=20,
+                acronym="EXC",
+                node_types=(99,),
+                minimum_node_count=2,
+            ),
+        ),
+    )
+    prepared = PreparedClusterRegionFilter(
+        region_filter=region_filter,
+        resolution_um=(25.0, 25.0, 25.0),
+        atlas_shape=include.shape,
+        include_mask=include,
+        exclude_masks=(exclude,),
+        exclude_mask=exclude,
+    )
+
+    ids, coords, node_count = clustering.query_ccf_soma_coordinates(
+        str(path),
+        resolution=25.0,
+        prepared_region_filter=prepared,
+    )
+
+    assert ids == ["b"]
+    np.testing.assert_allclose(coords, [[10.0, 10.0, 10.0]])
     assert node_count == 1
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import matplotlib
@@ -15,20 +16,23 @@ from PIL import Image
 matplotlib.use("Agg")
 
 from napari_neuron_navigator.analysis.clustering import (
+    ClusterExclusionRule,
+    ClusterRegionFilter,
+    ClusterRegionRule,
     ClusterRegionSelection,
     ClusterResult,
     ClusterRunMetadata,
 )
 from napari_neuron_navigator.analysis.export import (
-    CLUSTERMAP_HEIGHT_RATIOS,
     CLUSTERMAP_FIGURE_XLABEL_Y,
+    CLUSTERMAP_HEIGHT_RATIOS,
     DENDROGRAM_LINEWIDTH,
     LEGACY_PARQUET_METADATA_PREFIX,
     PARQUET_METADATA_PREFIX,
+    build_clustermap_figure,
     export_cluster_workbook,
     export_distance_workbook,
     export_extended_parquet,
-    build_clustermap_figure,
     read_extended_parquet_analysis_metadata,
     rgba_to_hex,
     save_dendrogram_figure,
@@ -201,6 +205,78 @@ def test_export_extended_parquet_preserves_rows_and_round_trips_metadata(tmp_pat
     assert payload["cluster_labels_in_dendrogram_order"] == [2, 1]
     np.testing.assert_allclose(payload["distance_matrix"], result.distance_matrix)
     np.testing.assert_allclose(payload["linkage_matrix"], result.linkage_matrix)
+
+
+def test_region_filter_provenance_round_trips_workbook_and_parquet(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "neurons.parquet"
+    _write_source_parquet(source_path)
+    result, cluster_color_map = _make_cluster_result(source_path)
+    region_filter = ClusterRegionFilter(
+        include_rules=(
+            ClusterRegionRule(
+                region_id=184,
+                acronym="FRP",
+                represented_region_ids=(68,),
+                represented_region_acronyms=("FRP1",),
+                dilation_fraction=0.1,
+            ),
+            ClusterRegionRule(
+                region_id=500,
+                acronym="CP",
+                represented_region_ids=(500,),
+                represented_region_acronyms=("CP",),
+                dilation_fraction=0.3,
+            ),
+        ),
+        exclude_rules=(
+            ClusterExclusionRule(
+                region_id=315,
+                acronym="ISO",
+                represented_region_ids=(68,),
+                represented_region_acronyms=("FRP1",),
+                dilation_fraction=0.2,
+                node_types=(2, 99),
+                minimum_node_count=3,
+            ),
+        ),
+    )
+    result.metadata = ClusterRunMetadata.from_region_filter(
+        region_filter=region_filter,
+        analysis_method="voxel_correlation",
+        clustering_algorithm="hierarchical",
+        distance_metric="one_minus_pearson_r",
+        clustering_linkage="average",
+        dendrogram_linkage="average",
+        requested_cluster_count=2,
+        actual_cluster_count=2,
+        dbscan_eps=None,
+        dbscan_min_samples=None,
+        atlas_name="fake_atlas",
+        atlas_resolution_um=(25.0, 25.0, 25.0),
+        source_parquet_path=str(source_path),
+        dendrogram_leaf_order=[1, 0],
+    )
+
+    workbook_path = tmp_path / "region_filters.xlsx"
+    export_cluster_workbook(workbook_path, result, cluster_color_map)
+    workbook = load_workbook(workbook_path)
+    metadata = {
+        row[0].value: row[1].value
+        for row in workbook["Metadata"].iter_rows(min_row=2, values_only=False)
+        if row[0].value
+    }
+    workbook_filter = json.loads(metadata["region_filter"])
+
+    parquet_path = tmp_path / "region_filters.parquet"
+    export_extended_parquet(parquet_path, result)
+    parquet_filter = read_extended_parquet_analysis_metadata(parquet_path)[
+        "run_metadata"
+    ]["region_filter"]
+
+    assert workbook_filter == parquet_filter == region_filter.to_dict()
+    assert metadata["dilation_fraction"] is None
 
 
 def test_read_extended_parquet_accepts_pre_rename_metadata(tmp_path: Path) -> None:
