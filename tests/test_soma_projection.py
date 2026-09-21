@@ -32,6 +32,7 @@ _PATCHED_MODULE_NAMES = [
     "napari_neuron_navigator.widgets.custom_region_selector",
     "napari_neuron_navigator.widgets.mask_layer_selector",
     "napari_neuron_navigator.widgets.neuron_table",
+    "napari_neuron_navigator.widgets.node_type_selector",
     "napari_neuron_navigator.widgets.region_selector",
     "napari_neuron_navigator.widgets.reference_layers",
     "napari_neuron_navigator.widgets.neuron_viewer",
