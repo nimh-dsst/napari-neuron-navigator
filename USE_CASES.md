@@ -43,7 +43,7 @@ Unless a use case says otherwise:
 | [UC-015](#uc-015-compare-cluster-assignments-in-an-interactive-board) | Compare flatmap and CCFv3 cluster mappings side by side in a linked grid | Not run |
 | [UC-016](#uc-016-compare-multiple-flatmap-windows-side-by-side) | Compare several independently navigable flatmap viewers side by side | Partially run |
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
-| [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Not run |
+| [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2148,9 +2148,19 @@ is always evaluated from CCFv3 node coordinates.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: Automated tests cover rule validation and metadata, mask unions and
+- Status: Partially run — the MOs Voxel Correlation comparison in step 5 was
+  verified; the remaining scenarios have not been run.
+- Last verified: 2026-09-21 (MOs Voxel Correlation comparison only)
+- Notes: Two cluster assignments were created manually from MOs neurons using
+  **Voxel Correlation**. The comparison run that excluded the selected MOs
+  region nodes produced a visibly different saved cluster grouping, confirming
+  that the Exclude rule affected the clustering result. This was a qualitative
+  comparison; no label-aligned movement rate was calculated. The
+  overlap-precedence details in step 5 and the unclustered-neuron, Soma
+  Location, scope, Flat map + Depth, and export checks in steps 1-4 and 6-10
+  remain to be exercised manually.
+
+  Automated tests cover rule validation and metadata, mask unions and
   precedence, exclusion-only out-of-atlas behavior, per-rule soma thresholds
   keyed by `file_id`, CCFv3 and flatmap voxel filtering, flatmap soma exclusion,
   exact preflight counts, unclustered neurons, and legacy inclusion adapters.
