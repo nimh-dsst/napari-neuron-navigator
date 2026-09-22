@@ -5192,6 +5192,46 @@ def test_search_reference_heatmap_layer_uses_fixed_magenta(
     assert layer.metadata["search_filters_applied_to_volume"] is False
 
 
+def test_search_colors_are_applied_to_matching_data_rows() -> None:
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_REFERENCE_HEATMAP_RGBA,
+        SearchTableColorRequest,
+    )
+
+    hit_color = (1.0, 0.8, 0.0, 1.0)
+    request = SearchTableColorRequest(
+        colors_by_file_id=(
+            ("ref-present", SEARCH_REFERENCE_HEATMAP_RGBA),
+            ("ref-missing", SEARCH_REFERENCE_HEATMAP_RGBA),
+            ("7", hit_color),
+        ),
+        reference_file_ids=("ref-present", "ref-missing"),
+        distance_color_domain=(0.0, 1.0),
+    )
+    table = types.SimpleNamespace(
+        file_ids=lambda: ["ref-present", 7, "unrequested"],
+        update_colors=MagicMock(),
+    )
+    search_tab = types.SimpleNamespace(on_search_colors_applied=MagicMock())
+    widget = types.SimpleNamespace(
+        _neuron_table=table,
+        _search_tab=search_tab,
+    )
+
+    NeuronViewerWidget._apply_search_colors_in_table(
+        widget,
+        request,
+    )
+
+    table.update_colors.assert_called_once_with(
+        {
+            "ref-present": list(SEARCH_REFERENCE_HEATMAP_RGBA),
+            7: list(hit_color),
+        }
+    )
+    search_tab.on_search_colors_applied.assert_called_once_with(2, 1)
+
+
 def test_current_selected_neuron_heatmap_layers_ignores_analysis_heatmaps() -> None:
     viewer = _DummyViewer(ndisplay=3)
     viewer.layers.extend(

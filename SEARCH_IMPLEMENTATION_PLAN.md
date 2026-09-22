@@ -1,10 +1,94 @@
 # Similar-Neuron Search Implementation Plan
 
-> Implementation status (2026-09-22): releases 1 and 2 are implemented.
+> Implementation status (2026-09-22): releases 1, 2, and 3 are implemented.
 > Automated tests cover search scoring and scope, versioned import/export,
 > Data-table append and annotation, filtered heatmap construction and layer
-> metadata, and worker paths. The expanded manual napari workflow in UC-020
-> remains unverified, so its status is still **Not run**.
+> metadata, explicit Search-distance color transfer to matching Data rows,
+> CCFv3/flatmap scoring parity with Analysis, and worker paths. The expanded
+> manual napari workflow in UC-020 remains unverified, so its status is still
+> **Not run**.
+
+## Release 3: Flatmap-Space Search
+
+### Outcome
+
+Allow users to choose **CCFv3 Coordinates** or **Flat map + Depth** before
+running the same single-reference or aggregate-reference Pearson search.
+Flatmap Search reads the precomputed bilateral version-3 flatmap/depth columns
+from the loaded Parquet and uses the same binning implementation as Analysis >
+Voxel Correlation. CCFv3 remains the default and its existing rankings and
+compatibility policy remain unchanged.
+
+### Product Decisions
+
+- Show **Flat map + Depth** only when the loaded Parquet contains version-3
+  depth columns and at least one supported bilateral style.
+- Offer the same flatmap controls as Analysis voxel correlation:
+  **Flatmap style**, **Y bins**, **Ignore depth (flat map X/Y only)**,
+  **Depth bin (μm)**, and **Include depth -1 plane**.
+- Keep **Y bins** as the only user-facing planar resolution. Derive `x_bins`
+  through the shared aspect-ratio policy, which preserves square X/Y bins and
+  gives shaped and square styles different X counts when appropriate.
+- Collapsing depth changes voxel identity to flatmap `(y, x)` only. It does not
+  merely make one wide depth bin, and depth validity still determines whether
+  a node contributes.
+- Apply anatomical region rules in the original CCFv3 coordinates, followed by
+  voxel-node filters, before valid rows are binned in flatmap space. The same
+  immutable filtered rows feed both reference and candidate vectors.
+- Candidate scopes, aggregate summation, `file_id` identity, Top N behavior,
+  annotations, and CSV row roles work identically in both spaces.
+- Persist the coordinate space, style, resolved rectangular grid, depth
+  settings, canonical bounds, and missing-correlation policy in result context.
+  Annotation tags identify a flatmap run and its grid so it cannot be mistaken
+  for a CCFv3 cohort.
+- CCFv3 keeps its release-1 compatibility rule: a missing/undefined sparse
+  correlation maps to `r = -1`. Flatmap matches Analysis's dense zero-filled
+  vectors: a missing cross-product contributes zero and an undefined
+  denominator maps to `r = 0` for a non-self comparison.
+- Existing **Add Search Heatmaps** actions remain CCFv3-only. They are disabled
+  for flatmap results with an explanatory tooltip because rendering a CCFv3
+  volume as “Scored Voxels” would misrepresent the grid that was scored. Users
+  can add the cohort to Data and inspect it in the Flatmap tab. Native
+  distance-colored flatmap Search layers are a separate visualization feature.
+- Add **Apply Search Colors to Data** as a separate action enabled for both
+  CCFv3 and flatmap results. It applies magenta to every matching reference row
+  and maps every matching hit through the full result-table hot-color domain.
+  Missing rows are counted but never appended implicitly. This makes the
+  Search palette available to Flatmap's table-color modes without pretending
+  that a flatmap result has a CCFv3 Search heatmap.
+
+### Implementation Design
+
+`VoxelSearchRequest` carries a coordinate-space discriminator plus flatmap
+style/grid/depth settings. Search preflight dispatches to the existing exact
+flatmap node counter. The scorer uses DuckDB to create sparse counts grouped by
+`(file_id, flatmap_voxel_id)`, where the voxel id follows the shared
+`(depth, y, x)` or collapsed `(y, x)` axis order. It then reuses the linear
+query-to-candidate aggregate scorer; it never constructs an all-pairs matrix.
+
+The flatmap branch resolves bounds and bin counts through the same functions as
+Analysis and its heatmap builders. A stored `flatmap_x_bins` remains optional on
+the request: live UI runs derive it once from `y_bins`, while callers replaying
+a stored grid may supply the recorded value verbatim.
+
+### Automated Coverage and Acceptance Criteria
+
+- A single-reference flatmap Search reproduces the reference row from
+  Analysis's flatmap count matrix on the same style, grid, depth mode, and
+  filters.
+- Depth-aware and depth-collapsed searches produce distinguishable, recorded
+  grids and expected rankings.
+- Preflight forwards the snapshotted style, Y bins, optional stored X bins,
+  depth-bin size, sentinel choice, scope, and collapse mode.
+- Result context and annotation tags record the resolved X/Y counts without
+  ever using equal planar bin counts by default.
+- Loading a Parquet without supported version-3 coordinates leaves only CCFv3
+  available. Loading a compatible Parquet exposes both spaces.
+- Flatmap results cannot launch the CCFv3 Search heatmap workflow.
+- Flatmap and CCFv3 results can both emit the same full-domain reference/result
+  palette to matching Data rows without changing table membership.
+- UC-020 remains **Not run** until both flatmap modes and the coordinate-space
+  switching behavior are exercised in napari.
 
 ## Release 2: Scope, Annotation, and Distance Heatmaps
 
@@ -236,9 +320,9 @@ Search Rank 1 (d=0.1234; Whole Neuron) Heatmap
 Store `file_ids`, role, rank, exact distance, voxel mode, whether filters were
 applied, color mapping/domain, source search filters, and Search run context in
 layer metadata. Continue using additive blending and the individual-heatmap
-contrast policy so sparse projections remain visible. Do not recolor Data-table
-swatches; the search heatmap color is metric state, not the neuron's persistent
-display color.
+contrast policy so sparse projections remain visible. Heatmap creation does
+not modify Data-table colors; color transfer is the separate, coordinate-space
+independent **Apply Search Colors to Data** action.
 
 Reuse the existing sequential selected-neuron heatmap queue, layer lifecycle,
 and memory estimator where practical. Estimate retained memory for the query
@@ -385,8 +469,11 @@ adds worker and memory concerns.
 - Memory estimation includes the query layer; cancelling above the threshold
   creates no layer. Mid-queue errors retain completed layers and stop pending
   requests with accurate status.
-- Search heatmaps do not add rows or change Data-table colors. Version-1
-  imports cannot silently create unfiltered heatmaps.
+- Search heatmaps do not add rows or change Data-table colors. The separate
+  color action works for both coordinate spaces, colors every matching
+  reference magenta and every matching hit from the full distance domain, and
+  leaves missing or unrelated rows unchanged. Version-1 imports cannot
+  silently create unfiltered heatmaps.
 
 ### Release 2 Acceptance Criteria
 
@@ -400,7 +487,8 @@ adds worker and memory concerns.
 4. Selected or all ranked hits can be rendered with the actual query heatmap
    as either metric-exact **Scored Voxels** or contextual **Whole Neuron**
    layers, using a documented, result-table-normalized hot-distance mapping
-   where hotter means closer.
+   where hotter means closer. The separate color action applies that mapping to
+   CCFv3 or flatmap results for reuse in Flatmap without implicit row additions.
 5. Large heatmap batches are guarded by an accurate memory estimate, and all
    background actions snapshot their inputs and report partial/error outcomes.
 6. Automated tests pass through `pixi run test`, and the expanded UC-020 is
@@ -840,9 +928,9 @@ The first release is complete when:
    silently disappearing.
 8. UC-020 has been exercised manually in napari and its status updated.
 
-## Still Deferred After Release 2
+## Still Deferred After Release 3
 
-- Flat map + Depth search and depth-collapsed flatmap search.
+- Native distance-colored flatmap Search heatmaps.
 - Per-reference weights or equal-neuron normalization before aggregation.
 - Boolean/nested query builders, saved named searches, and search histories.
 - Distance thresholds in addition to Top N.
@@ -852,8 +940,9 @@ The first release is complete when:
   summed query that candidates were actually scored against.
 - Automatically mutating the Data table or creating heatmaps as a side effect
   of **Run Search**. Release 2 actions remain explicit.
-- Automatically clustering or recoloring persistent neuron display state from
-  search results.
+- Automatically clustering or recoloring persistent neuron display state as a
+  side effect of **Run Search**; color transfer occurs only through the explicit
+  **Apply Search Colors to Data** action.
 
 The analysis API should leave room for these additions, but they are not part
 of release 2.

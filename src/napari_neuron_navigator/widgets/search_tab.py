@@ -40,7 +40,16 @@ from ..analysis.search import (
     SEARCH_SCOPE_LABELS,
     SEARCH_SCOPE_SELECTED,
     SEARCH_SCOPE_WHOLE,
+    SEARCH_SPACE_CCF,
+    SEARCH_SPACE_FLATMAP,
+    SEARCH_SPACE_LABELS,
     pearson_distance_color_domain,
+)
+from ..flatmap_heatmap import (
+    DEFAULT_FLATMAP_DEPTH_BIN_UM,
+    DEFAULT_FLATMAP_Y_BINS,
+    FLATMAP_Y_BINS_TOOLTIP,
+    MAX_FLATMAP_Y_BINS,
 )
 from .collapsible_section import CollapsibleSection
 from .node_type_selector import NodeTypeSelectorComboBox, node_type_options
@@ -57,6 +66,15 @@ logger = logging.getLogger(__name__)
 _REFERENCE_SINGLE = "single"
 _REFERENCE_AGGREGATE = "aggregate"
 _LARGE_SEARCH_NODE_THRESHOLD = 10_000_000
+_FLATMAP_STYLE_LABELS = {
+    "both_shaped": "Bilateral shaped",
+    "both_square": "Bilateral square",
+}
+_FLATMAP_COORDS_INFO_TEXT = (
+    "Flatmap search uses coordinates stored in the loaded Parquet. Region and "
+    "node filters are applied before flatmap binning. X bins are derived from "
+    "the selected style's aspect ratio so X/Y bins stay square."
+)
 _VOXEL_NODE_TYPE_WARNING = (
     "Caution: node-type filtering trusts the Parquet type column. Confirm that "
     "dendrites are correctly labeled before interpreting axon-typed nodes as "
@@ -85,6 +103,7 @@ class SearchTabWidget(QWidget):
 
     add_file_ids_requested = Signal(list)
     annotate_search_requested = Signal(object)
+    apply_search_colors_requested = Signal(object)
     search_heatmaps_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -96,6 +115,7 @@ class SearchTabWidget(QWidget):
         self._available_file_ids: set[str] = set()
         self._dataset_region_ids: set[int] = set()
         self._dataset_node_types: tuple[int, ...] = ()
+        self._flatmap_available_styles: tuple[str, ...] = ()
         self._current_table_file_ids_provider = None
         self._selected_table_file_ids_provider = None
         self._captured_aggregate_file_ids: tuple[str, ...] = ()
@@ -130,6 +150,7 @@ class SearchTabWidget(QWidget):
             and int(value) > 0
         }
         self._dataset_node_types = tuple(db.get_unique_node_types())
+        self._refresh_flatmap_coordinate_availability()
         self._region_filter_editor.clear()
         self._region_filter_editor.set_node_types(self._dataset_node_types)
         self._node_type_combo.set_options(node_type_options(self._dataset_node_types))
@@ -155,7 +176,9 @@ class SearchTabWidget(QWidget):
         """Set a callback returning every current Data-table ``file_id``."""
         self._current_table_file_ids_provider = provider
 
-    def on_file_ids_added(self, summary, *, unavailable_count: int | None = None) -> None:
+    def on_file_ids_added(
+        self, summary, *, unavailable_count: int | None = None
+    ) -> None:
         """Display the outcome of a synchronous Data-table append request."""
         unavailable = (
             self._pending_add_unavailable
@@ -186,6 +209,22 @@ class SearchTabWidget(QWidget):
             f"{int(unavailable_count):,} unavailable."
         )
 
+    def on_search_colors_applied(
+        self,
+        colored_count: int,
+        missing_count: int,
+    ) -> None:
+        """Display the outcome of one Data-table Search color transfer."""
+        message = (
+            f"Applied Search colors to {int(colored_count):,} matching Data row(s)."
+        )
+        if missing_count:
+            message += (
+                f" {int(missing_count):,} Search neuron(s) were not in Data and "
+                "were not added."
+            )
+        self._status_label.setText(message)
+
     def set_search_heatmap_busy(self, busy: bool) -> None:
         """Reflect the viewer-owned Search heatmap worker state."""
         self._heatmap_busy = bool(busy)
@@ -198,9 +237,7 @@ class SearchTabWidget(QWidget):
         total: int,
     ) -> None:
         """Display viewer-owned Search heatmap progress in the Search tab."""
-        self._status_label.setText(
-            f"{message} ({int(current):,}/{int(total):,})"
-        )
+        self._status_label.setText(f"{message} ({int(current):,}/{int(total):,})")
 
     def on_search_heatmaps_finished(self, message: str) -> None:
         """Show the terminal status of a viewer-owned Search heatmap batch."""
@@ -317,9 +354,7 @@ class SearchTabWidget(QWidget):
         filter_layout.addWidget(self._dendrite_status_label)
 
         soma_row = QHBoxLayout()
-        self._soma_distance_enabled_cb = QCheckBox(
-            "Exclude nodes within soma distance"
-        )
+        self._soma_distance_enabled_cb = QCheckBox("Exclude nodes within soma distance")
         self._soma_distance_enabled_cb.toggled.connect(
             self._update_voxel_filter_controls
         )
@@ -339,6 +374,70 @@ class SearchTabWidget(QWidget):
 
         self._search_section = CollapsibleSection("Search", expanded=True)
         search_layout = self._search_section.content_layout()
+
+        coordinate_row = QHBoxLayout()
+        coordinate_row.addWidget(QLabel("Coordinate space:"))
+        self._coordinate_space_combo = QComboBox()
+        self._coordinate_space_combo.addItem(
+            SEARCH_SPACE_LABELS[SEARCH_SPACE_CCF], SEARCH_SPACE_CCF
+        )
+        self._coordinate_space_combo.currentIndexChanged.connect(
+            self._on_coordinate_space_changed
+        )
+        coordinate_row.addWidget(self._coordinate_space_combo)
+        coordinate_row.addStretch()
+        search_layout.addLayout(coordinate_row)
+
+        self._flatmap_style_row = QWidget()
+        flatmap_style_layout = QHBoxLayout(self._flatmap_style_row)
+        flatmap_style_layout.setContentsMargins(0, 0, 0, 0)
+        flatmap_style_layout.addWidget(QLabel("Flatmap style:"))
+        self._flatmap_style_combo = QComboBox()
+        flatmap_style_layout.addWidget(self._flatmap_style_combo)
+        flatmap_style_layout.addStretch()
+        search_layout.addWidget(self._flatmap_style_row)
+
+        self._flatmap_y_bins_row = QWidget()
+        flatmap_y_bins_layout = QHBoxLayout(self._flatmap_y_bins_row)
+        flatmap_y_bins_layout.setContentsMargins(0, 0, 0, 0)
+        flatmap_y_bins_label = QLabel("Y bins:")
+        flatmap_y_bins_label.setToolTip(FLATMAP_Y_BINS_TOOLTIP)
+        flatmap_y_bins_layout.addWidget(flatmap_y_bins_label)
+        self._flatmap_y_bins_spin = QSpinBox()
+        self._flatmap_y_bins_spin.setRange(2, MAX_FLATMAP_Y_BINS)
+        self._flatmap_y_bins_spin.setValue(DEFAULT_FLATMAP_Y_BINS)
+        self._flatmap_y_bins_spin.setToolTip(FLATMAP_Y_BINS_TOOLTIP)
+        flatmap_y_bins_layout.addWidget(self._flatmap_y_bins_spin)
+        flatmap_y_bins_layout.addStretch()
+        search_layout.addWidget(self._flatmap_y_bins_row)
+
+        self._flatmap_ignore_depth_cb = QCheckBox("Ignore depth (flat map X/Y only)")
+        self._flatmap_ignore_depth_cb.toggled.connect(
+            self._on_flatmap_ignore_depth_toggled
+        )
+        search_layout.addWidget(self._flatmap_ignore_depth_cb)
+
+        self._flatmap_depth_bin_row = QWidget()
+        flatmap_depth_bin_layout = QHBoxLayout(self._flatmap_depth_bin_row)
+        flatmap_depth_bin_layout.setContentsMargins(0, 0, 0, 0)
+        flatmap_depth_bin_layout.addWidget(QLabel("Depth bin (μm):"))
+        self._flatmap_depth_bin_spin = QDoubleSpinBox()
+        self._flatmap_depth_bin_spin.setRange(1.0, 10000.0)
+        self._flatmap_depth_bin_spin.setDecimals(1)
+        self._flatmap_depth_bin_spin.setValue(float(DEFAULT_FLATMAP_DEPTH_BIN_UM))
+        self._flatmap_depth_bin_spin.setSuffix(" μm")
+        flatmap_depth_bin_layout.addWidget(self._flatmap_depth_bin_spin)
+        flatmap_depth_bin_layout.addStretch()
+        search_layout.addWidget(self._flatmap_depth_bin_row)
+
+        self._flatmap_include_depth_minus_one_cb = QCheckBox("Include depth -1 plane")
+        self._flatmap_include_depth_minus_one_cb.setChecked(True)
+        search_layout.addWidget(self._flatmap_include_depth_minus_one_cb)
+
+        self._flatmap_coords_status_label = QLabel(_FLATMAP_COORDS_INFO_TEXT)
+        self._flatmap_coords_status_label.setWordWrap(True)
+        search_layout.addWidget(self._flatmap_coords_status_label)
+
         scope_row = QHBoxLayout()
         scope_row.addWidget(QLabel("Input neurons:"))
         self._scope_combo = QComboBox()
@@ -431,9 +530,7 @@ class SearchTabWidget(QWidget):
                 SEARCH_HEATMAP_MODE_WHOLE
             )
         )
-        self._heatmap_whole_all_action = whole_menu.addAction(
-            "All Results + Reference"
-        )
+        self._heatmap_whole_all_action = whole_menu.addAction("All Results + Reference")
         self._heatmap_whole_all_action.triggered.connect(
             lambda _checked=False: self._add_all_search_heatmaps(
                 SEARCH_HEATMAP_MODE_WHOLE
@@ -442,11 +539,22 @@ class SearchTabWidget(QWidget):
         self._heatmap_btn.setMenu(heatmap_menu)
         cohort_row.addWidget(self._heatmap_btn)
         results_layout.addLayout(cohort_row)
+
+        self._apply_colors_btn = QPushButton("Apply Search Colors to Data")
+        self._apply_colors_btn.setToolTip(
+            "Color matching Data rows with magenta references and the "
+            "result-table Pearson-distance hot mapping. This works for both "
+            "CCFv3 and flatmap Search results and does not add missing rows."
+        )
+        self._apply_colors_btn.clicked.connect(self._apply_search_colors_to_data)
+        results_layout.addWidget(self._apply_colors_btn)
+
         self._heatmap_legend = QLabel(
             "Reference heatmaps are magenta. Result heatmap color uses the full "
             "result table: white/yellow = closest; dark red = farthest. Scored "
             "Voxels shows the filtered search input; Whole Neuron shows all "
-            "valid, in-atlas source voxels."
+            "valid, in-atlas source voxels. Use Apply Search Colors to Data to "
+            "reuse this palette in Flatmap."
         )
         self._heatmap_legend.setWordWrap(True)
         results_layout.addWidget(self._heatmap_legend)
@@ -463,8 +571,99 @@ class SearchTabWidget(QWidget):
         layout.addStretch()
 
         self._on_reference_mode_changed()
+        self._update_coordinate_controls()
         self._update_voxel_filter_controls()
         self._update_button_states()
+
+    # --- Coordinate space ------------------------------------------------------
+
+    def _detect_flatmap_coordinates(self) -> tuple[bool, tuple[str, ...]]:
+        """Return whether the loaded Parquet supports flatmap Search."""
+        if not self._parquet_path:
+            return False, ()
+        try:
+            from ..flatmap_parquet import read_flatmap_parquet_transform_info
+
+            info = read_flatmap_parquet_transform_info(self._parquet_path)
+            styles = tuple(info.available_styles)
+            return bool(styles) and bool(info.has_v3_depth), styles
+        except Exception:
+            logger.debug(
+                "Could not inspect Search flatmap coordinates in %s",
+                self._parquet_path,
+                exc_info=True,
+            )
+            return False, ()
+
+    def _refresh_flatmap_coordinate_availability(self) -> None:
+        """Offer flatmap space only when version-3 coordinates are available."""
+        available, styles = self._detect_flatmap_coordinates()
+        self._flatmap_available_styles = styles
+        current = self._coordinate_space_combo.currentData()
+        blocked = self._coordinate_space_combo.blockSignals(True)
+        try:
+            self._coordinate_space_combo.clear()
+            self._coordinate_space_combo.addItem(
+                SEARCH_SPACE_LABELS[SEARCH_SPACE_CCF], SEARCH_SPACE_CCF
+            )
+            if available:
+                self._coordinate_space_combo.addItem(
+                    SEARCH_SPACE_LABELS[SEARCH_SPACE_FLATMAP],
+                    SEARCH_SPACE_FLATMAP,
+                )
+            index = self._coordinate_space_combo.findData(current)
+            self._coordinate_space_combo.setCurrentIndex(max(0, index))
+        finally:
+            self._coordinate_space_combo.blockSignals(blocked)
+
+        previous_style = self._flatmap_style_combo.currentData()
+        blocked = self._flatmap_style_combo.blockSignals(True)
+        try:
+            self._flatmap_style_combo.clear()
+            for style in styles:
+                self._flatmap_style_combo.addItem(
+                    _FLATMAP_STYLE_LABELS.get(style, style), style
+                )
+            index = self._flatmap_style_combo.findData(previous_style)
+            if index >= 0:
+                self._flatmap_style_combo.setCurrentIndex(index)
+        finally:
+            self._flatmap_style_combo.blockSignals(blocked)
+        self._update_coordinate_controls()
+
+    def _selected_coordinate_space(self) -> str:
+        value = self._coordinate_space_combo.currentData()
+        return str(value) if value in SEARCH_SPACE_LABELS else SEARCH_SPACE_CCF
+
+    def _selected_flatmap_style(self) -> str | None:
+        value = self._flatmap_style_combo.currentData()
+        if value:
+            return str(value)
+        return (
+            self._flatmap_available_styles[0]
+            if self._flatmap_available_styles
+            else None
+        )
+
+    def _on_coordinate_space_changed(self, _index: int | None = None) -> None:
+        self._update_coordinate_controls()
+        self._update_button_states()
+
+    def _on_flatmap_ignore_depth_toggled(self, ignored: bool) -> None:
+        self._flatmap_depth_bin_spin.setEnabled(not bool(ignored))
+
+    def _update_coordinate_controls(self) -> None:
+        is_flatmap = self._selected_coordinate_space() == SEARCH_SPACE_FLATMAP
+        for widget in (
+            self._flatmap_style_row,
+            self._flatmap_y_bins_row,
+            self._flatmap_ignore_depth_cb,
+            self._flatmap_depth_bin_row,
+            self._flatmap_include_depth_minus_one_cb,
+            self._flatmap_coords_status_label,
+        ):
+            widget.setVisible(is_flatmap)
+        self._on_flatmap_ignore_depth_toggled(self._flatmap_ignore_depth_cb.isChecked())
 
     # --- Reference and filters -------------------------------------------------
 
@@ -675,9 +874,7 @@ class SearchTabWidget(QWidget):
     def _update_voxel_filter_controls(self, _value=None) -> None:
         mode = str(self._node_type_mode_combo.currentData() or "all")
         self._node_type_combo.setEnabled(mode != "all")
-        self._soma_distance_spin.setEnabled(
-            self._soma_distance_enabled_cb.isChecked()
-        )
+        self._soma_distance_spin.setEnabled(self._soma_distance_enabled_cb.isChecked())
         self._dendrite_clear_btn.setEnabled(self._dendrite_filter_active)
 
     def _selected_voxel_node_filter(self):
@@ -844,6 +1041,12 @@ class SearchTabWidget(QWidget):
                     + ", ".join(empty_rules)
                 )
         voxel_filter = self._selected_voxel_node_filter()
+        coordinate_space = self._selected_coordinate_space()
+        flatmap_style = None
+        if coordinate_space == SEARCH_SPACE_FLATMAP:
+            flatmap_style = self._selected_flatmap_style()
+            if flatmap_style is None:
+                raise ValueError("No flatmap style is available in the loaded Parquet.")
         return VoxelSearchRequest(
             reference_file_ids=references,
             candidate_file_ids=candidate_ids,
@@ -853,6 +1056,14 @@ class SearchTabWidget(QWidget):
             top_n=int(self._top_n_spin.value()),
             exclude_references=True,
             candidate_scope=self._selected_scope(),
+            coordinate_space=coordinate_space,
+            flatmap_style=flatmap_style,
+            flatmap_y_bins=int(self._flatmap_y_bins_spin.value()),
+            flatmap_depth_bin_um=float(self._flatmap_depth_bin_spin.value()),
+            flatmap_include_depth_minus_one=(
+                self._flatmap_include_depth_minus_one_cb.isChecked()
+            ),
+            flatmap_collapse_depth=self._flatmap_ignore_depth_cb.isChecked(),
         )
 
     def _run_search(self) -> None:
@@ -890,7 +1101,10 @@ class SearchTabWidget(QWidget):
             f"({input_count:,} rows; "
             f"{non_reference_count:,} non-reference candidates)"
         )
-        self._status_label.setText(f"Counting search nodes in {scope_label}...")
+        space_label = SEARCH_SPACE_LABELS[request.coordinate_space]
+        self._status_label.setText(
+            f"Counting {space_label} search nodes in {scope_label}..."
+        )
         self._start_thread(
             worker,
             self._on_preflight_finished,
@@ -966,7 +1180,8 @@ class SearchTabWidget(QWidget):
             f"{result.input_candidate_count:,} candidates; "
             f"{result.usable_candidate_count:,} usable; {omitted:,} omitted; "
             f"returned {len(result.hits):,}; retained "
-            f"{result.retained_node_count:,} node rows from "
+            f"{result.retained_node_count:,} node rows in "
+            f"{SEARCH_SPACE_LABELS.get(result.metadata.get('coordinate_space'), 'the selected space')} from "
             f"{result.metadata.get('candidate_scope_label', 'the selected scope')}. "
             "Lower distance is more similar."
         )
@@ -1022,21 +1237,34 @@ class SearchTabWidget(QWidget):
         if self._result_frame.empty or "pearson_distance" not in self._result_frame:
             return None
         try:
-            return pearson_distance_color_domain(
-                self._result_frame["pearson_distance"]
-            )
+            return pearson_distance_color_domain(self._result_frame["pearson_distance"])
         except ValueError:
             return None
 
     def _update_heatmap_legend(self) -> None:
         """Describe the result-table range used for Search heatmap colors."""
+        if (
+            self._result_document is not None
+            and self._result_document.metadata.get(
+                "coordinate_space", SEARCH_SPACE_CCF
+            )
+            == SEARCH_SPACE_FLATMAP
+        ):
+            self._heatmap_legend.setText(
+                "CCFv3 Search heatmaps are unavailable for flatmap-space "
+                "results. Add the cohort to Data, use Apply Search Colors to "
+                "Data, then render it from the Flatmap tab. References become "
+                "magenta; results use the Pearson-distance hot mapping."
+            )
+            return
         distance_domain = self._result_distance_domain()
         if distance_domain is None:
             message = (
                 "Reference heatmaps are magenta. Result heatmap color uses the "
                 "full result table: white/yellow = closest; dark red = farthest. "
                 "Scored Voxels shows the filtered search input; Whole Neuron "
-                "shows all valid, in-atlas source voxels."
+                "shows all valid, in-atlas source voxels. Use Apply Search "
+                "Colors to Data to reuse this palette in Flatmap."
             )
         else:
             distance_min, distance_max = distance_domain
@@ -1045,7 +1273,8 @@ class SearchTabWidget(QWidget):
                 "full result-table range "
                 f"{distance_min:.6g}–{distance_max:.6g}: white/yellow = closest; "
                 "dark red = farthest. Scored Voxels shows the filtered search "
-                "input; Whole Neuron shows all valid, in-atlas source voxels."
+                "input; Whole Neuron shows all valid, in-atlas source voxels. "
+                "Use Apply Search Colors to Data to reuse this palette in Flatmap."
             )
         self._heatmap_legend.setText(message)
 
@@ -1129,6 +1358,59 @@ class SearchTabWidget(QWidget):
         )
         self.annotate_search_requested.emit(request)
 
+    def _apply_search_colors_to_data(self) -> None:
+        """Apply the completed result's distance palette to matching Data rows."""
+        document = self._result_document
+        if document is None or document.hits.empty:
+            return
+        distance_domain = self._result_distance_domain()
+        if distance_domain is None:
+            self._status_label.setText(
+                "Cannot apply Search colors because the result table has no "
+                "finite Pearson distances."
+            )
+            return
+
+        from ..analysis.search import (
+            SEARCH_REFERENCE_HEATMAP_RGBA,
+            SearchTableColorRequest,
+            pearson_distance_to_hot_rgba,
+        )
+
+        colors: list[tuple[str, tuple[float, float, float, float]]] = []
+        seen: set[str] = set()
+        reference_file_ids = tuple(
+            document.references.get("file_id", pd.Series(dtype=str))
+            .astype(str)
+            .tolist()
+        )
+        for file_id in reference_file_ids:
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            colors.append((file_id, SEARCH_REFERENCE_HEATMAP_RGBA))
+        for row in document.hits.sort_values("rank").itertuples(index=False):
+            file_id = str(row.file_id)
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            colors.append(
+                (
+                    file_id,
+                    pearson_distance_to_hot_rgba(
+                        float(row.pearson_distance),
+                        distance_domain=distance_domain,
+                    ),
+                )
+            )
+        self.apply_search_colors_requested.emit(
+            SearchTableColorRequest(
+                colors_by_file_id=tuple(colors),
+                reference_file_ids=reference_file_ids,
+                distance_color_domain=distance_domain,
+            )
+        )
+
     def _selected_result_file_ids(self) -> list[str]:
         file_ids: list[str] = []
         for row in self._selected_result_rows():
@@ -1166,6 +1448,15 @@ class SearchTabWidget(QWidget):
     ) -> None:
         document = self._result_document
         if document is None or self._atlas is None or self._heatmap_busy:
+            return
+        if document.metadata.get("coordinate_space", SEARCH_SPACE_CCF) != (
+            SEARCH_SPACE_CCF
+        ):
+            self._status_label.setText(
+                "Search heatmap actions currently render CCFv3 volumes and are "
+                "unavailable for flatmap-space results. Use the Flatmap tab to "
+                "inspect these neurons."
+            )
             return
         if document.format_version < SEARCH_RESULTS_FORMAT_VERSION:
             self._status_label.setText(
@@ -1275,9 +1566,7 @@ class SearchTabWidget(QWidget):
         metadata["heatmap_reference_color"] = "magenta"
         metadata["heatmap_reference_rgba"] = list(SEARCH_REFERENCE_HEATMAP_RGBA)
         metadata["heatmap_voxel_mode"] = voxel_mode
-        metadata["heatmap_filters_applied"] = (
-            voxel_mode == SEARCH_HEATMAP_MODE_SCORED
-        )
+        metadata["heatmap_filters_applied"] = voxel_mode == SEARCH_HEATMAP_MODE_SCORED
         layers = [
             SearchHeatmapLayerRequest(
                 file_ids=tuple(references["file_id"].astype(str).tolist()),
@@ -1338,7 +1627,9 @@ class SearchTabWidget(QWidget):
 
     def _load_results_csv(self) -> None:
         if self._db is None:
-            self._status_label.setText("Load a neuron Parquet before importing results.")
+            self._status_label.setText(
+                "Load a neuron Parquet before importing results."
+            )
             return
         input_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -1393,25 +1684,38 @@ class SearchTabWidget(QWidget):
             has_results and bool(self._selected_result_rows()) and not busy
         )
         self._annotate_btn.setEnabled(has_results and not busy)
+        self._apply_colors_btn.setEnabled(has_results and not busy)
+        ccf_heatmap_result = (
+            self._result_document is not None
+            and self._result_document.metadata.get("coordinate_space", SEARCH_SPACE_CCF)
+            == SEARCH_SPACE_CCF
+        )
         heatmap_ready = (
             has_results
             and not busy
             and not self._heatmap_busy
             and self._atlas is not None
             and self._result_document is not None
-            and self._result_document.format_version
-            >= SEARCH_RESULTS_FORMAT_VERSION
+            and self._result_document.format_version >= SEARCH_RESULTS_FORMAT_VERSION
             and not self._result_document.references.empty
+            and ccf_heatmap_result
         )
         self._heatmap_btn.setEnabled(heatmap_ready)
+        self._heatmap_btn.setToolTip(
+            ""
+            if ccf_heatmap_result or not has_results
+            else (
+                "CCFv3 Search heatmaps are unavailable for flatmap-space "
+                "results. Use Apply Search Colors to Data, then inspect the "
+                "cohort from the Flatmap tab."
+            )
+        )
         for action in (
             self._heatmap_scored_all_action,
             self._heatmap_whole_all_action,
         ):
             action.setEnabled(heatmap_ready)
-        selected_heatmap_ready = heatmap_ready and bool(
-            self._selected_result_rows()
-        )
+        selected_heatmap_ready = heatmap_ready and bool(self._selected_result_rows())
         for action in (
             self._heatmap_scored_selected_action,
             self._heatmap_whole_selected_action,
@@ -1422,4 +1726,12 @@ class SearchTabWidget(QWidget):
         self._reference_section.setEnabled(not busy)
         self._filter_section.setEnabled(not busy)
         self._scope_combo.setEnabled(not busy)
+        self._coordinate_space_combo.setEnabled(not busy)
+        self._flatmap_style_combo.setEnabled(not busy)
+        self._flatmap_y_bins_spin.setEnabled(not busy)
+        self._flatmap_ignore_depth_cb.setEnabled(not busy)
+        self._flatmap_depth_bin_spin.setEnabled(
+            not busy and not self._flatmap_ignore_depth_cb.isChecked()
+        )
+        self._flatmap_include_depth_minus_one_cb.setEnabled(not busy)
         self._top_n_spin.setEnabled(not busy)

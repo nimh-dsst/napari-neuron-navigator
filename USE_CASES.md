@@ -45,7 +45,7 @@ Unless a use case says otherwise:
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
 | [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
-| [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons by Pearson distance, annotate the cohort, and create distance-colored heatmaps | Not run |
+| [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2279,29 +2279,40 @@ axon and retain dendrites extending beyond the chosen radius.
 
 **Capability**
 
-The user can search the loaded Parquet for neurons whose filtered CCFv3
-voxel-count vectors are most similar to either one reference neuron or the
-summed voxel-count vector of several reference neurons. Results are ranked by
-the same **Pearson distance (1 - r)** used by Analysis voxel-correlation
-clustering, where a lower value means a more similar spatial count pattern.
+The user can search the loaded Parquet for neurons whose filtered CCFv3 or
+flatmap-space voxel-count vectors are most similar to either one reference
+neuron or the summed voxel-count vector of several reference neurons. Results
+are ranked by the same **Pearson distance (1 - r)** used by Analysis
+voxel-correlation clustering, where a lower value means a more similar spatial
+count pattern.
 
 The search can apply the same anatomical region, node-type, whole-neuron
-dendrite-label coverage, and CCFv3 soma-distance filters as Analysis. Search
-can evaluate the **Whole Parquet**, **Current Table**, or **Selected Rows**
-candidate scope without narrowing the reference catalog. Results can be
-appended to **Data** > **Selected Neurons** without replacing existing rows,
-or the complete reference-and-result cohort can be added and annotated with
-its role, rank, scope, and filter terms.
+dendrite-label coverage, and CCFv3 soma-distance filters as Analysis. In
+**Flat map + Depth**, the user can choose a bilateral style and grid, retain
+cortical depth or collapse it to compare flatmap X/Y footprints only, and
+include or omit the depth `-1` plane. Search can evaluate the **Whole
+Parquet**, **Current Table**, or **Selected Rows** candidate scope without
+narrowing the reference catalog. Results can be appended to **Data** >
+**Selected Neurons** without replacing existing rows, or the complete
+reference-and-result cohort can be added and annotated with its role, rank,
+scope, coordinate space, flatmap grid, and filter terms.
 
 Version-2 Search CSVs include every reference as a rank-zero row and retain the
 completed-run context needed to reproduce annotations and filtered heatmaps.
-Search can create one combined query heatmap and one heatmap per selected or
-all ranked hits. The reference heatmap is fixed magenta so it remains visually
-distinct. A reversed-hot mapping spans the observed result-table distance
-range for hits, making the closest result white/yellow and the farthest dark
-red while voxel count controls intensity. **Scored Voxels** shows the exact
-filtered rows used by the distance calculation; **Whole Neuron** instead shows
-all valid, in-atlas source voxels while retaining the score-derived color.
+For CCFv3 results, Search can create one combined query heatmap and one heatmap
+per selected or all ranked hits. The reference heatmap is fixed magenta so it
+remains visually distinct. A reversed-hot mapping spans the observed
+result-table distance range for hits, making the closest result white/yellow
+and the farthest dark red while voxel count controls intensity. **Scored
+Voxels** shows the exact filtered rows used by the distance calculation;
+**Whole Neuron** instead shows all valid, in-atlas source voxels while retaining
+the score-derived color. The separate **Apply Search Colors to Data** action is
+available for both CCFv3 and flatmap results. It colors every matching reference
+row magenta and every matching hit from the full result-table reversed-hot
+distance mapping. This lets Flatmap's table-color rendering reuse the Search
+palette. Missing Data rows are reported but are not added implicitly. CCFv3
+heatmap actions remain disabled for flatmap results because those results were
+not scored on a CCFv3 grid.
 
 Node-type filtering retains the source-annotation cautions from Analysis. In
 particular, type `2` means axon-typed rather than verified axon, and the extent
@@ -2311,6 +2322,8 @@ of dendritic projections mislabeled as type `2` has not been quantified.
 
 - Load an Allen mouse atlas and a neuron Parquet containing valid `file_id`,
   `neuron_id`, `subject`, `type`, and CCFv3 `x`, `y`, and `z` columns.
+- To test flatmap Search, use a version-3 Parquet with bilateral shaped and/or
+  square flatmap columns, shared depth columns, and canonical grid metadata.
 - Include at least five neurons with overlapping and non-overlapping occupied
   voxels, plus one neuron that will have no usable nodes under a test filter.
 - Include two neurons that share the same display `neuron_id` across different
@@ -2362,39 +2375,57 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    **Expected:** Every single-reference Search distance matches the
    corresponding Analysis distance, including the established behavior for
    neurons with no shared occupied voxel.
-6. **Action:** Add independent Include and Exclude rules under **Region
+6. **Action:** With the version-3 Parquet loaded, change **Coordinate space**
+   to **Flat map + Depth**, choose each available **Flatmap style**, set **Y
+   bins**, **Depth bin (μm)**, and **Include depth -1 plane**, then run Search.
+   Repeat with **Ignore depth (flat map X/Y only)** enabled. Run Analysis voxel
+   correlation with the same input cohort and settings for comparison.
+   **Expected:** **Flat map + Depth** is offered only for compatible Parquets.
+   X-bin count is derived from each style's aspect ratio, so it is larger than
+   Y and can differ between shaped and square styles. Each Search result
+   matches the corresponding Analysis flatmap Pearson distance. Depth-aware
+   runs distinguish laminar occupancy; ignoring depth collapses voxel identity
+   to flatmap X/Y while depth validity and the `-1` choice still determine
+   which nodes contribute. Status, CSV context, and annotation tags identify
+   flatmap space, style, resolved X/Y grid, and depth mode. **Add Search
+   Heatmaps** is disabled for flatmap results with an explanation directing the
+   user to add the cohort to Data, click **Apply Search Colors to Data**, and
+   inspect it in **Flatmap**. The color action remains enabled. Switching back
+   to **CCFv3 Coordinates** restores the original CCFv3 heatmap controls and
+   behavior.
+7. **Action:** Add independent Include and Exclude rules under **Region
    Filters**, including overlapping masks and different dilation percentages,
    and rerun.
    **Expected:** Included masks are unioned, exclusions win in overlaps, and
    the same filtered node rows contribute to both the reference and every
    candidate vector. A candidate with no surviving node is omitted and counted
    in the status rather than appearing with a fabricated score.
-7. **Action:** Under **Voxel Node Filters**, test **Include selected** and
+8. **Action:** Under **Voxel Node Filters**, test **Include selected** and
    **Exclude selected**, the dendrite-label cohort restriction, and **Exclude
    nodes within soma distance** both separately and together.
    **Expected:** The controls use the same labels, inclusive soma-distance
    boundary, whole-neuron coverage behavior, and warnings as Analysis. A
    candidate without a valid soma is omitted when soma distance is active.
    Neurons sharing a display `neuron_id` remain separate results.
-8. **Action:** Select a reference that has no surviving node under the current
+9. **Action:** Select a reference that has no surviving node under the current
    filters, capture it, and run Search. Repeat with a reference that lacks a
    valid soma while soma-distance filtering is enabled.
    **Expected:** Search stops with an actionable message naming the unusable
    reference `file_id`; it never silently changes the requested sample.
-9. **Action:** Select at least two Data rows, choose **Aggregate selected rows**,
+10. **Action:** Select at least two Data rows, choose **Aggregate selected rows**,
    click **Use selected Data rows**, and run Search.
    **Expected:** Search reports the captured reference count, sums their
    filtered counts per voxel into one aggregate vector, omits all reference
    members from the result list, and returns one distance per candidate. Later
    Data-table selection changes do not affect the completed result.
-10. **Action:** Select several result rows and click **Add Selected to Data**.
+11. **Action:** Select several result rows and click **Add Selected to Data**.
    Then click **Add All Results to Data**.
    **Expected:** New `file_id` rows are appended in ranked order without
    rendering them automatically. Existing rows are not duplicated or reset;
    their colors, visibility, labels, notes, cluster assignments, scene state,
    and heatmap state remain intact. The status distinguishes added from
    already-present neurons.
-11. **Action:** Click **Add & Annotate Search in Data**, inspect **Data** in the
+12. **Action:** Click **Add & Annotate Search in Data**, inspect **Data** in the
     Label view, edit one non-Search tag or note, and click the action again.
     **Expected:** Available references are appended first and have Group
     `reference` while preserving any existing Label. Hits follow in rank order,
@@ -2404,7 +2435,8 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     `Search filters: none`. Repeating the action replaces older `Search ` tags
     without duplicates and preserves all other tags, notes, colors, visibility,
     cluster assignments, scene state, and heatmap state.
-12. **Action:** Select several Search result rows and choose **Add Search
+13. **Action:** With a CCFv3 result active, select several Search result rows
+    and choose **Add Search
     Heatmaps** > **Scored Voxels** > **Selected Results + Reference**. Then
     repeat with **Whole Neuron**.
     **Expected:** Each request creates one magenta reference layer first,
@@ -2412,13 +2444,14 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     the voxel mode, `Rank N`, and the exact displayed distance. **Scored
     Voxels** uses the completed run's immutable region and voxel-node filters;
     **Whole Neuron** bypasses those filters and displays all valid, in-atlas
-    source voxels. Both modes retain score-derived result colors. Search does
-    not add or annotate Data rows or change Data-table colors. The Search
-    layers are discoverable through the existing heatmap membership and tool
-    controls.
-13. **Action:** Compare close and distant result layers using the legend, then
+    source voxels. Both modes retain score-derived result colors but do not
+    change Data-table colors or membership. The Search layers are discoverable
+    through the existing heatmap membership and tool controls.
+14. **Action:** Compare close and distant result layers using the legend, then
     run aggregate-reference Search and choose either mode's **All Results +
-    Reference**.
+    Reference**. Click **Apply Search Colors to Data**. In Flatmap, choose
+    individual-neuron or vector coloring and project the cohort. Repeat the
+    color action with an active flatmap-space Search result.
     **Expected:** The full result table's observed minimum and maximum distances
     are shown in the legend and span the visible result color range: the
     reference is magenta, the closest hit is white/yellow, and the farthest is
@@ -2426,11 +2459,15 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     switching voxel mode does not change score-derived colors, and equal
     distances receive the same hottest color. Voxel counts control intensity.
     Aggregate mode creates one combined reference volume whose voxel counts are
-    the sum of all reference members, not one layer per member. If the estimated
-    retained image data exceeds 1 GiB, a dialog defaults to **Cancel**; canceling
-    creates no layer. An error after partial completion keeps completed layers
-    and reports `completed/total`.
-14. **Action:** Click **Save Results CSV...**, inspect the file, clear or replace
+    the sum of all reference members, not one layer per member. The explicit
+    color action gives every matching aggregate-reference Data row the same
+    magenta and maps all matching result rows using the full result-table
+    domain, independent of Search coordinate space. Missing rows are counted
+    but not added, unrelated rows retain their colors, and Flatmap inherits the
+    transferred palette. If the estimated retained image data exceeds 1 GiB, a
+    dialog defaults to **Cancel**; canceling creates no layer. An error after
+    partial completion keeps completed layers and reports `completed/total`.
+15. **Action:** Click **Save Results CSV...**, inspect the file, clear or replace
     the visible Search results, then click **Load Results CSV...** and reopen it.
     **Expected:** Every reference appears before the hits with
     `row_role=reference`, rank `0`, and an empty Pearson distance. Hits retain
@@ -2439,7 +2476,7 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     availability round trip. Loading does not alter Data until an explicit Add
     action is clicked, and reopened version-2 results can reproduce annotation
     and heatmap actions.
-15. **Action:** Reopen the version-2 CSV with a different Parquet loaded,
+16. **Action:** Reopen the version-2 CSV with a different Parquet loaded,
     including some but not all exported reference and result `file_id` values.
     Also open a release-1 Search CSV.
     **Expected:** Known IDs can be added. Unknown IDs remain visibly unavailable
@@ -2447,7 +2484,7 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     neuron. A heatmap request involving any unavailable ID is blocked. A
     release-1 CSV still loads its results, but because it has no recoverable
     references or filter context, Search explains that heatmaps require a rerun.
-16. **Action:** Try an empty Data selection, multiple rows in single mode, one
+17. **Action:** Try an empty Data selection, multiple rows in single mode, one
     row in aggregate mode, malformed CSV columns, duplicate CSV `file_id`
     values across either role, bad role/rank pairs, a non-empty reference
     distance, non-finite result distances, conflicting context JSON, and a
@@ -2459,13 +2496,14 @@ of dendritic projections mislabeled as type `2` has not been quantified.
 
 - Status: Not run
 - Last verified: Never
-- Notes: Releases 1 and 2 implemented on 2026-09-22. Automated coverage includes
+- Notes: Releases 1, 2, and 3 implemented on 2026-09-22. Automated coverage includes
   single-reference parity with Analysis, aggregate vectors and heatmaps,
   `file_id` identity and scoped candidates, filtered-out references and
   candidates, version-1/version-2 CSV validation and availability, idempotent
-  table metadata updates, annotation handoff, distance-color/layer metadata,
-  append semantics, and background workers. Manual napari verification is still
-  required.
+  table metadata updates, annotation handoff, explicit CCFv3/flatmap
+  Search-distance color transfer, distance-color/layer metadata, append
+  semantics, flatmap rectangular-grid/depth-mode parity, and background
+  workers. Manual napari verification is still required.
 
 ## Use-Case Template
 

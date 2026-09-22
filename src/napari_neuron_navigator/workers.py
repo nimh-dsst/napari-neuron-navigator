@@ -607,9 +607,7 @@ class SearchPreflightWorker(QObject):
         candidates = self._request.candidate_file_ids
         if candidates is None:
             return None
-        return list(
-            dict.fromkeys((*candidates, *self._request.reference_file_ids))
-        )
+        return list(dict.fromkeys((*candidates, *self._request.reference_file_ids)))
 
     def run(self) -> None:
         """Prepare reusable masks/lookups and count retained source rows."""
@@ -618,6 +616,7 @@ class SearchPreflightWorker(QObject):
 
             from .analysis.correlation import count_correlation_input_nodes
             from .analysis.region_filter import prepare_cluster_region_filter
+            from .analysis.search import SEARCH_SPACE_FLATMAP
             from .analysis.voxel_filter import prepare_voxel_node_filter_from_parquet
 
             scope_file_ids = self._scope_file_ids()
@@ -637,20 +636,41 @@ class SearchPreflightWorker(QObject):
                 )
 
             self.progress.emit("Counting search nodes...", 2, 2)
-            conn = duckdb.connect()
-            try:
-                node_count = count_correlation_input_nodes(
-                    conn,
+            if self._request.coordinate_space == SEARCH_SPACE_FLATMAP:
+                from .analysis.flatmap_correlation import (
+                    count_flatmap_voxel_correlation_nodes,
+                )
+
+                node_count = count_flatmap_voxel_correlation_nodes(
                     self._parquet_path,
-                    voxel_id_map=None,
-                    resolution=self._request.resolution_um,
+                    style=str(self._request.flatmap_style),
+                    y_bins=self._request.flatmap_y_bins,
+                    x_bins=self._request.flatmap_x_bins,
+                    depth_bin_um=self._request.flatmap_depth_bin_um,
+                    include_depth_minus_one=(
+                        self._request.flatmap_include_depth_minus_one
+                    ),
                     file_ids=scope_file_ids,
+                    collapse_depth=self._request.flatmap_collapse_depth,
                     prepared_region_filter=prepared_region_filter,
                     voxel_node_filter=self._request.voxel_node_filter,
                     prepared_voxel_filter=prepared_voxel_filter,
                 )
-            finally:
-                conn.close()
+            else:
+                conn = duckdb.connect()
+                try:
+                    node_count = count_correlation_input_nodes(
+                        conn,
+                        self._parquet_path,
+                        voxel_id_map=None,
+                        resolution=self._request.resolution_um,
+                        file_ids=scope_file_ids,
+                        prepared_region_filter=prepared_region_filter,
+                        voxel_node_filter=self._request.voxel_node_filter,
+                        prepared_voxel_filter=prepared_voxel_filter,
+                    )
+                finally:
+                    conn.close()
             self.finished.emit(
                 SearchPreflightResult(
                     node_count=int(node_count),
@@ -783,8 +803,7 @@ class SearchHeatmapWorker(QObject):
                 mode_label = SEARCH_HEATMAP_MODE_LABELS[self._request.voxel_mode]
                 for index, layer in enumerate(self._request.layers):
                     self.progress.emit(
-                        f"Building {mode_label} Search heatmap "
-                        f"{index + 1}/{total}...",
+                        f"Building {mode_label} Search heatmap {index + 1}/{total}...",
                         index,
                         total,
                     )

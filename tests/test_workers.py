@@ -2428,6 +2428,53 @@ def test_search_preflight_worker_counts_whole_parquet(tmp_path):
     ]
 
 
+def test_search_preflight_worker_routes_flatmap_grid_settings(monkeypatch):
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_SPACE_FLATMAP,
+        VoxelSearchRequest,
+    )
+
+    workers = _import_workers_module()
+    count_helper = MagicMock(return_value=17)
+    monkeypatch.setattr(
+        "napari_neuron_navigator.analysis.flatmap_correlation."
+        "count_flatmap_voxel_correlation_nodes",
+        count_helper,
+    )
+    worker = workers.SearchPreflightWorker(
+        parquet_path="neurons.parquet",
+        atlas=types.SimpleNamespace(),
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            candidate_file_ids=("candidate",),
+            coordinate_space=SEARCH_SPACE_FLATMAP,
+            flatmap_style="both_shaped",
+            flatmap_y_bins=64,
+            flatmap_depth_bin_um=50.0,
+            flatmap_include_depth_minus_one=False,
+            flatmap_collapse_depth=True,
+        ),
+    )
+    finished = []
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert finished[0].node_count == 17
+    assert count_helper.call_args.kwargs == {
+        "style": "both_shaped",
+        "y_bins": 64,
+        "x_bins": None,
+        "depth_bin_um": 50.0,
+        "include_depth_minus_one": False,
+        "file_ids": ["candidate", "ref"],
+        "collapse_depth": True,
+        "prepared_region_filter": None,
+        "voxel_node_filter": None,
+        "prepared_voxel_filter": None,
+    }
+
+
 def test_search_worker_emits_ranked_result_and_atlas_metadata(tmp_path):
     from napari_neuron_navigator.analysis.search import VoxelSearchRequest
 

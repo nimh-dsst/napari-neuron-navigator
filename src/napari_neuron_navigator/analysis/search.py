@@ -44,6 +44,12 @@ SEARCH_SCOPE_LABELS = {
     SEARCH_SCOPE_CURRENT: "Current Table",
     SEARCH_SCOPE_SELECTED: "Selected Rows",
 }
+SEARCH_SPACE_CCF = "ccfv3"
+SEARCH_SPACE_FLATMAP = "flatmap"
+SEARCH_SPACE_LABELS = {
+    SEARCH_SPACE_CCF: "CCFv3 Coordinates",
+    SEARCH_SPACE_FLATMAP: "Flat map + Depth",
+}
 SEARCH_RESULTS_COLUMNS = (
     "format_version",
     "row_role",
@@ -124,6 +130,16 @@ def _search_context(metadata: Mapping[str, object]) -> dict[str, object]:
         "missing_correlation_policy",
         "aggregate_mode",
         "resolution_um",
+        "flatmap_style",
+        "flatmap_y_bins",
+        "flatmap_x_bins",
+        "flatmap_depth_bin_um",
+        "flatmap_include_depth_minus_one",
+        "flatmap_collapse_depth",
+        "flatmap_volume_shape",
+        "flatmap_x_bounds",
+        "flatmap_y_bounds",
+        "flatmap_depth_range_um",
         "candidate_scope",
         "candidate_scope_label",
         "candidate_scope_input_count",
@@ -168,8 +184,7 @@ def cluster_region_filter_from_dict(
                 int(value) for value in raw.get("represented_region_ids", ())
             ),
             "represented_region_acronyms": tuple(
-                str(value)
-                for value in raw.get("represented_region_acronyms", ())
+                str(value) for value in raw.get("represented_region_acronyms", ())
             ),
             "dilation_fraction": float(raw.get("dilation_fraction", 0.0)),
         }
@@ -212,13 +227,10 @@ def voxel_node_filter_from_dict(
     result = VoxelNodeFilter(
         node_type_mode=str(payload.get("node_type_mode", "all")),
         node_types=tuple(int(value) for value in payload.get("node_types", ())),
-        require_dendrite_labels=bool(
-            payload.get("require_dendrite_labels", False)
-        ),
+        require_dendrite_labels=bool(payload.get("require_dendrite_labels", False)),
         exclude_within_soma_um=payload.get("exclude_within_soma_um"),
         dendrite_node_types=tuple(
-            int(value)
-            for value in payload.get("dendrite_node_types", (3, 4))
+            int(value) for value in payload.get("dendrite_node_types", (3, 4))
         ),
     )
     return None if result.is_empty else result
@@ -278,7 +290,7 @@ def pearson_distance_to_hot_rgba(
 
 @dataclass(frozen=True)
 class VoxelSearchRequest:
-    """Immutable specification for one CCF voxel-correlation search."""
+    """Immutable specification for one CCF or flatmap voxel search."""
 
     reference_file_ids: tuple[str, ...]
     candidate_file_ids: tuple[str, ...] | None = None
@@ -288,6 +300,13 @@ class VoxelSearchRequest:
     top_n: int = 100
     exclude_references: bool = True
     candidate_scope: str = SEARCH_SCOPE_WHOLE
+    coordinate_space: str = SEARCH_SPACE_CCF
+    flatmap_style: str | None = None
+    flatmap_y_bins: int = 256
+    flatmap_x_bins: int | None = None
+    flatmap_depth_bin_um: float = 25.0
+    flatmap_include_depth_minus_one: bool = True
+    flatmap_collapse_depth: bool = False
 
     def __post_init__(self) -> None:
         references = _unique_strings(self.reference_file_ids)
@@ -313,6 +332,26 @@ class VoxelSearchRequest:
         if scope not in SEARCH_SCOPE_LABELS:
             raise ValueError(f"Unknown search candidate scope: {scope!r}")
         object.__setattr__(self, "candidate_scope", scope)
+        coordinate_space = str(self.coordinate_space)
+        if coordinate_space not in SEARCH_SPACE_LABELS:
+            raise ValueError(f"Unknown search coordinate space: {coordinate_space!r}")
+        object.__setattr__(self, "coordinate_space", coordinate_space)
+        if coordinate_space == SEARCH_SPACE_FLATMAP:
+            if not self.flatmap_style:
+                raise ValueError("Select a flatmap style for flatmap search.")
+            y_bins = int(self.flatmap_y_bins)
+            if y_bins < 1:
+                raise ValueError("flatmap_y_bins must be at least 1.")
+            object.__setattr__(self, "flatmap_y_bins", y_bins)
+            if self.flatmap_x_bins is not None:
+                x_bins = int(self.flatmap_x_bins)
+                if x_bins < 1:
+                    raise ValueError("flatmap_x_bins must be at least 1.")
+                object.__setattr__(self, "flatmap_x_bins", x_bins)
+            depth_bin_um = float(self.flatmap_depth_bin_um)
+            if not np.isfinite(depth_bin_um) or depth_bin_um <= 0.0:
+                raise ValueError("flatmap_depth_bin_um must be finite and positive.")
+            object.__setattr__(self, "flatmap_depth_bin_um", depth_bin_um)
 
 
 @dataclass(frozen=True)
@@ -347,6 +386,15 @@ class SearchAnnotationRequest:
     ranked_hits: tuple[tuple[str, int], ...]
     filter_tags: tuple[str, ...]
     unavailable_file_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SearchTableColorRequest:
+    """Exact Search colors to apply to matching neurons already in Data."""
+
+    colors_by_file_id: tuple[tuple[str, tuple[float, float, float, float]], ...]
+    reference_file_ids: tuple[str, ...] = ()
+    distance_color_domain: tuple[float, float] = (0.0, 2.0)
 
 
 @dataclass(frozen=True)
@@ -435,9 +483,7 @@ def query_neuron_catalog(
         else "''"
     )
     subject_expr = (
-        "COALESCE(MIN(CAST(subject AS VARCHAR)), '')"
-        if "subject" in columns
-        else "''"
+        "COALESCE(MIN(CAST(subject AS VARCHAR)), '')" if "subject" in columns else "''"
     )
     return conn.execute(f"""
         SELECT
@@ -475,11 +521,12 @@ def compute_voxel_search(
 ) -> VoxelSearchResult:
     """Rank candidate neurons by Pearson distance from an aggregate query.
 
-    The CCF voxel universe and missing-correlation policy intentionally match
-    :func:`compute_pearson_correlation_matrix` plus
-    :func:`correlation_long_to_matrix`. In particular, a candidate with no
-    occupied voxel shared with the query, or an undefined Pearson denominator,
-    receives ``r = -1`` and therefore distance ``2``.
+    CCF searches match :func:`compute_pearson_correlation_matrix`; flatmap
+    searches use the same rectangular grid and bin expressions as Analysis.
+    CCF preserves its historical ``r = -1`` fallback for no shared occupancy
+    or an undefined denominator. Flatmap follows Analysis's dense zero-filled
+    vectors: no-overlap cross-products are zero and an undefined denominator
+    produces ``r = 0``.
     """
     from .correlation import _cleanup_region_nodes_view, _prepare_region_nodes_view
 
@@ -492,9 +539,7 @@ def compute_voxel_search(
     catalog_ids = tuple(catalog["file_id"].astype(str).tolist())
     catalog_set = set(catalog_ids)
     missing_references = [
-        file_id
-        for file_id in request.reference_file_ids
-        if file_id not in catalog_set
+        file_id for file_id in request.reference_file_ids if file_id not in catalog_set
     ]
     if missing_references:
         raise ValueError(
@@ -507,9 +552,7 @@ def compute_voxel_search(
         scope_file_ids = None
     else:
         requested_candidate_ids = tuple(
-            file_id
-            for file_id in request.candidate_file_ids
-            if file_id in catalog_set
+            file_id for file_id in request.candidate_file_ids if file_id in catalog_set
         )
         scope_file_ids = list(
             dict.fromkeys((*requested_candidate_ids, *request.reference_file_ids))
@@ -524,39 +567,198 @@ def compute_voxel_search(
     if not result_candidate_ids:
         raise ValueError("No non-reference candidate neurons are available.")
 
-    progress("Applying region and node filters...", 2)
-    prepared = _prepare_region_nodes_view(
-        conn,
-        str(parquet_path),
-        voxel_id_map,
-        request.resolution_um,
-        scope_file_ids,
-        prepared_region_filter,
-        request.voxel_node_filter,
-        prepared_voxel_filter,
-    )
-    (
-        lut_registered,
-        scope_registered,
-        filter_view_name,
-        filter_relations,
-        voxel_filter_view_name,
-        voxel_filter_relations,
-    ) = prepared
-
+    lut_registered = False
+    scope_registered = False
+    filter_view_name: str | None = None
+    filter_relations: tuple[str, ...] = ()
+    voxel_filter_view_name: str | None = None
+    voxel_filter_relations: tuple[str, ...] = ()
+    flatmap_scope_registered = False
+    flatmap_scope_view_created = False
+    flatmap_provenance: dict[str, object] = {}
     registered_reference_ids = False
     registered_candidate_ids = False
     try:
-        progress("Counting nodes per neuron and voxel...", 3)
-        conn.execute("""
-            CREATE OR REPLACE TEMP TABLE search_counts_by_voxel AS
-            SELECT
-                CAST(swc_id AS VARCHAR) AS file_id,
-                voxel_id,
-                COUNT(*)::DOUBLE AS c
-            FROM region_nodes
-            GROUP BY file_id, voxel_id
-        """)
+        progress("Applying region and node filters...", 2)
+        if request.coordinate_space == SEARCH_SPACE_CCF:
+            prepared = _prepare_region_nodes_view(
+                conn,
+                str(parquet_path),
+                voxel_id_map,
+                request.resolution_um,
+                scope_file_ids,
+                prepared_region_filter,
+                request.voxel_node_filter,
+                prepared_voxel_filter,
+            )
+            (
+                lut_registered,
+                scope_registered,
+                filter_view_name,
+                filter_relations,
+                voxel_filter_view_name,
+                voxel_filter_relations,
+            ) = prepared
+            progress("Counting nodes per neuron and CCFv3 voxel...", 3)
+            conn.execute("""
+                CREATE OR REPLACE TEMP TABLE search_counts_by_voxel AS
+                SELECT
+                    CAST(swc_id AS VARCHAR) AS file_id,
+                    voxel_id,
+                    COUNT(*)::DOUBLE AS c
+                FROM region_nodes
+                GROUP BY file_id, voxel_id
+            """)
+        else:
+            from ..flatmap_heatmap import (
+                MAX_FLATMAP_HEATMAP_VOXELS,
+                _depth_bin_count,
+                _duckdb_column_names,
+                _flatmap_sql_expressions,
+                _nondegenerate_bounds,
+                _resolve_axis_bin_counts,
+                _style_suffix,
+            )
+            from .flatmap_correlation import _resolve_flatmap_render_bounds
+            from .region_filter import register_filtered_source_view
+            from .voxel_filter import (
+                prepare_voxel_node_filter,
+                register_voxel_filtered_source_view,
+            )
+
+            style = str(request.flatmap_style)
+            suffix = _style_suffix(style)
+            x_bounds, y_bounds, depth_range = _resolve_flatmap_render_bounds(
+                str(parquet_path), style, suffix
+            )
+            x_lower, x_upper = _nondegenerate_bounds(*x_bounds)
+            y_lower, y_upper = _nondegenerate_bounds(*y_bounds)
+            depth_lower, depth_upper = _nondegenerate_bounds(*depth_range)
+            y_bins, x_bins, depth_bin_um = _resolve_axis_bin_counts(
+                x_bounds=(x_lower, x_upper),
+                y_bounds=(y_lower, y_upper),
+                y_bins=request.flatmap_y_bins,
+                x_bins=request.flatmap_x_bins,
+                depth_bin_um=request.flatmap_depth_bin_um,
+            )
+            valid_depth_bins = _depth_bin_count(
+                (depth_lower, depth_upper), depth_bin_um
+            )
+            sentinel_offset = 1 if request.flatmap_include_depth_minus_one else 0
+            total_depth_bins = valid_depth_bins + sentinel_offset
+            volume_shape: tuple[int, ...] = (
+                (y_bins, x_bins)
+                if request.flatmap_collapse_depth
+                else (total_depth_bins, y_bins, x_bins)
+            )
+            if int(np.prod(volume_shape)) > MAX_FLATMAP_HEATMAP_VOXELS:
+                shape_text = "x".join(str(int(size)) for size in volume_shape)
+                raise ValueError(
+                    f"Flatmap voxel grid is too large: {shape_text} voxels. "
+                    "Use fewer Y bins or a larger depth bin."
+                )
+
+            raw_source_sql = _source_sql(parquet_path)
+            source_sql = raw_source_sql
+            filter_view_name = "search_flatmap_region_filtered_source"
+            source_sql, filter_relations = register_filtered_source_view(
+                conn,
+                source_sql,
+                prepared_region_filter,
+                view_name=filter_view_name,
+            )
+            voxel_filter_view_name = "search_flatmap_voxel_filtered_source"
+            if (
+                request.voxel_node_filter is not None
+                and not request.voxel_node_filter.is_empty
+            ):
+                if prepared_voxel_filter is None:
+                    prepared_voxel_filter = prepare_voxel_node_filter(
+                        conn,
+                        raw_source_sql,
+                        request.voxel_node_filter,
+                        file_ids=scope_file_ids,
+                    )
+                elif prepared_voxel_filter.settings != request.voxel_node_filter:
+                    raise ValueError(
+                        "Prepared voxel filter does not match the requested settings."
+                    )
+                source_sql, voxel_filter_relations = (
+                    register_voxel_filtered_source_view(
+                        conn,
+                        source_sql,
+                        prepared_voxel_filter,
+                        view_name=voxel_filter_view_name,
+                    )
+                )
+            if scope_file_ids is not None:
+                conn.register(
+                    "search_flatmap_scope_ids",
+                    pa.table({"file_id": [str(value) for value in scope_file_ids]}),
+                )
+                flatmap_scope_registered = True
+                conn.execute(f"""
+                    CREATE OR REPLACE TEMP VIEW search_flatmap_scoped_source AS
+                    SELECT p.*
+                    FROM {source_sql} p
+                    JOIN search_flatmap_scope_ids scope_ids
+                      ON CAST(p.file_id AS VARCHAR) = scope_ids.file_id
+                """)
+                source_sql = "search_flatmap_scoped_source"
+                flatmap_scope_view_created = True
+
+            expressions = _flatmap_sql_expressions(
+                _duckdb_column_names(conn, source_sql),
+                suffix=suffix,
+                x_lower=x_lower,
+                x_upper=x_upper,
+                y_lower=y_lower,
+                y_upper=y_upper,
+                depth_lower=depth_lower,
+                depth_bin_um=depth_bin_um,
+                y_bins=y_bins,
+                x_bins=x_bins,
+                valid_depth_bins=valid_depth_bins,
+                sentinel_offset=sentinel_offset,
+                include_depth_minus_one=request.flatmap_include_depth_minus_one,
+            )
+            xy_voxel = (
+                f"(({expressions['y_bin']}) * {int(x_bins)}::BIGINT "
+                f"+ ({expressions['x_bin']}))"
+            )
+            voxel_id = (
+                xy_voxel
+                if request.flatmap_collapse_depth
+                else (
+                    f"(({expressions['depth_bin']}) * "
+                    f"{int(y_bins * x_bins)}::BIGINT + {xy_voxel})"
+                )
+            )
+            progress("Counting nodes per neuron and flatmap voxel...", 3)
+            conn.execute(f"""
+                CREATE OR REPLACE TEMP TABLE search_counts_by_voxel AS
+                SELECT
+                    CAST(file_id AS VARCHAR) AS file_id,
+                    {voxel_id} AS voxel_id,
+                    COUNT(*)::DOUBLE AS c
+                FROM {source_sql}
+                WHERE {expressions["render_where"]}
+                GROUP BY file_id, voxel_id
+            """)
+            flatmap_provenance = {
+                "flatmap_style": style,
+                "flatmap_y_bins": int(y_bins),
+                "flatmap_x_bins": int(x_bins),
+                "flatmap_depth_bin_um": float(depth_bin_um),
+                "flatmap_include_depth_minus_one": bool(
+                    request.flatmap_include_depth_minus_one
+                ),
+                "flatmap_collapse_depth": bool(request.flatmap_collapse_depth),
+                "flatmap_volume_shape": [int(size) for size in volume_shape],
+                "flatmap_x_bounds": [float(x_lower), float(x_upper)],
+                "flatmap_y_bounds": [float(y_lower), float(y_upper)],
+                "flatmap_depth_range_um": [float(depth_lower), float(depth_upper)],
+            }
         retained_row = conn.execute(
             "SELECT COALESCE(SUM(c), 0)::BIGINT FROM search_counts_by_voxel"
         ).fetchone()
@@ -578,13 +780,12 @@ def compute_voxel_search(
                 request.voxel_node_filter is not None
                 and request.voxel_node_filter.exclude_within_soma_um is not None
             ):
-                detail = " They may lack a valid soma for the active soma-distance filter."
+                detail = (
+                    " They may lack a valid soma for the active soma-distance filter."
+                )
             raise ValueError(
                 "Reference neuron(s) have no usable nodes after applying the "
-                "selected filters: "
-                + ", ".join(unusable_references)
-                + "."
-                + detail
+                "selected filters: " + ", ".join(unusable_references) + "." + detail
             )
 
         omitted = tuple(
@@ -640,8 +841,16 @@ def compute_voxel_search(
         """)
 
         progress("Computing and ranking Pearson distances...", 5)
+        cross_product = (
+            "xprod.sxy"
+            if request.coordinate_space == SEARCH_SPACE_CCF
+            else "COALESCE(xprod.sxy, 0.0)"
+        )
+        undefined_correlation = (
+            -1.0 if request.coordinate_space == SEARCH_SPACE_CCF else 0.0
+        )
         score_frame = conn.execute(
-            """
+            f"""
             WITH
             voxel_universe AS (
                 SELECT COUNT(DISTINCT voxel_id)::DOUBLE AS v
@@ -657,7 +866,7 @@ def compute_voxel_search(
                 cstats.file_id,
                 COALESCE(
                     (
-                        vu.v * xprod.sxy - cstats.sx * qstats.sy
+                        vu.v * {cross_product} - cstats.sx * qstats.sy
                     ) / NULLIF(
                         SQRT(
                             (vu.v * cstats.sxx - cstats.sx * cstats.sx)
@@ -665,7 +874,7 @@ def compute_voxel_search(
                         ),
                         0
                     ),
-                    -1.0
+                    {undefined_correlation!r}
                 ) AS pearson_r
             FROM search_candidate_stats cstats
             LEFT JOIN search_cross_products xprod USING (file_id)
@@ -679,7 +888,7 @@ def compute_voxel_search(
         else:
             correlations = np.clip(
                 pd.to_numeric(score_frame["pearson_r"], errors="coerce")
-                .fillna(-1.0)
+                .fillna(undefined_correlation)
                 .to_numpy(dtype=np.float64),
                 -1.0,
                 1.0,
@@ -715,21 +924,40 @@ def compute_voxel_search(
                 else request.voxel_node_filter.to_dict()
             )
         region_filter_metadata = (
-            None
-            if request.region_filter is None
-            else request.region_filter.to_dict()
+            None if request.region_filter is None else request.region_filter.to_dict()
         )
-        filter_tags = build_search_filter_tags(
-            request.candidate_scope,
-            region_filter_metadata,
-            voxel_filter_metadata,
+        filter_tags = list(
+            build_search_filter_tags(
+                request.candidate_scope,
+                region_filter_metadata,
+                voxel_filter_metadata,
+            )
         )
+        if request.coordinate_space == SEARCH_SPACE_FLATMAP:
+            depth_text = (
+                "collapsed"
+                if request.flatmap_collapse_depth
+                else f"{flatmap_provenance['flatmap_depth_bin_um']:g} um bins"
+            )
+            filter_tags[1:1] = [
+                "Search space: Flat map + Depth",
+                f"Search flatmap style: {flatmap_provenance['flatmap_style']}",
+                (
+                    "Search flatmap grid: "
+                    f"{flatmap_provenance['flatmap_y_bins']} Y x "
+                    f"{flatmap_provenance['flatmap_x_bins']} X; depth {depth_text}"
+                ),
+            ]
         metadata: dict[str, object] = {
             "format_version": SEARCH_RESULTS_FORMAT_VERSION,
             "analysis_method": "voxel_similarity_search",
-            "coordinate_space": "ccfv3",
+            "coordinate_space": request.coordinate_space,
             "distance_metric": "one_minus_pearson_r",
-            "missing_correlation_policy": "pearson_r_minus_one",
+            "missing_correlation_policy": (
+                "pearson_r_minus_one"
+                if request.coordinate_space == SEARCH_SPACE_CCF
+                else "flatmap_dense_zero_filled_r_zero_if_undefined"
+            ),
             "aggregate_mode": "sum_voxel_counts",
             "source_parquet_path": str(Path(parquet_path)),
             "resolution_um": float(request.resolution_um),
@@ -749,8 +977,9 @@ def compute_voxel_search(
             "candidate_file_ids": list(requested_candidate_ids),
             "region_filter": region_filter_metadata,
             "voxel_node_filter": voxel_filter_metadata,
-            "filter_tags": list(filter_tags),
+            "filter_tags": filter_tags,
         }
+        metadata.update(flatmap_provenance)
         catalog_by_file_id = catalog.set_index("file_id", drop=False)
         reference_rows = pd.DataFrame(
             [
@@ -778,7 +1007,9 @@ def compute_voxel_search(
             try:
                 conn.execute(f"DROP TABLE IF EXISTS {relation}")
             except Exception:
-                logger.debug("Could not drop search relation %s", relation, exc_info=True)
+                logger.debug(
+                    "Could not drop search relation %s", relation, exc_info=True
+                )
         if registered_candidate_ids:
             try:
                 conn.unregister("search_candidate_ids")
@@ -795,15 +1026,47 @@ def compute_voxel_search(
                     "Could not unregister search reference IDs",
                     exc_info=True,
                 )
-        _cleanup_region_nodes_view(
-            conn,
-            lut_registered=lut_registered,
-            scope_registered=scope_registered,
-            filter_view_name=filter_view_name,
-            filter_relations=filter_relations,
-            voxel_filter_view_name=voxel_filter_view_name,
-            voxel_filter_relations=voxel_filter_relations,
-        )
+        if request.coordinate_space == SEARCH_SPACE_CCF:
+            _cleanup_region_nodes_view(
+                conn,
+                lut_registered=lut_registered,
+                scope_registered=scope_registered,
+                filter_view_name=filter_view_name,
+                filter_relations=filter_relations,
+                voxel_filter_view_name=voxel_filter_view_name,
+                voxel_filter_relations=voxel_filter_relations,
+            )
+        else:
+            if flatmap_scope_view_created:
+                try:
+                    conn.execute("DROP VIEW IF EXISTS search_flatmap_scoped_source")
+                except Exception:
+                    logger.debug(
+                        "Could not drop flatmap Search scope view", exc_info=True
+                    )
+            if flatmap_scope_registered:
+                try:
+                    conn.unregister("search_flatmap_scope_ids")
+                except Exception:
+                    logger.debug(
+                        "Could not unregister flatmap Search scope", exc_info=True
+                    )
+            if voxel_filter_view_name is not None:
+                from .voxel_filter import cleanup_voxel_filtered_source_view
+
+                cleanup_voxel_filtered_source_view(
+                    conn,
+                    voxel_filter_view_name,
+                    voxel_filter_relations,
+                )
+            if filter_view_name is not None:
+                from .region_filter import cleanup_filtered_source_view
+
+                cleanup_filtered_source_view(
+                    conn,
+                    filter_view_name,
+                    filter_relations,
+                )
 
 
 def export_search_results_csv(
@@ -878,9 +1141,7 @@ def export_search_results_csv(
     if "file_id" not in references:
         references["file_id"] = pd.Series(dtype="string")
     if references.empty:
-        raise ValueError(
-            "Version-2 Search exports require at least one reference row."
-        )
+        raise ValueError("Version-2 Search exports require at least one reference row.")
     references["file_id"] = references["file_id"].astype(str)
     for frame in (references, hits):
         for column in ("neuron_id", "subject"):
@@ -888,9 +1149,7 @@ def export_search_results_csv(
                 frame[column] = ""
             frame[column] = frame[column].fillna("").astype(str)
 
-    duplicated = pd.concat(
-        [references["file_id"], hits["file_id"]], ignore_index=True
-    )
+    duplicated = pd.concat([references["file_id"], hits["file_id"]], ignore_index=True)
     duplicate_ids = duplicated[duplicated.duplicated()].unique()
     if len(duplicate_ids):
         raise ValueError(
@@ -903,9 +1162,7 @@ def export_search_results_csv(
     references["pearson_distance"] = np.nan
     references.insert(0, "row_role", SEARCH_ROW_REFERENCE)
 
-    hits = hits[
-        ["rank", "file_id", "neuron_id", "subject", "pearson_distance"]
-    ].copy()
+    hits = hits[["rank", "file_id", "neuron_id", "subject", "pearson_distance"]].copy()
     hits.insert(0, "row_role", SEARCH_ROW_RESULT)
     frame = pd.concat([references, hits], ignore_index=True)
     frame.insert(0, "format_version", SEARCH_RESULTS_FORMAT_VERSION)
@@ -960,24 +1217,19 @@ def load_search_results_csv(
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(
-            "Search CSV is missing required column(s): "
-            + ", ".join(sorted(missing))
+            "Search CSV is missing required column(s): " + ", ".join(sorted(missing))
         )
     if frame.empty:
         raise ValueError("Search CSV contains no result rows.")
 
     versions = pd.to_numeric(frame["format_version"], errors="coerce")
-    if versions.isna().any() or not np.all(
-        np.equal(versions, np.floor(versions))
-    ):
+    if versions.isna().any() or not np.all(np.equal(versions, np.floor(versions))):
         raise ValueError(
             "Search CSV must contain one supported integer format version."
         )
     unique_versions = set(versions.dropna().astype(int).tolist())
     if len(unique_versions) != 1:
-        raise ValueError(
-            "Search CSV must contain one supported format version."
-        )
+        raise ValueError("Search CSV must contain one supported format version.")
     version = unique_versions.pop()
     if version not in {
         SEARCH_RESULTS_LEGACY_FORMAT_VERSION,
@@ -1077,9 +1329,7 @@ def load_search_results_csv(
     raw_distances = frame["pearson_distance"]
     if raw_distances.loc[reference_mask].notna().any():
         raise ValueError("Search reference pearson_distance values must be empty.")
-    result_distances = pd.to_numeric(
-        raw_distances.loc[result_mask], errors="coerce"
-    )
+    result_distances = pd.to_numeric(raw_distances.loc[result_mask], errors="coerce")
     if not np.all(
         np.isfinite(result_distances.to_numpy(dtype=float))
         & result_distances.between(0.0, 2.0, inclusive="both").to_numpy()
@@ -1100,12 +1350,16 @@ def load_search_results_csv(
         try:
             parsed = json.loads(raw_context)
         except json.JSONDecodeError as error:
-            raise ValueError(f"Search CSV contains invalid context JSON: {error}") from error
+            raise ValueError(
+                f"Search CSV contains invalid context JSON: {error}"
+            ) from error
         if not isinstance(parsed, dict):
             raise TypeError("Search CSV context JSON must contain an object.")
         parsed_contexts.append(parsed)
         canonical_contexts.add(
-            json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            json.dumps(
+                parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
         )
     if len(canonical_contexts) > 1:
         raise ValueError("Search CSV rows contain conflicting search context JSON.")
@@ -1181,9 +1435,7 @@ def build_filtered_search_heatmap_volume(
             zi = counts["zi"].to_numpy(dtype=np.intp)
             yi = counts["yi"].to_numpy(dtype=np.intp)
             xi = counts["xi"].to_numpy(dtype=np.intp)
-            volume[zi, yi, xi] = counts["node_count"].to_numpy(
-                dtype=np.float32
-            )
+            volume[zi, yi, xi] = counts["node_count"].to_numpy(dtype=np.float32)
         return volume
     finally:
         _cleanup_region_nodes_view(

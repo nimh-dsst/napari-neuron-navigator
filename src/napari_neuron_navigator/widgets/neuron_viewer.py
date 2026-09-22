@@ -1295,6 +1295,9 @@ class NeuronViewerWidget(QWidget):
             self._search_tab.annotate_search_requested.connect(
                 self._annotate_search_in_table
             )
+            self._search_tab.apply_search_colors_requested.connect(
+                self._apply_search_colors_in_table
+            )
             self._search_tab.search_heatmaps_requested.connect(
                 self._start_search_heatmaps
             )
@@ -7483,6 +7486,29 @@ class NeuronViewerWidget(QWidget):
             search_tab.set_search_heatmap_busy(True)
         self._update_selected_neuron_heatmap_controls()
         thread.start()
+
+    def _apply_search_colors_in_table(self, request) -> None:
+        """Apply an explicit Search palette to matching Data-table rows."""
+        table_file_ids = list(self._neuron_table.file_ids())
+        table_ids_by_string = {str(file_id): file_id for file_id in table_file_ids}
+        color_map: dict[object, list[float]] = {}
+        missing: set[str] = set()
+        for requested_id, rgba in request.colors_by_file_id:
+            normalized_id = str(requested_id)
+            table_id = table_ids_by_string.get(normalized_id)
+            if table_id is None:
+                missing.add(normalized_id)
+                continue
+            color_map.setdefault(
+                table_id,
+                [float(channel) for channel in rgba],
+            )
+
+        if color_map:
+            self._neuron_table.update_colors(color_map)
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.on_search_colors_applied(len(color_map), len(missing))
 
     def _confirm_large_search_heatmap_request(
         self,
