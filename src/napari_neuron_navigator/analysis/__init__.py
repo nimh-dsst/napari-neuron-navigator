@@ -40,6 +40,7 @@ from .region_filter import (
     PreparedClusterRegionFilter,
     prepare_cluster_region_filter,
 )
+from .search import VoxelSearchRequest, VoxelSearchResult, compute_voxel_search
 from .voxel_filter import (
     DendriteLabelCoverage,
     PreparedVoxelNodeFilter,
@@ -58,6 +59,8 @@ __all__ = [
     "PreparedClusterRegionFilter",
     "PreparedVoxelNodeFilter",
     "VoxelNodeFilter",
+    "VoxelSearchRequest",
+    "VoxelSearchResult",
     "build_binary_mask_from_heatmap",
     "build_binary_mask_from_threshold_range",
     "build_node_counts_volume",
@@ -68,6 +71,7 @@ __all__ = [
     "compute_linkage",
     "compute_linkage_from_condensed",
     "compute_pearson_correlation_matrix",
+    "compute_voxel_search",
     "correlation_long_to_matrix",
     "dilate_mask_to_volume_increase",
     "get_expanded_region_voxel_ids",

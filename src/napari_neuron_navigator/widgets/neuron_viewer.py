@@ -1275,6 +1275,18 @@ class NeuronViewerWidget(QWidget):
             )
             tabs.addTab(self._analysis_tab, "Analysis")
 
+        with startup_timing(logger, "neuron_viewer_setup_tab", tab="Search"):
+            from .search_tab import SearchTabWidget
+
+            self._search_tab = SearchTabWidget()
+            self._search_tab.set_selected_table_file_ids_provider(
+                self._neuron_table.get_selected_file_ids
+            )
+            self._search_tab.add_file_ids_requested.connect(
+                self._add_search_file_ids_to_table
+            )
+            tabs.addTab(self._search_tab, "Search")
+
         with startup_timing(logger, "neuron_viewer_setup_tab", tab="Compare"):
             compare_tab = QWidget()
             tabs.addTab(compare_tab, "Compare")
@@ -2875,6 +2887,9 @@ class NeuronViewerWidget(QWidget):
 
         self._set_region_query_buttons_enabled(True)
         self._analysis_tab.set_database(self._db)
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.set_database(self._db)
         self._termini_section_widget.set_database(self._db)
         self._regions_status_label.setText("")
         flatmap_tab = getattr(self, "_flatmap_tab", None)
@@ -3732,6 +3747,9 @@ class NeuronViewerWidget(QWidget):
             atlas=atlas_name,
         ):
             self._analysis_tab.set_atlas(atlas)
+            search_tab = getattr(self, "_search_tab", None)
+            if search_tab is not None:
+                search_tab.set_atlas(atlas)
         self._termini_section_widget.set_atlas(atlas)
         flatmap_tab = getattr(self, "_flatmap_tab", None)
         refresh_cache_profiles = getattr(
@@ -7312,6 +7330,19 @@ class NeuronViewerWidget(QWidget):
         ):
             manual_heatmap_handler()
         self._sync_after_neuron_table_membership_change()
+
+    def _add_search_file_ids_to_table(self, file_ids: list[str]) -> None:
+        """Append available Search results without replacing Data-table state."""
+        summary = self._neuron_table.append_file_ids(file_ids)
+        self._apply_saved_table_state_to_table()
+        self._discard_scene_display_state(self._current_table_file_ids())
+        self._neuron_table.set_added_file_ids(self._current_scene_file_ids())
+        self._sync_neuron_table_heatmap_membership()
+        self._refresh_manual_heatmap_combo()
+        self._sync_after_neuron_table_membership_change()
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.on_file_ids_added(summary)
 
     def _apply_saved_table_state_to_table(self) -> None:
         """Apply enhanced parquet or project table state to current table rows."""

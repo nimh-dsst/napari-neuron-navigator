@@ -2377,3 +2377,108 @@ def test_terminus_worker_reports_errors(tmp_path):
 
     assert results == []
     assert len(errors) == 1
+
+
+def _write_search_worker_parquet(path: Path) -> None:
+    """Write a tiny catalog with overlapping and disjoint voxel vectors."""
+    pd.DataFrame(
+        {
+            "file_id": ["ref", "ref", "similar", "other"],
+            "neuron_id": ["r", "r", "s", "o"],
+            "subject": ["subject"] * 4,
+            "node_id": [1, 2, 1, 1],
+            "parent_id": [-1, 1, -1, -1],
+            "type": [2, 2, 2, 2],
+            "x": [0.0, 0.0, 0.0, 1.0],
+            "y": [0.0] * 4,
+            "z": [0.0] * 4,
+        }
+    ).to_parquet(path, index=False)
+
+
+def test_search_preflight_worker_counts_whole_parquet(tmp_path):
+    from napari_neuron_navigator.analysis.search import VoxelSearchRequest
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    worker = workers.SearchPreflightWorker(
+        parquet_path=str(path),
+        atlas=types.SimpleNamespace(),
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            resolution_um=1.0,
+        ),
+    )
+    finished = []
+    errors = []
+    progress = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+    worker.progress.connect(lambda *args: progress.append(args))
+
+    worker.run()
+
+    assert errors == []
+    assert len(finished) == 1
+    assert finished[0].node_count == 4
+    assert [entry[0] for entry in progress] == [
+        "Preparing search filters...",
+        "Counting search nodes...",
+    ]
+
+
+def test_search_worker_emits_ranked_result_and_atlas_metadata(tmp_path):
+    from napari_neuron_navigator.analysis.search import VoxelSearchRequest
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    atlas = types.SimpleNamespace(
+        atlas_name="test_atlas",
+        resolution=(1.0, 1.0, 1.0),
+    )
+    worker = workers.SearchWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            resolution_um=1.0,
+        ),
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert len(finished) == 1
+    result = finished[0]
+    assert result.hits["file_id"].tolist() == ["similar", "other"]
+    assert result.metadata["atlas_name"] == "test_atlas"
+    assert result.metadata["atlas_resolution_um"] == [1.0, 1.0, 1.0]
+
+
+def test_search_worker_reports_errors(tmp_path):
+    from napari_neuron_navigator.analysis.search import VoxelSearchRequest
+
+    workers = _import_workers_module()
+    worker = workers.SearchWorker(
+        parquet_path=str(tmp_path / "missing.parquet"),
+        atlas=types.SimpleNamespace(),
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            resolution_um=1.0,
+        ),
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert finished == []
+    assert len(errors) == 1

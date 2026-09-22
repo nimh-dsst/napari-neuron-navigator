@@ -260,6 +260,38 @@ class NeuronDatabase:
         """
         return self.conn.execute(query).fetchdf()
 
+    def get_neuron_catalog(self) -> pd.DataFrame:
+        """Return one deterministic display row per unique ``file_id``.
+
+        ``file_id`` is the identity key. ``neuron_id`` and ``subject`` are
+        display metadata only and are never part of the grouping key.
+        """
+        columns = {
+            str(row[0]) for row in self.conn.execute("DESCRIBE neurons").fetchall()
+        }
+        if "file_id" not in columns:
+            raise ValueError("The loaded Parquet does not contain a file_id column.")
+        neuron_expr = (
+            "COALESCE(MIN(CAST(neuron_id AS VARCHAR)), '')"
+            if "neuron_id" in columns
+            else "''"
+        )
+        subject_expr = (
+            "COALESCE(MIN(CAST(subject AS VARCHAR)), '')"
+            if "subject" in columns
+            else "''"
+        )
+        return self.conn.execute(f"""
+            SELECT
+                CAST(file_id AS VARCHAR) AS file_id,
+                {neuron_expr} AS neuron_id,
+                {subject_expr} AS subject
+            FROM neurons
+            WHERE file_id IS NOT NULL
+            GROUP BY CAST(file_id AS VARCHAR)
+            ORDER BY file_id
+        """).fetchdf()
+
     def get_soma_locations(
         self,
         file_ids: list[str] | None = None,

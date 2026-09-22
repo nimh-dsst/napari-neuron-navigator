@@ -31,16 +31,20 @@ with startup_timing(logger, "widget_package_import", module="neuron_table"):
 with startup_timing(logger, "widget_package_import", module="analysis_tab"):
     from .analysis_tab import AnalysisTabWidget
 
+with startup_timing(logger, "widget_package_import", module="search_tab"):
+    from .search_tab import SearchTabWidget
+
 with startup_timing(logger, "widget_package_import", module="neuron_viewer"):
     from .neuron_viewer import NeuronViewerWidget
 
 __all__ = [
     "AnalysisTabWidget",
     "CustomRegionSelectorWidget",
-    "NeuronTableWidget",
-    "RegionSelectorWidget",
-    "NeuronViewerWidget",
     "NeuronSliceProjector",
+    "NeuronTableWidget",
+    "NeuronViewerWidget",
+    "RegionSelectorWidget",
+    "SearchTabWidget",
     "SomaSliceProjector",
     "add_allen_template",
     "add_region_id_segmentation",

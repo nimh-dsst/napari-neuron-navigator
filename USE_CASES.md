@@ -45,6 +45,7 @@ Unless a use case says otherwise:
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
 | [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
+| [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Rank neurons by Pearson distance from one neuron or an aggregate reference and add matches to the Data table | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2273,6 +2274,122 @@ axon and retain dendrites extending beyond the chosen radius.
   flatmap agreement, preflight reuse, unclustered neurons, and metadata. Manual
   napari verification is still required for the warnings, background-scan
   interaction, visible status counts, and biological/geometric interpretation.
+
+### UC-020: Find Neurons With Similar Voxel-Count Patterns
+
+**Capability**
+
+The user can search the loaded Parquet for neurons whose filtered CCFv3
+voxel-count vectors are most similar to either one reference neuron or the
+summed voxel-count vector of several reference neurons. Results are ranked by
+the same **Pearson distance (1 - r)** used by Analysis voxel-correlation
+clustering, where a lower value means a more similar spatial count pattern.
+
+The search can apply the same anatomical region, node-type, whole-neuron
+dendrite-label coverage, and CCFv3 soma-distance filters as Analysis. Search
+results can be appended to **Data** > **Selected Neurons** without replacing
+existing rows, or saved to a CSV that can later be reopened in Search.
+
+Node-type filtering retains the source-annotation cautions from Analysis. In
+particular, type `2` means axon-typed rather than verified axon, and the extent
+of dendritic projections mislabeled as type `2` has not been quantified.
+
+**Prerequisites**
+
+- Load an Allen mouse atlas and a neuron Parquet containing valid `file_id`,
+  `neuron_id`, `subject`, `type`, and CCFv3 `x`, `y`, and `z` columns.
+- Include at least five neurons with overlapping and non-overlapping occupied
+  voxels, plus one neuron that will have no usable nodes under a test filter.
+- Include two neurons that share the same display `neuron_id` across different
+  subjects so identity handling can be verified by `file_id`.
+- Include at least one neuron with no valid soma for the soma-distance check.
+- Populate **Data** > **Selected Neurons** with at least three possible
+  reference neurons.
+
+**Steps and expected results**
+
+1. **Action:** Open **Search** before loading a Parquet or atlas, then load both
+   prerequisites from **Data**.
+   **Expected:** Search cannot run without its required data. After the Parquet
+   and atlas load, the reference and filter controls become available.
+2. **Action:** In **Search**, choose **Single neuron**, find a neuron in the
+   searchable selector, and select it. Then select exactly one row in **Data** >
+   **Selected Neurons** and test **Use selected Data row**.
+   **Expected:** The whole-Parquet selector can match `file_id`, `subject`, or
+   display `neuron_id`, but resolves the choice by `file_id`. Duplicate display
+   IDs remain separate. The Data shortcut snapshots exactly one `file_id` and
+   displays a readable reference summary. Selecting a different Data row
+   afterward does not silently replace that captured reference.
+3. **Action:** Leave Region Filters and Voxel Node Filters empty, set **Top
+   results** lower than the available candidate count, and click **Run Search**.
+   **Expected:** Search runs in the background and returns at most the requested
+   number of non-reference neurons. Rows are ordered by ascending **Pearson
+   distance (1 - r)**, with `file_id` breaking ties. The status reports scanned,
+   usable, omitted, and returned neuron counts and explains that lower is more
+   similar.
+4. **Action:** Populate the Data table with the same candidate cohort, run
+   Analysis voxel-correlation clustering with **Current Table** and matching
+   filters, and compare the reference neuron's exported distance row with
+   Search.
+   **Expected:** Every single-reference Search distance matches the
+   corresponding Analysis distance, including the established behavior for
+   neurons with no shared occupied voxel.
+5. **Action:** Add independent Include and Exclude rules under **Region
+   Filters**, including overlapping masks and different dilation percentages,
+   and rerun.
+   **Expected:** Included masks are unioned, exclusions win in overlaps, and
+   the same filtered node rows contribute to both the reference and every
+   candidate vector. A candidate with no surviving node is omitted and counted
+   in the status rather than appearing with a fabricated score.
+6. **Action:** Under **Voxel Node Filters**, test **Include selected** and
+   **Exclude selected**, the dendrite-label cohort restriction, and **Exclude
+   nodes within soma distance** both separately and together.
+   **Expected:** The controls use the same labels, inclusive soma-distance
+   boundary, whole-neuron coverage behavior, and warnings as Analysis. A
+   candidate without a valid soma is omitted when soma distance is active.
+   Neurons sharing a display `neuron_id` remain separate results.
+7. **Action:** Select a reference that has no surviving node under the current
+   filters, capture it, and run Search. Repeat with a reference that lacks a
+   valid soma while soma-distance filtering is enabled.
+   **Expected:** Search stops with an actionable message naming the unusable
+   reference `file_id`; it never silently changes the requested sample.
+8. **Action:** Select at least two Data rows, choose **Aggregate selected rows**,
+   click **Use selected Data rows**, and run Search.
+   **Expected:** Search reports the captured reference count, sums their
+   filtered counts per voxel into one aggregate vector, omits all reference
+   members from the result list, and returns one distance per candidate. Later
+   Data-table selection changes do not affect the completed result.
+9. **Action:** Select several result rows and click **Add Selected to Data**.
+   Then click **Add All Results to Data**.
+   **Expected:** New `file_id` rows are appended in ranked order without
+   rendering them automatically. Existing rows are not duplicated or reset;
+   their colors, visibility, labels, notes, cluster assignments, scene state,
+   and heatmap state remain intact. The status distinguishes added from
+   already-present neurons.
+10. **Action:** Click **Save Results CSV...**, clear or replace the visible
+    Search results, then click **Load Results CSV...** and reopen the file.
+    **Expected:** Rank, `file_id`, display metadata, and Pearson distance round
+    trip. Loading results does not alter the Data table until an Add action is
+    clicked.
+11. **Action:** Reopen the CSV with a different Parquet loaded, including some
+    but not all exported `file_id` values.
+    **Expected:** Known IDs can be added. Unknown IDs remain visibly unavailable
+    and are counted, but are never matched by `neuron_id` or added as the wrong
+    neuron.
+12. **Action:** Try an empty Data selection, multiple rows in single mode, one
+    row in aggregate mode, malformed CSV columns, duplicate CSV `file_id`
+    values, and non-finite distances.
+    **Expected:** Each invalid input produces a corrective message and leaves
+    the prior Data-table membership and valid Search results unchanged.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Notes: Implemented on 2026-09-22. Automated coverage includes single-reference
+  parity with Analysis, aggregate vectors, `file_id` identity, filtered-out
+  references and candidates, CSV validation/availability, append semantics, and
+  background workers. Manual napari verification is still required.
 
 ## Use-Case Template
 

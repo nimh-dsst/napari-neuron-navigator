@@ -36,8 +36,8 @@ from qtpy.QtWidgets import (
 from ..cluster_assignments import ClusterAssignmentStore
 from ..neuron_palette import neuron_palette
 from ..neuron_table_ops import (
-    ClusterFilterSelection,
     GRAY_RGBA,
+    ClusterFilterSelection,
     NeuronTableSummary,
     added_flags,
     cluster_filter_matches,
@@ -175,7 +175,7 @@ class NeuronEntry:
         }
 
     @classmethod
-    def from_state(cls, state: Mapping[str, object]) -> "NeuronEntry":
+    def from_state(cls, state: Mapping[str, object]) -> NeuronEntry:
         """Create an entry from a previously exported table-state row."""
         file_id = state.get("file_id")
         tags = state.get("tags", ())
@@ -230,6 +230,23 @@ class NeuronEntry:
             notes=str(state.get("notes", state.get("neuron_notes", "")) or ""),
         )
 
+
+@dataclass(frozen=True)
+class AppendSummary:
+    """Outcome of appending unique neuron identities to the table."""
+
+    added_file_ids: tuple[object, ...] = ()
+    already_present_file_ids: tuple[object, ...] = ()
+
+    @property
+    def added_count(self) -> int:
+        """Return the number of newly appended neurons."""
+        return len(self.added_file_ids)
+
+    @property
+    def already_present_count(self) -> int:
+        """Return the number of requested neurons already in the table."""
+        return len(self.already_present_file_ids)
 
 class NeuronTableWidget(QWidget):
     """Interactive table for neuron selection, color editing, and visibility.
@@ -1038,6 +1055,45 @@ class NeuronTableWidget(QWidget):
             if entry.file_id in keep_ids
         ]
         self._replace_entries(survivors)
+
+    def append_file_ids(
+        self,
+        file_ids: Iterable[object],
+    ) -> AppendSummary:
+        """Append new ``file_id`` rows while preserving all existing state."""
+        requested = list(dict.fromkeys(file_ids))
+        existing_entries = self._entries_in_table_order()
+        existing_ids = {entry.file_id for entry in existing_entries}
+        already_present = tuple(
+            file_id for file_id in requested if file_id in existing_ids
+        )
+        added_ids = tuple(
+            file_id for file_id in requested if file_id not in existing_ids
+        )
+        if not added_ids:
+            return AppendSummary(
+                added_file_ids=(),
+                already_present_file_ids=already_present,
+            )
+
+        selected_ids = self.get_selected_file_ids()
+        palette = neuron_palette(len(existing_entries) + len(added_ids))
+        new_entries: list[NeuronEntry] = []
+        for offset, file_id in enumerate(added_ids, start=len(existing_entries)):
+            color = (
+                palette[offset]
+                if offset < len(palette)
+                else list(GRAY_RGBA)
+            )
+            new_entries.append(NeuronEntry(file_id=file_id, color=list(color)))
+
+        self._replace_entries([*existing_entries, *new_entries])
+        if selected_ids:
+            self.select_file_ids(selected_ids)
+        return AppendSummary(
+            added_file_ids=added_ids,
+            already_present_file_ids=already_present,
+        )
 
     def remove_file_ids(
         self,
