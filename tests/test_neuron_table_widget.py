@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 
@@ -91,7 +91,7 @@ class _DummyItemSelectionModel:
     ClearAndSelect = 1
     Rows = 2
 
-    def __init__(self, table: "_DummyTable") -> None:
+    def __init__(self, table: _DummyTable) -> None:
         self._table = table
 
     def select(self, selection: _DummyItemSelection, _flags: int) -> None:
@@ -406,6 +406,84 @@ def test_neuron_table_remove_file_ids_preserves_remaining_entry_state() -> None:
     assert widget.summary().visible_count == 0
     assert widget.available_cluster_ids() == [5]
     assert widget.selection_changed.calls == [([],)]
+    assert len(widget.state_changed.calls) == 1
+
+
+def test_neuron_table_append_file_ids_preserves_state_and_deduplicates() -> None:
+    module = _import_neuron_table_module()
+    module.QItemSelection = _DummyItemSelection
+    module.QItemSelectionModel = _DummyItemSelectionModel
+    entry = module.NeuronEntry(
+        file_id="n1",
+        color=[0.1, 0.2, 0.3, 1.0],
+        cluster_id=4,
+        visible=False,
+        added_to_scene=True,
+        heatmap_layer_names=("n1 Heatmap",),
+        label="keep",
+        notes="preserve",
+    )
+    widget = _make_widget(module, {"n1": entry})
+    widget._table._selected_rows = {0}
+
+    summary = widget.append_file_ids(["n1", "n2", "n2", "n3"])
+
+    assert summary.added_file_ids == ("n2", "n3")
+    assert summary.already_present_file_ids == ("n1",)
+    assert widget.file_ids() == ["n1", "n2", "n3"]
+    assert widget._entries["n1"] is entry
+    assert widget._entries["n1"].color == [0.1, 0.2, 0.3, 1.0]
+    assert widget._entries["n1"].visible is False
+    assert widget._entries["n1"].heatmap_layer_names == ("n1 Heatmap",)
+    assert widget._entries["n1"].label == "keep"
+    assert widget._entries["n1"].notes == "preserve"
+    assert widget.get_selected_file_ids() == ["n1"]
+
+
+def test_apply_metadata_updates_replaces_only_managed_search_tags() -> None:
+    module = _import_neuron_table_module()
+    entry = module.NeuronEntry(
+        file_id="n1",
+        color=[0.1, 0.2, 0.3, 1.0],
+        visible=False,
+        label="old",
+        group="old group",
+        tags=("keep", "Search filters: old"),
+        notes="preserve",
+    )
+    widget = _make_widget(module, {"n1": entry})
+    cell_updates = []
+    widget._set_text_cell = (
+        lambda row, column, text, *, editable: cell_updates.append(
+            (row, column, text, editable)
+        )
+    )
+
+    summary = widget.apply_metadata_updates(
+        {
+            "n1": module.NeuronMetadataUpdate(
+                label="Rank 1",
+                group="search result",
+                tags=("Search scope: Current Table", "Search filters: none"),
+                replace_tag_prefix="Search ",
+            ),
+            "missing": module.NeuronMetadataUpdate(group="reference"),
+        }
+    )
+
+    assert summary.updated_file_ids == ("n1",)
+    assert summary.missing_file_ids == ("missing",)
+    assert entry.label == "Rank 1"
+    assert entry.group == "search result"
+    assert entry.tags == (
+        "keep",
+        "Search scope: Current Table",
+        "Search filters: none",
+    )
+    assert entry.notes == "preserve"
+    assert entry.color == [0.1, 0.2, 0.3, 1.0]
+    assert entry.visible is False
+    assert len(cell_updates) == 3
     assert len(widget.state_changed.calls) == 1
 
 

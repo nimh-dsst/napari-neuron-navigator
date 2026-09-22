@@ -4524,6 +4524,55 @@ def test_populate_neuron_table_does_not_require_subject_column() -> None:
     table.populate.assert_called_once_with(["n1", "n2"])
 
 
+def test_add_and_annotate_search_appends_references_then_ranked_hits() -> None:
+    from napari_neuron_navigator.analysis.search import SearchAnnotationRequest
+
+    append_summary = types.SimpleNamespace(added_count=3, already_present_count=0)
+    metadata_summary = types.SimpleNamespace(updated_count=3)
+    table = types.SimpleNamespace(
+        append_file_ids=MagicMock(return_value=append_summary),
+        apply_metadata_updates=MagicMock(return_value=metadata_summary),
+        set_added_file_ids=MagicMock(),
+    )
+    search_tab = types.SimpleNamespace(on_search_annotated=MagicMock())
+    widget = types.SimpleNamespace(
+        _neuron_table=table,
+        _search_tab=search_tab,
+        _apply_saved_table_state_to_table=MagicMock(),
+        _discard_scene_display_state=MagicMock(),
+        _current_table_file_ids=MagicMock(return_value=["r1", "h1", "h2"]),
+        _current_scene_file_ids=MagicMock(return_value={"scene"}),
+        _sync_neuron_table_heatmap_membership=MagicMock(),
+        _refresh_manual_heatmap_combo=MagicMock(),
+        _sync_after_neuron_table_membership_change=MagicMock(),
+    )
+    request = SearchAnnotationRequest(
+        reference_file_ids=("r1", "missing"),
+        ranked_hits=(("h1", 1), ("h2", 2), ("missing-hit", 3)),
+        filter_tags=("Search scope: Current Table", "Search filters: none"),
+        unavailable_file_ids=("missing", "missing-hit"),
+    )
+
+    NeuronViewerWidget._annotate_search_in_table(widget, request)
+
+    table.append_file_ids.assert_called_once_with(["r1", "h1", "h2"])
+    widget._apply_saved_table_state_to_table.assert_called_once_with()
+    updates = table.apply_metadata_updates.call_args.args[0]
+    assert list(updates) == ["r1", "h1", "h2"]
+    assert updates["r1"].label is None
+    assert updates["r1"].group == "reference"
+    assert updates["h1"].label == "Rank 1"
+    assert updates["h1"].group == "search result"
+    assert updates["h2"].label == "Rank 2"
+    assert all(update.replace_tag_prefix == "Search " for update in updates.values())
+    assert all(update.tags == request.filter_tags for update in updates.values())
+    search_tab.on_search_annotated.assert_called_once_with(
+        append_summary,
+        metadata_summary,
+        unavailable_count=2,
+    )
+
+
 def test_add_heatmap_menu_exposes_single_and_individual_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4988,6 +5037,201 @@ def test_add_individual_heatmap_layer_uses_neuron_color_and_metadata(
     assert layer.metadata["color"] == list(color)
 
 
+def test_search_heatmap_layer_uses_rank_color_and_run_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from napari_neuron_navigator.analysis.search import (
+        SearchHeatmapLayerRequest,
+        SearchHeatmapRequest,
+    )
+
+    _install_fake_colormaps(monkeypatch)
+    viewer = _DummyViewer(ndisplay=3)
+    layer_request = SearchHeatmapLayerRequest(
+        file_ids=("n1",),
+        role="search_result",
+        rank=2,
+        pearson_distance=0.75,
+        color=(1.0, 0.8, 0.0, 1.0),
+    )
+    request = SearchHeatmapRequest(
+        layers=(layer_request,),
+        region_filter=None,
+        voxel_node_filter=None,
+        resolution_um=25.0,
+        metadata={"candidate_scope": "current_table"},
+        distance_color_domain=(0.5, 1.25),
+    )
+    widget = types.SimpleNamespace(
+        viewer=viewer,
+        _db=types.SimpleNamespace(parquet_path=Path("/tmp/neurons.parquet")),
+        _atlas=types.SimpleNamespace(atlas_name="fake_atlas"),
+        _opacity_slider=_DummyValueControl(70),
+        _search_heatmap_request=request,
+        _search_heatmap_completed_count=0,
+        _refresh_selected_neuron_heatmap_dependents=MagicMock(),
+    )
+    widget._iter_viewer_layers = types.MethodType(
+        NeuronViewerWidget._iter_viewer_layers,
+        widget,
+    )
+    widget._unique_layer_name = types.MethodType(
+        NeuronViewerWidget._unique_layer_name,
+        widget,
+    )
+    widget._current_atlas_name = types.MethodType(
+        NeuronViewerWidget._current_atlas_name,
+        widget,
+    )
+
+    NeuronViewerWidget._on_search_heatmap_volume_ready(
+        widget,
+        0,
+        np.array([[[0.0, 10.0]]], dtype=np.float32),
+    )
+
+    layer = viewer.layers[0]
+    assert layer.name == "Search Rank 2 (d=0.75; Scored Voxels) Heatmap"
+    assert layer.opacity == 0.7
+    assert layer.contrast_limits == (0.0, 2.0)
+    assert layer.blending == "additive"
+    assert layer.rendering == "mip"
+    assert layer.colormap.kwargs["colors"] == [
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 0.8, 0.0, 1.0],
+    ]
+    assert layer.metadata["heatmap_kind"] == "search_results"
+    assert layer.metadata["file_ids"] == ["n1"]
+    assert layer.metadata["search_role"] == "search_result"
+    assert layer.metadata["search_rank"] == 2
+    assert layer.metadata["pearson_distance"] == pytest.approx(0.75)
+    assert layer.metadata["search_heatmap_voxel_mode"] == "scored_voxels"
+    assert layer.metadata["search_heatmap_voxel_mode_label"] == "Scored Voxels"
+    assert layer.metadata["search_filters_applied_to_volume"] is True
+    assert layer.metadata["distance_color_scale"] == (
+        "hot_reversed_visible_0.25_to_1.0_result_table_range"
+    )
+    assert layer.metadata["distance_domain"] == [0.5, 1.25]
+    assert (
+        layer.metadata["distance_domain_source"]
+        == "completed_search_result_table"
+    )
+    assert layer.metadata["pearson_distance_possible_domain"] == [0.0, 2.0]
+    assert layer.metadata["search_context"] == {
+        "candidate_scope": "current_table"
+    }
+    assert widget._search_heatmap_completed_count == 1
+    widget._refresh_selected_neuron_heatmap_dependents.assert_called_once()
+
+
+def test_search_reference_heatmap_layer_uses_fixed_magenta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_HEATMAP_MODE_WHOLE,
+        SEARCH_REFERENCE_HEATMAP_RGBA,
+        SearchHeatmapLayerRequest,
+        SearchHeatmapRequest,
+    )
+
+    _install_fake_colormaps(monkeypatch)
+    viewer = _DummyViewer(ndisplay=3)
+    layer_request = SearchHeatmapLayerRequest(
+        file_ids=("ref-1", "ref-2"),
+        role="reference",
+        rank=0,
+        pearson_distance=None,
+        color=SEARCH_REFERENCE_HEATMAP_RGBA,
+    )
+    request = SearchHeatmapRequest(
+        layers=(layer_request,),
+        region_filter=None,
+        voxel_node_filter=None,
+        resolution_um=25.0,
+        distance_color_domain=(0.5, 1.25),
+        voxel_mode=SEARCH_HEATMAP_MODE_WHOLE,
+    )
+    widget = types.SimpleNamespace(
+        viewer=viewer,
+        _db=types.SimpleNamespace(parquet_path=Path("/tmp/neurons.parquet")),
+        _atlas=types.SimpleNamespace(atlas_name="fake_atlas"),
+        _opacity_slider=_DummyValueControl(70),
+        _search_heatmap_request=request,
+        _search_heatmap_completed_count=0,
+        _refresh_selected_neuron_heatmap_dependents=MagicMock(),
+    )
+    widget._iter_viewer_layers = types.MethodType(
+        NeuronViewerWidget._iter_viewer_layers,
+        widget,
+    )
+    widget._unique_layer_name = types.MethodType(
+        NeuronViewerWidget._unique_layer_name,
+        widget,
+    )
+    widget._current_atlas_name = types.MethodType(
+        NeuronViewerWidget._current_atlas_name,
+        widget,
+    )
+
+    NeuronViewerWidget._on_search_heatmap_volume_ready(
+        widget,
+        0,
+        np.array([[[0.0, 10.0]]], dtype=np.float32),
+    )
+
+    layer = viewer.layers[0]
+    assert layer.name == "Search Reference (Whole Neuron) Heatmap"
+    assert layer.colormap.kwargs["colors"][1] == list(
+        SEARCH_REFERENCE_HEATMAP_RGBA
+    )
+    assert layer.metadata["color"] == list(SEARCH_REFERENCE_HEATMAP_RGBA)
+    assert layer.metadata["distance_color_scale"] == "fixed_magenta_reference"
+    assert layer.metadata["pearson_distance"] is None
+    assert layer.metadata["search_heatmap_voxel_mode"] == "whole_neuron"
+    assert layer.metadata["search_heatmap_voxel_mode_label"] == "Whole Neuron"
+    assert layer.metadata["search_filters_applied_to_volume"] is False
+
+
+def test_search_colors_are_applied_to_matching_data_rows() -> None:
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_REFERENCE_HEATMAP_RGBA,
+        SearchTableColorRequest,
+    )
+
+    hit_color = (1.0, 0.8, 0.0, 1.0)
+    request = SearchTableColorRequest(
+        colors_by_file_id=(
+            ("ref-present", SEARCH_REFERENCE_HEATMAP_RGBA),
+            ("ref-missing", SEARCH_REFERENCE_HEATMAP_RGBA),
+            ("7", hit_color),
+        ),
+        reference_file_ids=("ref-present", "ref-missing"),
+        distance_color_domain=(0.0, 1.0),
+    )
+    table = types.SimpleNamespace(
+        file_ids=lambda: ["ref-present", 7, "unrequested"],
+        update_colors=MagicMock(),
+    )
+    search_tab = types.SimpleNamespace(on_search_colors_applied=MagicMock())
+    widget = types.SimpleNamespace(
+        _neuron_table=table,
+        _search_tab=search_tab,
+    )
+
+    NeuronViewerWidget._apply_search_colors_in_table(
+        widget,
+        request,
+    )
+
+    table.update_colors.assert_called_once_with(
+        {
+            "ref-present": list(SEARCH_REFERENCE_HEATMAP_RGBA),
+            7: list(hit_color),
+        }
+    )
+    search_tab.on_search_colors_applied.assert_called_once_with(2, 1)
+
+
 def test_current_selected_neuron_heatmap_layers_ignores_analysis_heatmaps() -> None:
     viewer = _DummyViewer(ndisplay=3)
     viewer.layers.extend(
@@ -5006,6 +5250,14 @@ def test_current_selected_neuron_heatmap_layers_ignores_analysis_heatmaps() -> N
                     "heatmap_kind": "selected_neurons",
                     "file_ids": ["n1", "n2"],
                     "manual_heatmap_id": "beta",
+                },
+            ),
+            types.SimpleNamespace(
+                name="Search Rank 1 Heatmap",
+                metadata={
+                    "heatmap_kind": "search_results",
+                    "file_ids": ["n3"],
+                    "manual_heatmap_id": "Search Rank 1",
                 },
             ),
             types.SimpleNamespace(
@@ -5035,6 +5287,7 @@ def test_current_selected_neuron_heatmap_layers_ignores_analysis_heatmaps() -> N
     assert layer_names_by_file_id == {
         "n1": ("beta Heatmap",),
         "n2": ("alpha Heatmap", "beta Heatmap"),
+        "n3": ("Search Rank 1 Heatmap",),
     }
 
 

@@ -84,6 +84,31 @@ def test_get_unique_node_types_returns_dataset_codes_in_order(tmp_path) -> None:
     assert values == (0, 1, 2, 99)
 
 
+def test_get_neuron_catalog_groups_only_by_file_id(tmp_path) -> None:
+    path = tmp_path / "neurons.parquet"
+    pd.DataFrame(
+        {
+            "file_id": ["a", "a", "b", "b"],
+            "neuron_id": ["duplicate"] * 4,
+            "subject": ["s1", "s1", "s2", "s2"],
+            "type": [1, 2, 1, 2],
+            "x": [0.0] * 4,
+            "y": [0.0] * 4,
+            "z": [0.0] * 4,
+        }
+    ).to_parquet(path, index=False)
+    db = NeuronDatabase(path)
+    try:
+        catalog = db.get_neuron_catalog()
+    finally:
+        db.close()
+
+    assert catalog.to_dict("records") == [
+        {"file_id": "a", "neuron_id": "duplicate", "subject": "s1"},
+        {"file_id": "b", "neuron_id": "duplicate", "subject": "s2"},
+    ]
+
+
 def test_get_dendrite_label_coverage_uses_file_id(tmp_path) -> None:
     path = tmp_path / "neurons.parquet"
     pd.DataFrame(

@@ -2377,3 +2377,261 @@ def test_terminus_worker_reports_errors(tmp_path):
 
     assert results == []
     assert len(errors) == 1
+
+
+def _write_search_worker_parquet(path: Path) -> None:
+    """Write a tiny catalog with overlapping and disjoint voxel vectors."""
+    pd.DataFrame(
+        {
+            "file_id": ["ref", "ref", "similar", "other"],
+            "neuron_id": ["r", "r", "s", "o"],
+            "subject": ["subject"] * 4,
+            "node_id": [1, 2, 1, 1],
+            "parent_id": [-1, 1, -1, -1],
+            "type": [2, 3, 2, 3],
+            "x": [0.0, 0.0, 0.0, 1.0],
+            "y": [0.0] * 4,
+            "z": [0.0] * 4,
+        }
+    ).to_parquet(path, index=False)
+
+
+def test_search_preflight_worker_counts_whole_parquet(tmp_path):
+    from napari_neuron_navigator.analysis.search import VoxelSearchRequest
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    worker = workers.SearchPreflightWorker(
+        parquet_path=str(path),
+        atlas=types.SimpleNamespace(),
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            resolution_um=1.0,
+        ),
+    )
+    finished = []
+    errors = []
+    progress = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+    worker.progress.connect(lambda *args: progress.append(args))
+
+    worker.run()
+
+    assert errors == []
+    assert len(finished) == 1
+    assert finished[0].node_count == 4
+    assert [entry[0] for entry in progress] == [
+        "Preparing search filters...",
+        "Counting search nodes...",
+    ]
+
+
+def test_search_preflight_worker_routes_flatmap_grid_settings(monkeypatch):
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_SPACE_FLATMAP,
+        VoxelSearchRequest,
+    )
+
+    workers = _import_workers_module()
+    count_helper = MagicMock(return_value=17)
+    monkeypatch.setattr(
+        "napari_neuron_navigator.analysis.flatmap_correlation."
+        "count_flatmap_voxel_correlation_nodes",
+        count_helper,
+    )
+    worker = workers.SearchPreflightWorker(
+        parquet_path="neurons.parquet",
+        atlas=types.SimpleNamespace(),
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            candidate_file_ids=("candidate",),
+            coordinate_space=SEARCH_SPACE_FLATMAP,
+            flatmap_style="both_shaped",
+            flatmap_y_bins=64,
+            flatmap_depth_bin_um=50.0,
+            flatmap_include_depth_minus_one=False,
+            flatmap_collapse_depth=True,
+        ),
+    )
+    finished = []
+    worker.finished.connect(finished.append)
+
+    worker.run()
+
+    assert finished[0].node_count == 17
+    assert count_helper.call_args.kwargs == {
+        "style": "both_shaped",
+        "y_bins": 64,
+        "x_bins": None,
+        "depth_bin_um": 50.0,
+        "include_depth_minus_one": False,
+        "file_ids": ["candidate", "ref"],
+        "collapse_depth": True,
+        "prepared_region_filter": None,
+        "voxel_node_filter": None,
+        "prepared_voxel_filter": None,
+    }
+
+
+def test_search_worker_emits_ranked_result_and_atlas_metadata(tmp_path):
+    from napari_neuron_navigator.analysis.search import VoxelSearchRequest
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    atlas = types.SimpleNamespace(
+        atlas_name="test_atlas",
+        resolution=(1.0, 1.0, 1.0),
+    )
+    worker = workers.SearchWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            resolution_um=1.0,
+        ),
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert len(finished) == 1
+    result = finished[0]
+    assert result.hits["file_id"].tolist() == ["similar", "other"]
+    assert result.metadata["atlas_name"] == "test_atlas"
+    assert result.metadata["atlas_resolution_um"] == [1.0, 1.0, 1.0]
+
+
+def test_search_worker_reports_errors(tmp_path):
+    from napari_neuron_navigator.analysis.search import VoxelSearchRequest
+
+    workers = _import_workers_module()
+    worker = workers.SearchWorker(
+        parquet_path=str(tmp_path / "missing.parquet"),
+        atlas=types.SimpleNamespace(),
+        request=VoxelSearchRequest(
+            reference_file_ids=("ref",),
+            resolution_um=1.0,
+        ),
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert finished == []
+    assert len(errors) == 1
+
+
+def test_search_heatmap_worker_emits_filtered_volumes_in_request_order(tmp_path):
+    from napari_neuron_navigator.analysis.search import (
+        SearchHeatmapLayerRequest,
+        SearchHeatmapRequest,
+    )
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    atlas = types.SimpleNamespace(
+        annotation=np.zeros((3, 2, 2), dtype=np.uint16),
+        resolution=(1.0, 1.0, 1.0),
+    )
+    request = SearchHeatmapRequest(
+        layers=(
+            SearchHeatmapLayerRequest(
+                file_ids=("ref",),
+                role="reference",
+                rank=0,
+                pearson_distance=None,
+                color=(1.0, 1.0, 1.0, 1.0),
+            ),
+            SearchHeatmapLayerRequest(
+                file_ids=("similar",),
+                role="search_result",
+                rank=1,
+                pearson_distance=0.0,
+                color=(1.0, 1.0, 1.0, 1.0),
+            ),
+        ),
+        region_filter=None,
+        voxel_node_filter=VoxelNodeFilter(
+            node_type_mode="include",
+            node_types=(2,),
+        ),
+        resolution_um=1.0,
+    )
+    worker = workers.SearchHeatmapWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        request=request,
+    )
+    volumes = []
+    finished = []
+    errors = []
+    worker.volume_ready.connect(lambda index, volume: volumes.append((index, volume)))
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert finished == [2]
+    assert [index for index, _volume in volumes] == [0, 1]
+    assert [float(volume.sum()) for _index, volume in volumes] == [1.0, 1.0]
+
+
+def test_search_heatmap_worker_whole_neuron_mode_bypasses_search_filters(tmp_path):
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_HEATMAP_MODE_WHOLE,
+        SearchHeatmapLayerRequest,
+        SearchHeatmapRequest,
+    )
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    atlas = types.SimpleNamespace(
+        annotation=np.zeros((3, 2, 2), dtype=np.uint16),
+        resolution=(1.0, 1.0, 1.0),
+    )
+    request = SearchHeatmapRequest(
+        layers=(
+            SearchHeatmapLayerRequest(
+                file_ids=("ref",),
+                role="reference",
+                rank=0,
+                pearson_distance=None,
+                color=(1.0, 0.0, 1.0, 1.0),
+            ),
+        ),
+        region_filter=None,
+        voxel_node_filter=VoxelNodeFilter(
+            node_type_mode="include",
+            node_types=(2,),
+        ),
+        resolution_um=1.0,
+        voxel_mode=SEARCH_HEATMAP_MODE_WHOLE,
+    )
+    worker = workers.SearchHeatmapWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        request=request,
+    )
+    volumes = []
+    errors = []
+    worker.volume_ready.connect(lambda _index, volume: volumes.append(volume))
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert len(volumes) == 1
+    assert float(volumes[0].sum()) == 2.0

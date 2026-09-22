@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         ClusterResult,
     )
     from .analysis.region_filter import PreparedClusterRegionFilter
+    from .analysis.search import SearchHeatmapRequest, VoxelSearchRequest
     from .analysis.voxel_filter import PreparedVoxelNodeFilter, VoxelNodeFilter
     from .isocortex_layers import AllenIsocortexLayerMap
 
@@ -572,6 +573,264 @@ class ClusteringPreflightWorker(QObject):
         except Exception as e:
             logger.exception("Clustering preflight failed")
             self.error.emit(str(e))
+
+
+@dataclass(frozen=True)
+class SearchPreflightResult:
+    """Exact search node count plus reusable filter preparation."""
+
+    node_count: int
+    prepared_region_filter: PreparedClusterRegionFilter | None = None
+    prepared_voxel_filter: PreparedVoxelNodeFilter | None = None
+
+
+class SearchPreflightWorker(QObject):
+    """Prepare filters and count the exact rows for a voxel search."""
+
+    progress = Signal(str, int, int)
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        parquet_path: str,
+        atlas: BrainGlobeAtlas,
+        request: VoxelSearchRequest,
+    ) -> None:
+        super().__init__()
+        self._parquet_path = str(parquet_path)
+        self._atlas = atlas
+        self._request = request
+
+    def _scope_file_ids(self) -> list[str] | None:
+        candidates = self._request.candidate_file_ids
+        if candidates is None:
+            return None
+        return list(dict.fromkeys((*candidates, *self._request.reference_file_ids)))
+
+    def run(self) -> None:
+        """Prepare reusable masks/lookups and count retained source rows."""
+        try:
+            import duckdb
+
+            from .analysis.correlation import count_correlation_input_nodes
+            from .analysis.region_filter import prepare_cluster_region_filter
+            from .analysis.search import SEARCH_SPACE_FLATMAP
+            from .analysis.voxel_filter import prepare_voxel_node_filter_from_parquet
+
+            scope_file_ids = self._scope_file_ids()
+            prepared_region_filter = None
+            prepared_voxel_filter = None
+            self.progress.emit("Preparing search filters...", 1, 2)
+            if self._request.region_filter is not None:
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._request.region_filter,
+                )
+            if self._request.voxel_node_filter is not None:
+                prepared_voxel_filter = prepare_voxel_node_filter_from_parquet(
+                    self._parquet_path,
+                    self._request.voxel_node_filter,
+                    file_ids=scope_file_ids,
+                )
+
+            self.progress.emit("Counting search nodes...", 2, 2)
+            if self._request.coordinate_space == SEARCH_SPACE_FLATMAP:
+                from .analysis.flatmap_correlation import (
+                    count_flatmap_voxel_correlation_nodes,
+                )
+
+                node_count = count_flatmap_voxel_correlation_nodes(
+                    self._parquet_path,
+                    style=str(self._request.flatmap_style),
+                    y_bins=self._request.flatmap_y_bins,
+                    x_bins=self._request.flatmap_x_bins,
+                    depth_bin_um=self._request.flatmap_depth_bin_um,
+                    include_depth_minus_one=(
+                        self._request.flatmap_include_depth_minus_one
+                    ),
+                    file_ids=scope_file_ids,
+                    collapse_depth=self._request.flatmap_collapse_depth,
+                    prepared_region_filter=prepared_region_filter,
+                    voxel_node_filter=self._request.voxel_node_filter,
+                    prepared_voxel_filter=prepared_voxel_filter,
+                )
+            else:
+                conn = duckdb.connect()
+                try:
+                    node_count = count_correlation_input_nodes(
+                        conn,
+                        self._parquet_path,
+                        voxel_id_map=None,
+                        resolution=self._request.resolution_um,
+                        file_ids=scope_file_ids,
+                        prepared_region_filter=prepared_region_filter,
+                        voxel_node_filter=self._request.voxel_node_filter,
+                        prepared_voxel_filter=prepared_voxel_filter,
+                    )
+                finally:
+                    conn.close()
+            self.finished.emit(
+                SearchPreflightResult(
+                    node_count=int(node_count),
+                    prepared_region_filter=prepared_region_filter,
+                    prepared_voxel_filter=prepared_voxel_filter,
+                )
+            )
+        except Exception as error:
+            logger.exception("Search preflight failed")
+            self.error.emit(str(error))
+
+
+class SearchWorker(QObject):
+    """Compute and rank one immutable voxel-correlation search request."""
+
+    progress = Signal(str, int, int)
+    finished = Signal(object)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        parquet_path: str,
+        atlas: BrainGlobeAtlas,
+        request: VoxelSearchRequest,
+        prepared_region_filter: PreparedClusterRegionFilter | None = None,
+        prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
+    ) -> None:
+        super().__init__()
+        self._parquet_path = str(parquet_path)
+        self._atlas = atlas
+        self._request = request
+        self._prepared_region_filter = prepared_region_filter
+        self._prepared_voxel_filter = prepared_voxel_filter
+
+    def run(self) -> None:
+        """Execute the search with a thread-local DuckDB connection."""
+        try:
+            import duckdb
+
+            from .analysis.search import compute_voxel_search
+
+            conn = duckdb.connect()
+            try:
+                result = compute_voxel_search(
+                    conn,
+                    self._parquet_path,
+                    self._request,
+                    prepared_region_filter=self._prepared_region_filter,
+                    prepared_voxel_filter=self._prepared_voxel_filter,
+                    progress_callback=self.progress.emit,
+                )
+            finally:
+                conn.close()
+            result.metadata.update(
+                {
+                    "atlas_name": getattr(self._atlas, "atlas_name", None),
+                    "atlas_resolution_um": [
+                        float(value)
+                        for value in getattr(self._atlas, "resolution", ()) or ()
+                    ],
+                }
+            )
+            self.finished.emit(result)
+        except Exception as error:
+            logger.exception("Voxel similarity search failed")
+            self.error.emit(str(error))
+
+
+class SearchHeatmapWorker(QObject):
+    """Build a filter-matched Search heatmap batch with one prepared context."""
+
+    progress = Signal(str, int, int)
+    volume_ready = Signal(int, object)
+    finished = Signal(int)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        parquet_path: str,
+        atlas: BrainGlobeAtlas,
+        request: SearchHeatmapRequest,
+    ) -> None:
+        super().__init__()
+        self._parquet_path = str(parquet_path)
+        self._atlas = atlas
+        self._request = request
+
+    def run(self) -> None:
+        """Prepare filters once, then emit each dense volume in request order."""
+        try:
+            import duckdb
+
+            from .analysis.region_filter import prepare_cluster_region_filter
+            from .analysis.search import (
+                SEARCH_HEATMAP_MODE_LABELS,
+                SEARCH_HEATMAP_MODE_SCORED,
+                build_filtered_search_heatmap_volume,
+            )
+            from .analysis.voxel_filter import prepare_voxel_node_filter_from_parquet
+
+            all_file_ids = list(
+                dict.fromkeys(
+                    file_id
+                    for layer in self._request.layers
+                    for file_id in layer.file_ids
+                )
+            )
+            apply_search_filters = (
+                self._request.voxel_mode == SEARCH_HEATMAP_MODE_SCORED
+            )
+            prepared_region_filter = None
+            prepared_voxel_filter = None
+            if apply_search_filters:
+                prepared_region_filter = prepare_cluster_region_filter(
+                    self._atlas,
+                    self._request.region_filter,
+                )
+            if apply_search_filters and self._request.voxel_node_filter is not None:
+                prepared_voxel_filter = prepare_voxel_node_filter_from_parquet(
+                    self._parquet_path,
+                    self._request.voxel_node_filter,
+                    file_ids=all_file_ids,
+                )
+
+            total = len(self._request.layers)
+            conn = duckdb.connect()
+            try:
+                mode_label = SEARCH_HEATMAP_MODE_LABELS[self._request.voxel_mode]
+                for index, layer in enumerate(self._request.layers):
+                    self.progress.emit(
+                        f"Building {mode_label} Search heatmap {index + 1}/{total}...",
+                        index,
+                        total,
+                    )
+                    volume = build_filtered_search_heatmap_volume(
+                        conn,
+                        self._parquet_path,
+                        atlas_shape=tuple(
+                            int(value) for value in self._atlas.annotation.shape
+                        ),
+                        resolution_um=self._request.resolution_um,
+                        file_ids=layer.file_ids,
+                        voxel_node_filter=(
+                            self._request.voxel_node_filter
+                            if apply_search_filters
+                            else None
+                        ),
+                        prepared_region_filter=prepared_region_filter,
+                        prepared_voxel_filter=prepared_voxel_filter,
+                    )
+                    self.volume_ready.emit(index, volume)
+            finally:
+                conn.close()
+            self.progress.emit("Search heatmaps complete.", total, total)
+            self.finished.emit(total)
+        except Exception as error:
+            logger.exception("Search heatmap pipeline failed")
+            self.error.emit(str(error))
 
 
 class ConvertWorker(QObject):

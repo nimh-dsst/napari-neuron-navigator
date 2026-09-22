@@ -90,6 +90,22 @@ left-hemisphere SWC-to-Parquet conversion, atlas loading, region queries, soma
 clustering, and GPe-limited cluster heatmaps, see
 [docs/cpd2_workflow.md](docs/cpd2_workflow.md).
 
+## Similar-Neuron Search
+
+The **Search** tab ranks neurons from the loaded Parquet by the CCFv3
+voxel-count **Pearson distance (1 - r)** used by Analysis. Choose one neuron
+from the searchable catalog, or capture multiple selected Data-table rows to
+sum their voxel-count vectors into an aggregate reference. Region, node-type,
+dendrite-label coverage, and soma-distance filters apply to both the reference
+and candidate vectors.
+
+Search results can be added to **Data** without replacing existing rows or
+rendering neurons automatically. Results can also be saved as a versioned CSV
+and reopened later; imported `file_id` values missing from the current Parquet
+remain visible but cannot be added. Lower distance means a more similar spatial
+count pattern. `file_id` is always the neuron identity; `neuron_id` and
+`subject` are display fields only.
+
 ### Running Tests
 
 To run the test suite:
