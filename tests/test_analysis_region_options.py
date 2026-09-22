@@ -2583,6 +2583,71 @@ def test_all_cluster_heatmap_requests_excludes_all_neurons_entry():
     assert all(request.depth_axis == 2 for request in requests)
 
 
+def test_run_all_cluster_heatmaps_preserves_existing_layers():
+    """The bulk action should request collision-free layer creation."""
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget.__new__(AnalysisTabWidget)
+    widget._db = object()
+    widget._atlas = object()
+    widget._worker_thread = None
+    requests = [object(), object()]
+    widget._all_cluster_heatmap_requests = lambda: requests
+    calls: list[tuple[list[object], bool, bool]] = []
+
+    def start_requests(
+        queued_requests,
+        *,
+        batch_mode,
+        preserve_existing_layers=False,
+    ) -> None:
+        calls.append((queued_requests, batch_mode, preserve_existing_layers))
+
+    widget._start_heatmap_requests = start_requests
+
+    widget._run_all_cluster_heatmaps()
+
+    assert calls == [(requests, True, True)]
+
+
+def test_preserved_cluster_heatmaps_receive_iterator_suffixes():
+    """Repeated bulk cluster layers should coexist under incremented names."""
+    module = _import_analysis_tab_module()
+    AnalysisTabWidget = module.AnalysisTabWidget
+    widget = AnalysisTabWidget.__new__(AnalysisTabWidget)
+    widget._viewer = _DummyViewer()
+    widget._atlas = types.SimpleNamespace(atlas_name="fake_atlas")
+    widget._cluster_label_colors = {1: [0.1, 0.2, 0.3, 1.0]}
+    widget._preserve_existing_heatmap_layers = True
+    request = module._HeatmapRequest(
+        selected_region_id=10,
+        selected_region_acronym="CH",
+        region_ids=(10,),
+        cluster_label=1,
+        file_ids=("n1",),
+        node_types=None,
+        soma_radius_um=None,
+        depth_bin_factor=1,
+        depth_axis=0,
+    )
+    volumes = [np.full((2, 2, 2), value, dtype=np.float32) for value in (1.0, 2.0, 3.0)]
+
+    previous = _install_fake_napari_colormaps()
+    try:
+        layers = [
+            widget._add_analysis_heatmap_layer(volume, request) for volume in volumes
+        ]
+    finally:
+        _restore_modules(previous)
+
+    assert [layer.name for layer in widget._viewer.layers] == [
+        "Cluster 1 CH Heatmap",
+        "Cluster 1 CH Heatmap (2)",
+        "Cluster 1 CH Heatmap (3)",
+    ]
+    assert layers == widget._viewer.layers
+    assert [float(layer.data[0, 0, 0]) for layer in layers] == [1.0, 2.0, 3.0]
+
+
 def test_bulk_heatmap_queue_advances_and_summarizes_completion():
     """Queued cluster heatmaps should advance one-by-one and finish with a summary."""
     module = _import_analysis_tab_module()
