@@ -525,10 +525,11 @@ axes without asserting physical units or anatomical direction.
    soma reports that no soma mapped instead of falling back to numeric depth.
 5. **Action:** Change **View** to **2D stack**, select `L1`, `L5`, and `L6b`,
    and project again.
-   **Expected:** The projection, soma, and label layers from the previous
-   coordinate space are removed immediately when the options change. The new
-   **Isocortex Flatmap Allen Layers** image has exactly three planes in the
-   order `L1`, `L5`, `L6b`; unchecked layers do not remain as blank planes.
+   **Expected:** Changing **View** or the layer checkboxes leaves the existing
+   flatmap scene visible and does not crash napari. Clicking **Project to
+   Flatmap** safely retires the previous projection, soma, and label layers.
+   The new **Isocortex Flatmap Allen Layers** image has exactly three planes in
+   the order `L1`, `L5`, `L6b`; unchecked layers do not remain as blank planes.
 6. **Action:** Click **Show Region Labels** and **Add Soma**, then move through
    all three planes.
    **Expected:** Heatmap, labels, and somas use the same compact plane indices.
@@ -575,8 +576,9 @@ axes without asserting physical units or anatomical direction.
 - Last verified: Never
 - Notes: Selectable layers and the projection/stack choice were added on
   2026-09-04. Automated tests cover data parity, rank, metadata, compact plane
-  indices, labels, somas, and rectangular grids, but the controls and visual
-  alignment have not yet been exercised in napari.
+  indices, labels, somas, rectangular grids, preserving the live GPU layer
+  during checkbox events, and deferred retirement on re-projection. The
+  controls and visual alignment have not yet been exercised in napari.
 
 ### UC-006: Inspect and Query Custom Isocortex Layer Regions
 
