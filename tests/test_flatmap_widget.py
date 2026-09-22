@@ -3238,24 +3238,99 @@ def test_allen_layer_options_are_visible_only_in_allen_mode(monkeypatch) -> None
     assert options_group.visible is False
 
 
-def test_allen_layer_option_change_invalidates_existing_render(monkeypatch) -> None:
+def test_allen_layer_option_change_preserves_live_gpu_layer_until_project(
+    monkeypatch,
+) -> None:
     module = _load_flatmap_widget_module(monkeypatch)
     widget = _widget(module)
     widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
     widget._allen_layer_checkboxes = [
         _DummyValueControl(checked=index == 3) for index in range(6)
     ]
-    invalidated = []
-    widget._invalidate_flatmap_grid_layers = lambda: invalidated.append(True)
+    widget._allen_layer_output_combo = _DummyDataCombo(module.ALLEN_LAYER_OUTPUT_STACK)
+    layer = widget._viewer.add_image(
+        np.ones((6, 2, 2)),
+        name=module._ALLEN_LAYER_HEATMAP_LAYER_NAME,
+        metadata={
+            "flatmap_render_mode": module._RENDER_ALLEN_LAYERS,
+            "flatmap_plane_mode": module.FLATMAP_PLANE_MODE_ALLEN_LAYERS,
+            "allen_layer_indices": [0, 1, 2, 3, 4, 5],
+            "allen_layer_output_mode": module.ALLEN_LAYER_OUTPUT_STACK,
+        },
+    )
+    widget._projection_layer = layer
+    widget._invalidate_flatmap_grid_layers = lambda: pytest.fail(
+        "a checkbox callback must not delete a live GPU layer"
+    )
     widget._update_render_mode_controls = lambda: None
     widget._update_cached_region_controls = lambda: None
+    queued = []
+    widget._queue_gui_callback = queued.append
 
     widget._on_allen_layer_options_changed()
 
-    assert invalidated == [True]
+    assert widget._viewer.layers == [layer]
+    assert layer.visible is True
+    assert widget._projection_layer is layer
+    assert widget._flatmap_render_mode_change_pending is True
+    assert queued == []
     assert widget._status_label.text == (
         "Allen layers L5 will render as a compact 2D stack."
     )
+
+    for checkbox in widget._allen_layer_checkboxes:
+        checkbox.setChecked(True)
+    widget._on_allen_layer_options_changed()
+
+    assert widget._flatmap_render_mode_change_pending is False
+    assert widget._viewer.layers == [layer]
+    assert layer.visible is True
+
+
+def test_project_after_allen_layer_selection_change_defers_gpu_layer_removal(
+    monkeypatch,
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_ALLEN_LAYERS)
+    widget._projection_source_combo = _DummyDataCombo(
+        module._PROJECTION_SOURCE_PRECOMPUTED
+    )
+    widget._allen_layer_checkboxes = [
+        _DummyValueControl(checked=index == 3) for index in range(6)
+    ]
+    widget._allen_layer_output_combo = _DummyDataCombo(module.ALLEN_LAYER_OUTPUT_STACK)
+    layer = widget._viewer.add_image(
+        np.ones((6, 2, 2)),
+        name=module._ALLEN_LAYER_HEATMAP_LAYER_NAME,
+        metadata={
+            "flatmap_render_mode": module._RENDER_ALLEN_LAYERS,
+            "flatmap_plane_mode": module.FLATMAP_PLANE_MODE_ALLEN_LAYERS,
+            "allen_layer_indices": [0, 1, 2, 3, 4, 5],
+            "allen_layer_output_mode": module.ALLEN_LAYER_OUTPUT_STACK,
+        },
+    )
+    widget._projection_layer = layer
+    widget._update_render_mode_controls = lambda: None
+    widget._update_cached_region_controls = lambda: None
+    widget._notify_flatmap_correlation_source_changed = lambda: None
+    queued = []
+    widget._queue_gui_callback = queued.append
+
+    widget._on_allen_layer_options_changed()
+
+    started = []
+    widget._start_precomputed_heatmap_worker = lambda: started.append(True)
+    widget._project()
+
+    assert layer.visible is False
+    assert widget._projection_layer is None
+    assert len(queued) == 1
+    assert started == [True]
+
+    queued[0]()
+
+    assert layer not in widget._viewer.layers
 
 
 def test_empty_allen_layer_selection_disables_projection_and_labels(

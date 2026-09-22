@@ -2354,7 +2354,7 @@ class FlatmapProjectionWidget(QWidget):
         flat_mode = self._is_flat_render_mode()
         recompute_depth = depth_grid_mode and not precomputed
         allen_selection_ready = self._allen_layer_selection_ready()
-        render_mode_ready = not bool(
+        render_config_ready = not bool(
             getattr(self, "_flatmap_render_mode_change_pending", False)
         )
         return {
@@ -2362,17 +2362,19 @@ class FlatmapProjectionWidget(QWidget):
                 cache_available or recompute_depth
             )
             and allen_selection_ready
-            and render_mode_ready,
+            and render_config_ready,
             "_region_surfaces_btn": (
-                cache_available and depth_grid_mode and render_mode_ready
+                cache_available and depth_grid_mode and render_config_ready
             ),
             "_region_outlines_btn": (
-                cache_available and (depth_grid_mode or flat_mode) and render_mode_ready
+                cache_available
+                and (depth_grid_mode or flat_mode)
+                and render_config_ready
             ),
             "_clear_region_geometry_btn": cache_available
             and (depth_grid_mode or flat_mode)
-            and render_mode_ready,
-            "_region_label_atlas_combo": recompute_depth and render_mode_ready,
+            and render_config_ready,
+            "_region_label_atlas_combo": recompute_depth and render_config_ready,
         }
 
     def _update_cached_region_controls(self) -> None:
@@ -2641,9 +2643,17 @@ class FlatmapProjectionWidget(QWidget):
         self._on_allen_layer_options_changed()
 
     def _on_allen_layer_options_changed(self, *_args) -> None:
-        """Retire output whose categorical selection or dimensionality changed."""
+        """Record Allen options that no longer match the displayed scene.
+
+        This slot runs inside the checkbox/combo-box input event.  Mutating a
+        live napari Image layer here can make Qt's macOS OpenGL compositor
+        repaint a buffer that VisPy has just released.  Keep the current scene
+        intact while the user edits the options; ``_project`` retires it after
+        control returns to the event loop if the user projects into the same
+        window.
+        """
         if self._is_allen_layer_mode():
-            self._invalidate_flatmap_grid_layers()
+            self._update_flatmap_render_mode_change_pending()
         self._update_render_mode_controls()
         self._update_cached_region_controls()
         status = getattr(self, "_status_label", None)
@@ -2702,8 +2712,39 @@ class FlatmapProjectionWidget(QWidget):
             return 2
         return 3
 
+    def _allen_layer_options_mismatch(self, layer) -> bool:
+        """Return whether an Allen-space layer uses the previous UI options."""
+        metadata = getattr(layer, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            return False
+        uses_allen_space = bool(
+            metadata.get("flatmap_render_mode") == _RENDER_ALLEN_LAYERS
+            or metadata.get("flatmap_soma_space_render_mode") == _RENDER_ALLEN_LAYERS
+            or metadata.get("flatmap_plane_mode")
+            in {
+                FLATMAP_PLANE_MODE_ALLEN_LAYERS,
+                FLATMAP_PLANE_MODE_ALLEN_LAYER_PROJECTION,
+            }
+        )
+        if not uses_allen_space:
+            return False
+        try:
+            layer_indices = tuple(
+                int(value) for value in metadata["allen_layer_indices"]
+            )
+            output_mode = str(metadata["allen_layer_output_mode"])
+        except (KeyError, TypeError, ValueError):
+            # Older layers did not record enough information to compare.  A
+            # render-mode mismatch still handles transitions out of Allen
+            # space, while an unknown same-mode layer is safest left intact.
+            return False
+        return bool(
+            layer_indices != self._current_allen_layer_indices()
+            or output_mode != self._current_allen_layer_output_mode()
+        )
+
     def _update_flatmap_render_mode_change_pending(self) -> bool:
-        """Record whether the active scene uses another render coordinate space."""
+        """Record whether the active scene differs from the render controls."""
         render_mode = self._current_render_mode()
         render_layers = self._current_flatmap_render_layers()
         render_mismatch = any(
@@ -2718,13 +2759,28 @@ class FlatmapProjectionWidget(QWidget):
             and soma_metadata.get("flatmap_soma_space_render_mode") != render_mode
         )
         plane_mode = self._current_plane_mode()
+        region_layers = self._current_cached_region_layers()
         region_mismatch = any(
             (getattr(layer, "metadata", {}) or {}).get("flatmap_plane_mode")
             not in {None, "", plane_mode}
-            for layer in self._current_cached_region_layers()
+            for layer in region_layers
+        )
+        allen_options_mismatch = bool(
+            render_mode == _RENDER_ALLEN_LAYERS
+            and any(
+                self._allen_layer_options_mismatch(layer)
+                for layer in (
+                    render_layers
+                    + ([soma_layer] if soma_layer is not None else [])
+                    + region_layers
+                )
+            )
         )
         self._flatmap_render_mode_change_pending = bool(
-            render_mismatch or soma_mismatch or region_mismatch
+            render_mismatch
+            or soma_mismatch
+            or region_mismatch
+            or allen_options_mismatch
         )
         return self._flatmap_render_mode_change_pending
 
@@ -3122,8 +3178,8 @@ class FlatmapProjectionWidget(QWidget):
         """
         if getattr(self, "_flatmap_render_mode_change_pending", False):
             message = (
-                "Project the selected render mode before adding soma points, "
-                "or change Render back to the displayed mode."
+                "Project the selected render options before adding soma points, "
+                "or restore the displayed settings."
             )
             self._status_label.setText(message)
             show_warning(message)
