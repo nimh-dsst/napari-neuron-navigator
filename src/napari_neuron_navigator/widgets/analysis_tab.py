@@ -418,6 +418,7 @@ class AnalysisTabWidget(QWidget):
         self._active_heatmap_total: int = 0
         self._active_heatmap_index: int = 0
         self._heatmap_batch_mode: bool = False
+        self._preserve_existing_heatmap_layers: bool = False
         self._slice_projector = None
         self._dataset_region_ids: set[int] = set()
         self._dataset_node_types: tuple[int, ...] = ()
@@ -2446,7 +2447,11 @@ class AnalysisTabWidget(QWidget):
             )
             return
 
-        self._start_heatmap_requests(requests, batch_mode=True)
+        self._start_heatmap_requests(
+            requests,
+            batch_mode=True,
+            preserve_existing_layers=True,
+        )
 
     def _current_heatmap_region_filter(
         self,
@@ -2654,6 +2659,7 @@ class AnalysisTabWidget(QWidget):
         requests: list[_HeatmapRequest],
         *,
         batch_mode: bool,
+        preserve_existing_layers: bool = False,
     ) -> None:
         """Start one or more heatmap requests in sequence."""
         if not requests:
@@ -2665,6 +2671,7 @@ class AnalysisTabWidget(QWidget):
         self._active_heatmap_total = len(requests)
         self._active_heatmap_index = 0
         self._heatmap_batch_mode = bool(batch_mode)
+        self._preserve_existing_heatmap_layers = bool(preserve_existing_layers)
         self._progress_bar.setVisible(True)
         self._progress_bar.setRange(0, 0)
         self._update_button_states()
@@ -2893,7 +2900,7 @@ class AnalysisTabWidget(QWidget):
 
         if self._heatmap_batch_mode:
             self._progress_label.setText(
-                f"Added {self._heatmap_layer_name(request)} "
+                f"Added {layer.name} "
                 f"({self._active_heatmap_index}/"
                 f"{self._active_heatmap_total})"
             )
@@ -2927,7 +2934,7 @@ class AnalysisTabWidget(QWidget):
         volume: np.ndarray,
         request: _HeatmapRequest,
     ):
-        """Add or replace one analysis heatmap layer."""
+        """Add one analysis heatmap layer, replacing it unless preservation is on."""
         from napari.utils.colormaps import Colormap
 
         layer_name = self._heatmap_layer_name(request)
@@ -2944,9 +2951,19 @@ class AnalysisTabWidget(QWidget):
         else:
             colormap = "hot"
 
-        for layer in list(self._viewer.layers):
-            if layer.name == layer_name:
-                self._viewer.layers.remove(layer)
+        if getattr(self, "_preserve_existing_heatmap_layers", False):
+            existing_names = {
+                str(getattr(layer, "name", "")) for layer in self._viewer.layers
+            }
+            if layer_name in existing_names:
+                suffix = 2
+                while f"{layer_name} ({suffix})" in existing_names:
+                    suffix += 1
+                layer_name = f"{layer_name} ({suffix})"
+        else:
+            for layer in list(self._viewer.layers):
+                if layer.name == layer_name:
+                    self._viewer.layers.remove(layer)
 
         scale = [1.0, 1.0, 1.0]
         scale[request.depth_axis] = float(request.depth_bin_factor)
@@ -3045,6 +3062,7 @@ class AnalysisTabWidget(QWidget):
         self._active_heatmap_total = 0
         self._active_heatmap_index = 0
         self._heatmap_batch_mode = False
+        self._preserve_existing_heatmap_layers = False
         self._progress_bar.setVisible(False)
         if batch_mode and completed_count > 0:
             suffix = "" if completed_count == 1 else "s"
@@ -3063,6 +3081,7 @@ class AnalysisTabWidget(QWidget):
         self._active_heatmap_total = 0
         self._active_heatmap_index = 0
         self._heatmap_batch_mode = False
+        self._preserve_existing_heatmap_layers = False
         self._on_error(message)
 
     def _on_error(self, message: str) -> None:
