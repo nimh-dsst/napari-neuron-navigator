@@ -695,6 +695,10 @@ class NeuronViewerWidget(QWidget):
             self._selected_heatmap_total = 0
             self._selected_heatmap_index = 0
             self._selected_heatmap_failed = False
+            self._search_heatmap_thread: QThread | None = None
+            self._search_heatmap_worker = None
+            self._search_heatmap_request = None
+            self._search_heatmap_completed_count = 0
             self._cached_atlas_thread: QThread | None = None
             self._cached_atlas_worker = None
             self._atlas_load_thread: QThread | None = None
@@ -1279,11 +1283,20 @@ class NeuronViewerWidget(QWidget):
             from .search_tab import SearchTabWidget
 
             self._search_tab = SearchTabWidget()
+            self._search_tab.set_current_table_file_ids_provider(
+                self._current_table_file_ids
+            )
             self._search_tab.set_selected_table_file_ids_provider(
                 self._neuron_table.get_selected_file_ids
             )
             self._search_tab.add_file_ids_requested.connect(
                 self._add_search_file_ids_to_table
+            )
+            self._search_tab.annotate_search_requested.connect(
+                self._annotate_search_in_table
+            )
+            self._search_tab.search_heatmaps_requested.connect(
+                self._start_search_heatmaps
             )
             tabs.addTab(self._search_tab, "Search")
 
@@ -4809,7 +4822,8 @@ class NeuronViewerWidget(QWidget):
         return [
             layer
             for layer in self._iter_viewer_layers()
-            if _layer_metadata(layer).get("heatmap_kind") == "selected_neurons"
+            if _layer_metadata(layer).get("heatmap_kind")
+            in {"selected_neurons", "search_results"}
         ]
 
     @staticmethod
@@ -4972,11 +4986,19 @@ class NeuronViewerWidget(QWidget):
             return True
         return bool(getattr(self, "_selected_heatmap_pending_requests", []))
 
+    def _search_heatmap_running(self) -> bool:
+        """Return whether a Search heatmap worker or request is active."""
+        thread = getattr(self, "_search_heatmap_thread", None)
+        if thread is not None and thread.isRunning():
+            return True
+        return getattr(self, "_search_heatmap_request", None) is not None
+
     def _update_selected_neuron_heatmap_controls(self) -> None:
         """Enable or disable the selected-neuron heatmap action."""
         if hasattr(self, "_add_selected_heatmap_btn"):
             self._add_selected_heatmap_btn.setEnabled(
                 not self._selected_heatmap_running()
+                and not NeuronViewerWidget._search_heatmap_running(self)
             )
 
     def _refresh_neuron_table_summary(self) -> None:
@@ -7344,6 +7366,279 @@ class NeuronViewerWidget(QWidget):
         if search_tab is not None:
             search_tab.on_file_ids_added(summary)
 
+    def _annotate_search_in_table(self, request) -> None:
+        """Append and annotate one completed Search cohort transactionally."""
+        from .neuron_table import NeuronMetadataUpdate
+
+        unavailable = {str(value) for value in request.unavailable_file_ids}
+        reference_ids = [
+            str(file_id)
+            for file_id in request.reference_file_ids
+            if str(file_id) not in unavailable
+        ]
+        ranked_hits = [
+            (str(file_id), int(rank))
+            for file_id, rank in request.ranked_hits
+            if str(file_id) not in unavailable
+        ]
+        ordered_ids = list(
+            dict.fromkeys([*reference_ids, *(file_id for file_id, _ in ranked_hits)])
+        )
+        append_summary = self._neuron_table.append_file_ids(ordered_ids)
+        self._apply_saved_table_state_to_table()
+
+        updates = {
+            file_id: NeuronMetadataUpdate(
+                group="reference",
+                tags=tuple(request.filter_tags),
+                replace_tag_prefix="Search ",
+            )
+            for file_id in reference_ids
+        }
+        for file_id, rank in ranked_hits:
+            if file_id in updates:
+                continue
+            updates[file_id] = NeuronMetadataUpdate(
+                label=f"Rank {rank}",
+                group="search result",
+                tags=tuple(request.filter_tags),
+                replace_tag_prefix="Search ",
+            )
+        metadata_summary = self._neuron_table.apply_metadata_updates(updates)
+        self._discard_scene_display_state(self._current_table_file_ids())
+        self._neuron_table.set_added_file_ids(self._current_scene_file_ids())
+        self._sync_neuron_table_heatmap_membership()
+        self._refresh_manual_heatmap_combo()
+        self._sync_after_neuron_table_membership_change()
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.on_search_annotated(
+                append_summary,
+                metadata_summary,
+                unavailable_count=len(unavailable),
+            )
+
+    def _start_search_heatmaps(self, request) -> None:
+        """Start one Search heatmap batch in its requested voxel mode."""
+        search_tab = getattr(self, "_search_tab", None)
+        if self._db is None or self._atlas is None:
+            if search_tab is not None:
+                search_tab.on_search_heatmaps_finished(
+                    "Load a neuron Parquet and atlas before creating Search heatmaps."
+                )
+            return
+        if self._selected_heatmap_running() or self._search_heatmap_running():
+            if search_tab is not None:
+                search_tab.on_search_heatmaps_finished(
+                    "Another neuron heatmap request is already running."
+                )
+            return
+
+        estimated_bytes = self._individual_heatmap_estimated_bytes(
+            self._atlas,
+            len(request.layers),
+        )
+        if (
+            estimated_bytes > _INDIVIDUAL_HEATMAP_MEMORY_WARNING_BYTES
+            and not self._confirm_large_search_heatmap_request(
+                len(request.layers),
+                estimated_bytes,
+            )
+        ):
+            if search_tab is not None:
+                search_tab.on_search_heatmaps_finished(
+                    "Search heatmap creation cancelled; no layers were added."
+                )
+            return
+
+        from ..workers import SearchHeatmapWorker
+
+        thread = QThread()
+        worker = SearchHeatmapWorker(
+            parquet_path=str(self._db.parquet_path),
+            atlas=self._atlas,
+            request=request,
+        )
+        self._search_heatmap_thread = thread
+        self._search_heatmap_worker = worker
+        self._search_heatmap_request = request
+        self._search_heatmap_completed_count = 0
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_search_heatmap_progress)
+        worker.volume_ready.connect(self._on_search_heatmap_volume_ready)
+        worker.finished.connect(self._on_search_heatmap_finished)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(self._on_search_heatmap_error)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda: self._cleanup_search_heatmap_thread(thread, worker)
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._render_progress.setVisible(True)
+        self._render_progress.setRange(0, max(1, len(request.layers)))
+        self._render_progress.setValue(0)
+        if search_tab is not None:
+            search_tab.set_search_heatmap_busy(True)
+        self._update_selected_neuron_heatmap_controls()
+        thread.start()
+
+    def _confirm_large_search_heatmap_request(
+        self,
+        layer_count: int,
+        estimated_bytes: int,
+    ) -> bool:
+        """Confirm a Search heatmap batch whose retained volumes exceed 1 GiB."""
+        from qtpy.QtWidgets import QMessageBox
+
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Warning)
+        message.setWindowTitle("Large Search Heatmap Request")
+        estimated_gib = float(estimated_bytes) / float(1024**3)
+        message.setText(
+            f"Creating {int(layer_count):,} Search heatmaps is estimated to "
+            f"retain {estimated_gib:.2f} GiB of image data before rendering "
+            "overhead. Continue?"
+        )
+        continue_button = message.addButton("Continue", QMessageBox.AcceptRole)
+        cancel_button = message.addButton("Cancel", QMessageBox.RejectRole)
+        message.setDefaultButton(cancel_button)
+        message.exec()
+        return message.clickedButton() is continue_button
+
+    def _on_search_heatmap_progress(
+        self,
+        message: str,
+        current: int,
+        total: int,
+    ) -> None:
+        self._render_progress.setVisible(True)
+        self._render_progress.setRange(0, max(1, int(total)))
+        self._render_progress.setValue(int(current))
+        self._render_status_label.setText(message)
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.on_search_heatmap_progress(message, current, total)
+
+    def _on_search_heatmap_volume_ready(
+        self,
+        index: int,
+        volume: np.ndarray,
+    ) -> None:
+        request = getattr(self, "_search_heatmap_request", None)
+        if request is None or not 0 <= int(index) < len(request.layers):
+            return
+        from napari.utils.colormaps import Colormap
+
+        from ..analysis.search import SEARCH_HEATMAP_MODE_LABELS
+
+        spec = request.layers[int(index)]
+        mode_label = SEARCH_HEATMAP_MODE_LABELS[request.voxel_mode]
+        if spec.role == "reference":
+            base_name = f"Search Reference ({mode_label}) Heatmap"
+        else:
+            base_name = (
+                f"Search Rank {spec.rank} "
+                f"(d={float(spec.pearson_distance):.4g}; {mode_label}) Heatmap"
+            )
+        layer_name = self._unique_layer_name(base_name)
+        contrast_limits = _heatmap_contrast_limits(volume)
+        contrast_limits = (
+            contrast_limits[0],
+            contrast_limits[1] * _INDIVIDUAL_HEATMAP_CONTRAST_FRACTION,
+        )
+        color = tuple(float(channel) for channel in spec.color)
+        colormap = Colormap(
+            colors=[[0.0, 0.0, 0.0, 0.0], list(color)],
+            name=f"search_heatmap_{spec.role}_{spec.rank}_{index}",
+        )
+        metadata = {
+            "heatmap_source": True,
+            "heatmap_native_grid": True,
+            "heatmap_kind": "search_results",
+            "manual_heatmap_id": layer_name.removesuffix(" Heatmap"),
+            "atlas_name": self._current_atlas_name(),
+            "source_path": str(self._db.parquet_path),
+            "file_ids": list(spec.file_ids),
+            "selection_count": len(spec.file_ids),
+            "heatmap_creation_mode": "search_distance",
+            "search_heatmap_voxel_mode": request.voxel_mode,
+            "search_heatmap_voxel_mode_label": mode_label,
+            "search_filters_applied_to_volume": (
+                request.voxel_mode == "scored_voxels"
+            ),
+            "search_role": spec.role,
+            "search_rank": int(spec.rank),
+            "pearson_distance": spec.pearson_distance,
+            "color": list(color),
+            "distance_color_scale": (
+                "fixed_magenta_reference"
+                if spec.role == "reference"
+                else "hot_reversed_visible_0.25_to_1.0_result_table_range"
+            ),
+            "distance_domain": [
+                float(request.distance_color_domain[0]),
+                float(request.distance_color_domain[1]),
+            ],
+            "distance_domain_source": "completed_search_result_table",
+            "pearson_distance_possible_domain": [0.0, 2.0],
+            "heatmap_contrast_limits": contrast_limits,
+            "heatmap_autocontrast_policy": "stable_20_percent_max",
+            "search_context": dict(request.metadata),
+        }
+        self.viewer.add_image(
+            volume,
+            name=layer_name,
+            colormap=colormap,
+            blending="additive",
+            rendering="mip",
+            opacity=self._opacity_slider.value() / 100.0,
+            contrast_limits=contrast_limits,
+            metadata=metadata,
+        )
+        self._search_heatmap_completed_count = max(
+            self._search_heatmap_completed_count,
+            int(index) + 1,
+        )
+        self._refresh_selected_neuron_heatmap_dependents()
+
+    def _on_search_heatmap_finished(self, total: int) -> None:
+        completed = int(self._search_heatmap_completed_count)
+        message = f"Added {completed:,}/{int(total):,} Search heatmaps to the scene."
+        self._render_status_label.setText(message)
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.on_search_heatmaps_finished(message)
+        self._refresh_selected_neuron_heatmap_dependents()
+
+    def _on_search_heatmap_error(self, error_message: str) -> None:
+        completed = int(getattr(self, "_search_heatmap_completed_count", 0))
+        message = (
+            f"Search heatmap error after {completed:,} completed layer(s): "
+            f"{error_message}"
+        )
+        self._render_status_label.setText(message)
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.on_search_heatmaps_finished(message)
+        logger.error("Search heatmap failed: %s", error_message)
+
+    def _cleanup_search_heatmap_thread(self, thread: QThread, worker: object) -> None:
+        if self._search_heatmap_thread is thread:
+            self._search_heatmap_thread = None
+        if self._search_heatmap_worker is worker:
+            self._search_heatmap_worker = None
+        self._search_heatmap_request = None
+        self._search_heatmap_completed_count = 0
+        self._render_progress.setVisible(False)
+        self._render_progress.setRange(0, 1)
+        self._render_progress.setValue(0)
+        search_tab = getattr(self, "_search_tab", None)
+        if search_tab is not None:
+            search_tab.set_search_heatmap_busy(False)
+        self._update_selected_neuron_heatmap_controls()
+
     def _apply_saved_table_state_to_table(self) -> None:
         """Apply enhanced parquet or project table state to current table rows."""
         table_state = getattr(self, "_saved_table_state", None)
@@ -7704,6 +7999,11 @@ class NeuronViewerWidget(QWidget):
     def _selected_neuron_heatmap_selection(self) -> tuple[object, ...]:
         """Validate and return a stable snapshot of selected table neuron IDs."""
         if self._selected_heatmap_running():
+            return ()
+        if NeuronViewerWidget._search_heatmap_running(self):
+            self._render_status_label.setText(
+                "Wait for the Search heatmap request to finish."
+            )
             return ()
         if self._db is None:
             self._render_status_label.setText(

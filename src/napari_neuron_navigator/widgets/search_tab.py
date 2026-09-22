@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -31,6 +32,16 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from ..analysis.search import (
+    SEARCH_HEATMAP_MODE_SCORED,
+    SEARCH_HEATMAP_MODE_WHOLE,
+    SEARCH_RESULTS_FORMAT_VERSION,
+    SEARCH_SCOPE_CURRENT,
+    SEARCH_SCOPE_LABELS,
+    SEARCH_SCOPE_SELECTED,
+    SEARCH_SCOPE_WHOLE,
+    pearson_distance_color_domain,
+)
 from .collapsible_section import CollapsibleSection
 from .node_type_selector import NodeTypeSelectorComboBox, node_type_options
 from .region_filter_editor import RegionFilterEditorWidget
@@ -70,9 +81,11 @@ class _NumericItem(QTableWidgetItem):
 
 
 class SearchTabWidget(QWidget):
-    """Rank whole-Parquet candidates against one captured reference vector."""
+    """Rank scoped candidates against one captured reference vector."""
 
     add_file_ids_requested = Signal(list)
+    annotate_search_requested = Signal(object)
+    search_heatmaps_requested = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -83,6 +96,7 @@ class SearchTabWidget(QWidget):
         self._available_file_ids: set[str] = set()
         self._dataset_region_ids: set[int] = set()
         self._dataset_node_types: tuple[int, ...] = ()
+        self._current_table_file_ids_provider = None
         self._selected_table_file_ids_provider = None
         self._captured_aggregate_file_ids: tuple[str, ...] = ()
         self._dendrite_coverage = None
@@ -92,8 +106,10 @@ class SearchTabWidget(QWidget):
         self._pending_request: VoxelSearchRequest | None = None
         self._pending_preflight = None
         self._last_result: VoxelSearchResult | None = None
+        self._result_document = None
         self._result_frame = pd.DataFrame()
         self._pending_add_unavailable = 0
+        self._heatmap_busy = False
         self._setup_ui()
 
     # --- External dependencies -------------------------------------------------
@@ -135,6 +151,10 @@ class SearchTabWidget(QWidget):
         """Set a callback returning selected Data-table ``file_id`` values."""
         self._selected_table_file_ids_provider = provider
 
+    def set_current_table_file_ids_provider(self, provider) -> None:
+        """Set a callback returning every current Data-table ``file_id``."""
+        self._current_table_file_ids_provider = provider
+
     def on_file_ids_added(self, summary, *, unavailable_count: int | None = None) -> None:
         """Display the outcome of a synchronous Data-table append request."""
         unavailable = (
@@ -149,6 +169,43 @@ class SearchTabWidget(QWidget):
             f"{unavailable:,} unavailable in the loaded Parquet."
         )
         self._pending_add_unavailable = 0
+
+    def on_search_annotated(
+        self,
+        append_summary,
+        metadata_summary,
+        *,
+        unavailable_count: int = 0,
+    ) -> None:
+        """Display one parent-owned add-and-annotation transaction outcome."""
+        self._status_label.setText(
+            f"Added {int(getattr(append_summary, 'added_count', 0)):,}; "
+            f"{int(getattr(append_summary, 'already_present_count', 0)):,} "
+            f"already present; annotated "
+            f"{int(getattr(metadata_summary, 'updated_count', 0)):,}; "
+            f"{int(unavailable_count):,} unavailable."
+        )
+
+    def set_search_heatmap_busy(self, busy: bool) -> None:
+        """Reflect the viewer-owned Search heatmap worker state."""
+        self._heatmap_busy = bool(busy)
+        self._update_button_states()
+
+    def on_search_heatmap_progress(
+        self,
+        message: str,
+        current: int,
+        total: int,
+    ) -> None:
+        """Display viewer-owned Search heatmap progress in the Search tab."""
+        self._status_label.setText(
+            f"{message} ({int(current):,}/{int(total):,})"
+        )
+
+    def on_search_heatmaps_finished(self, message: str) -> None:
+        """Show the terminal status of a viewer-owned Search heatmap batch."""
+        self._status_label.setText(str(message))
+        self.set_search_heatmap_busy(False)
 
     # --- UI --------------------------------------------------------------------
 
@@ -282,6 +339,19 @@ class SearchTabWidget(QWidget):
 
         self._search_section = CollapsibleSection("Search", expanded=True)
         search_layout = self._search_section.content_layout()
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Input neurons:"))
+        self._scope_combo = QComboBox()
+        for scope in (
+            SEARCH_SCOPE_WHOLE,
+            SEARCH_SCOPE_CURRENT,
+            SEARCH_SCOPE_SELECTED,
+        ):
+            self._scope_combo.addItem(SEARCH_SCOPE_LABELS[scope], scope)
+        self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
+        scope_row.addWidget(self._scope_combo)
+        scope_row.addStretch()
+        search_layout.addLayout(scope_row)
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Top results:"))
         self._top_n_spin = QSpinBox()
@@ -329,6 +399,58 @@ class SearchTabWidget(QWidget):
         add_row.addWidget(self._add_all_btn)
         results_layout.addLayout(add_row)
 
+        cohort_row = QHBoxLayout()
+        self._annotate_btn = QPushButton("Add & Annotate Search in Data")
+        self._annotate_btn.clicked.connect(self._annotate_search_in_data)
+        cohort_row.addWidget(self._annotate_btn)
+        self._heatmap_btn = QPushButton("Add Search Heatmaps")
+        heatmap_menu = QMenu(self._heatmap_btn)
+        scored_menu = heatmap_menu.addMenu("Scored Voxels")
+        self._heatmap_scored_selected_action = scored_menu.addAction(
+            "Selected Results + Reference"
+        )
+        self._heatmap_scored_selected_action.triggered.connect(
+            lambda _checked=False: self._add_selected_search_heatmaps(
+                SEARCH_HEATMAP_MODE_SCORED
+            )
+        )
+        self._heatmap_scored_all_action = scored_menu.addAction(
+            "All Results + Reference"
+        )
+        self._heatmap_scored_all_action.triggered.connect(
+            lambda _checked=False: self._add_all_search_heatmaps(
+                SEARCH_HEATMAP_MODE_SCORED
+            )
+        )
+        whole_menu = heatmap_menu.addMenu("Whole Neuron")
+        self._heatmap_whole_selected_action = whole_menu.addAction(
+            "Selected Results + Reference"
+        )
+        self._heatmap_whole_selected_action.triggered.connect(
+            lambda _checked=False: self._add_selected_search_heatmaps(
+                SEARCH_HEATMAP_MODE_WHOLE
+            )
+        )
+        self._heatmap_whole_all_action = whole_menu.addAction(
+            "All Results + Reference"
+        )
+        self._heatmap_whole_all_action.triggered.connect(
+            lambda _checked=False: self._add_all_search_heatmaps(
+                SEARCH_HEATMAP_MODE_WHOLE
+            )
+        )
+        self._heatmap_btn.setMenu(heatmap_menu)
+        cohort_row.addWidget(self._heatmap_btn)
+        results_layout.addLayout(cohort_row)
+        self._heatmap_legend = QLabel(
+            "Reference heatmaps are magenta. Result heatmap color uses the full "
+            "result table: white/yellow = closest; dark red = farthest. Scored "
+            "Voxels shows the filtered search input; Whole Neuron shows all "
+            "valid, in-atlas source voxels."
+        )
+        self._heatmap_legend.setWordWrap(True)
+        results_layout.addWidget(self._heatmap_legend)
+
         file_row = QHBoxLayout()
         self._save_csv_btn = QPushButton("Save Results CSV...")
         self._save_csv_btn.clicked.connect(self._save_results_csv)
@@ -375,6 +497,70 @@ class SearchTabWidget(QWidget):
             logger.exception("Could not read the selected Data-table rows")
             return []
         return list(dict.fromkeys(str(value) for value in values))
+
+    def _current_table_file_ids(self) -> list[str]:
+        provider = self._current_table_file_ids_provider
+        if not callable(provider):
+            return []
+        try:
+            values = provider() or []
+        except Exception:
+            logger.exception("Could not read the current Data-table rows")
+            return []
+        return list(dict.fromkeys(str(value) for value in values))
+
+    def _selected_scope(self) -> str:
+        scope = self._scope_combo.currentData()
+        return str(scope) if scope in SEARCH_SCOPE_LABELS else SEARCH_SCOPE_WHOLE
+
+    def _resolve_candidate_scope(
+        self,
+        references: tuple[str, ...],
+        *,
+        require_candidate: bool = True,
+    ) -> tuple[tuple[str, ...] | None, str, int | None]:
+        scope = self._selected_scope()
+        if scope == SEARCH_SCOPE_WHOLE:
+            candidates = tuple(sorted(self._available_file_ids))
+            candidate_ids = None
+            input_count = len(candidates)
+        elif scope == SEARCH_SCOPE_CURRENT:
+            candidates = tuple(self._current_table_file_ids())
+            candidate_ids = candidates
+            input_count = len(candidates)
+            if not candidates:
+                raise ValueError(
+                    "Current Table is empty; switch to Whole Parquet or populate "
+                    "the Data table first."
+                )
+        else:
+            candidates = tuple(self._selected_table_file_ids())
+            candidate_ids = candidates
+            input_count = len(candidates)
+            if not candidates:
+                raise ValueError(
+                    "No Data rows are selected; select at least one candidate "
+                    "or change the Search input scope."
+                )
+        non_reference_count = len(set(candidates) - set(references))
+        if require_candidate and non_reference_count < 1:
+            raise ValueError(
+                f"{SEARCH_SCOPE_LABELS[scope]} contains no non-reference candidate "
+                "neurons."
+            )
+        label = SEARCH_SCOPE_LABELS[scope]
+        if input_count is not None:
+            label = (
+                f"{label} ({input_count:,} rows; "
+                f"{non_reference_count:,} non-reference candidates)"
+            )
+        return candidate_ids, label, input_count
+
+    def _on_scope_changed(self, _index: int | None = None) -> None:
+        self._clear_dendrite_restriction(
+            "Input scope changed; rerun the dendrite-label scan if needed."
+        )
+        self._update_button_states()
 
     def _capture_single_selection(self) -> None:
         selected = self._selected_table_file_ids()
@@ -585,12 +771,21 @@ class SearchTabWidget(QWidget):
             return
         from ..workers import DendriteCoverageWorker
 
+        try:
+            file_ids, scope_label, _input_count = self._resolve_candidate_scope(
+                self._reference_file_ids(),
+                require_candidate=False,
+            )
+        except ValueError as error:
+            self._status_label.setText(str(error))
+            return
         self._clear_dendrite_restriction("Scanning complete neurons...")
         worker = DendriteCoverageWorker(
             parquet_path=self._parquet_path,
-            file_ids=None,
+            file_ids=None if file_ids is None else list(file_ids),
             dendrite_node_types=dendrite_types,
         )
+        self._status_label.setText(f"Scanning {scope_label} for dendrite labels...")
         self._start_thread(
             worker,
             self._on_dendrite_scan_finished,
@@ -631,6 +826,9 @@ class SearchTabWidget(QWidget):
             raise ValueError("Capture at least two Data rows for aggregate mode.")
         if mode == _REFERENCE_SINGLE and len(references) != 1:
             raise ValueError("Choose exactly one reference neuron.")
+        candidate_ids, _scope_label, _input_count = self._resolve_candidate_scope(
+            references
+        )
         region_filter = self._region_filter_editor.region_filter(
             self._represented_region_entries
         )
@@ -648,12 +846,13 @@ class SearchTabWidget(QWidget):
         voxel_filter = self._selected_voxel_node_filter()
         return VoxelSearchRequest(
             reference_file_ids=references,
-            candidate_file_ids=None,
+            candidate_file_ids=candidate_ids,
             region_filter=region_filter,
             voxel_node_filter=voxel_filter,
             resolution_um=float(self._atlas.resolution[0]),
             top_n=int(self._top_n_spin.value()),
             exclude_references=True,
+            candidate_scope=self._selected_scope(),
         )
 
     def _run_search(self) -> None:
@@ -673,7 +872,25 @@ class SearchTabWidget(QWidget):
             atlas=self._atlas,
             request=request,
         )
-        self._status_label.setText("Counting search nodes...")
+        input_count = (
+            len(self._available_file_ids)
+            if request.candidate_file_ids is None
+            else len(request.candidate_file_ids)
+        )
+        non_reference_count = input_count - len(
+            set(request.reference_file_ids)
+            & (
+                self._available_file_ids
+                if request.candidate_file_ids is None
+                else set(request.candidate_file_ids)
+            )
+        )
+        scope_label = (
+            f"{SEARCH_SCOPE_LABELS[request.candidate_scope]} "
+            f"({input_count:,} rows; "
+            f"{non_reference_count:,} non-reference candidates)"
+        )
+        self._status_label.setText(f"Counting search nodes in {scope_label}...")
         self._start_thread(
             worker,
             self._on_preflight_finished,
@@ -728,9 +945,20 @@ class SearchTabWidget(QWidget):
         )
 
     def _on_search_finished(self, result) -> None:
+        from ..analysis.search import SearchResultsDocument
+
         self._last_result = result
         frame = result.hits.copy()
         frame["available"] = True
+        references = result.reference_rows.copy()
+        references.insert(0, "rank", 0)
+        references["available"] = True
+        self._result_document = SearchResultsDocument(
+            references=references,
+            hits=frame.copy(),
+            metadata=dict(result.metadata),
+            format_version=SEARCH_RESULTS_FORMAT_VERSION,
+        )
         self._set_result_frame(frame)
         omitted = len(result.omitted_candidate_file_ids)
         self._status_label.setText(
@@ -738,7 +966,9 @@ class SearchTabWidget(QWidget):
             f"{result.input_candidate_count:,} candidates; "
             f"{result.usable_candidate_count:,} usable; {omitted:,} omitted; "
             f"returned {len(result.hits):,}; retained "
-            f"{result.retained_node_count:,} node rows. Lower distance is more similar."
+            f"{result.retained_node_count:,} node rows from "
+            f"{result.metadata.get('candidate_scope_label', 'the selected scope')}. "
+            "Lower distance is more similar."
         )
 
     def _on_search_thread_finished(self) -> None:
@@ -784,13 +1014,48 @@ class SearchTabWidget(QWidget):
             table.setItem(row_index, 3, distance_item)
         table.setSortingEnabled(sorting)
         table.resizeRowsToContents()
+        self._update_heatmap_legend()
         self._update_button_states()
+
+    def _result_distance_domain(self) -> tuple[float, float] | None:
+        """Return the observed Pearson-distance range in the result table."""
+        if self._result_frame.empty or "pearson_distance" not in self._result_frame:
+            return None
+        try:
+            return pearson_distance_color_domain(
+                self._result_frame["pearson_distance"]
+            )
+        except ValueError:
+            return None
+
+    def _update_heatmap_legend(self) -> None:
+        """Describe the result-table range used for Search heatmap colors."""
+        distance_domain = self._result_distance_domain()
+        if distance_domain is None:
+            message = (
+                "Reference heatmaps are magenta. Result heatmap color uses the "
+                "full result table: white/yellow = closest; dark red = farthest. "
+                "Scored Voxels shows the filtered search input; Whole Neuron "
+                "shows all valid, in-atlas source voxels."
+            )
+        else:
+            distance_min, distance_max = distance_domain
+            message = (
+                "Reference heatmaps are magenta. Result heatmap color uses the "
+                "full result-table range "
+                f"{distance_min:.6g}–{distance_max:.6g}: white/yellow = closest; "
+                "dark red = farthest. Scored Voxels shows the filtered search "
+                "input; Whole Neuron shows all valid, in-atlas source voxels."
+            )
+        self._heatmap_legend.setText(message)
 
     def _clear_results(self) -> None:
         self._last_result = None
+        self._result_document = None
         self._result_frame = pd.DataFrame()
         self._results_table.clearContents()
         self._results_table.setRowCount(0)
+        self._update_heatmap_legend()
         self._update_button_states()
 
     def _selected_result_rows(self) -> list[int]:
@@ -833,6 +1098,221 @@ class SearchTabWidget(QWidget):
     def _add_all_results(self) -> None:
         self._emit_add_request(self._result_frame["file_id"].astype(str).tolist())
 
+    def _annotate_search_in_data(self) -> None:
+        document = self._result_document
+        if document is None or document.hits.empty:
+            return
+        from ..analysis.search import SearchAnnotationRequest
+
+        references = document.references
+        hits = document.hits
+        unavailable: list[str] = []
+        for frame in (references, hits):
+            if "available" in frame:
+                unavailable.extend(
+                    frame.loc[~frame["available"].astype(bool), "file_id"]
+                    .astype(str)
+                    .tolist()
+                )
+        raw_tags = document.metadata.get("filter_tags", ())
+        filter_tags = tuple(str(value) for value in raw_tags)
+        if not filter_tags:
+            filter_tags = ("Search filters: unavailable (version 1 CSV)",)
+        request = SearchAnnotationRequest(
+            reference_file_ids=tuple(references["file_id"].astype(str).tolist()),
+            ranked_hits=tuple(
+                (str(row.file_id), int(row.rank))
+                for row in hits.sort_values("rank").itertuples(index=False)
+            ),
+            filter_tags=filter_tags,
+            unavailable_file_ids=tuple(dict.fromkeys(unavailable)),
+        )
+        self.annotate_search_requested.emit(request)
+
+    def _selected_result_file_ids(self) -> list[str]:
+        file_ids: list[str] = []
+        for row in self._selected_result_rows():
+            item = self._results_table.item(row, 2)
+            if item is not None:
+                file_ids.append(str(item.data(Qt.UserRole) or item.text()))
+        return file_ids
+
+    def _add_selected_search_heatmaps(
+        self,
+        voxel_mode: str = SEARCH_HEATMAP_MODE_SCORED,
+    ) -> None:
+        selected = self._selected_result_file_ids()
+        if not selected:
+            self._status_label.setText(
+                "Select at least one Search result row to create heatmaps."
+            )
+            return
+        self._emit_search_heatmap_request(selected, voxel_mode=voxel_mode)
+
+    def _add_all_search_heatmaps(
+        self,
+        voxel_mode: str = SEARCH_HEATMAP_MODE_SCORED,
+    ) -> None:
+        self._emit_search_heatmap_request(
+            self._result_frame["file_id"].astype(str).tolist(),
+            voxel_mode=voxel_mode,
+        )
+
+    def _emit_search_heatmap_request(
+        self,
+        file_ids: list[str],
+        *,
+        voxel_mode: str = SEARCH_HEATMAP_MODE_SCORED,
+    ) -> None:
+        document = self._result_document
+        if document is None or self._atlas is None or self._heatmap_busy:
+            return
+        if document.format_version < SEARCH_RESULTS_FORMAT_VERSION:
+            self._status_label.setText(
+                "Version 1 Search CSVs do not contain recoverable reference "
+                "neurons; rerun the search first."
+            )
+            return
+        from ..analysis.search import (
+            SEARCH_REFERENCE_HEATMAP_RGBA,
+            SEARCH_ROW_REFERENCE,
+            SEARCH_ROW_RESULT,
+            SearchHeatmapLayerRequest,
+            SearchHeatmapRequest,
+            cluster_region_filter_from_dict,
+            pearson_distance_to_hot_rgba,
+            voxel_node_filter_from_dict,
+        )
+
+        references = document.references
+        if references.empty:
+            self._status_label.setText(
+                "This Search result has no recoverable reference neurons."
+            )
+            return
+        requested = {str(value) for value in file_ids}
+        hits = document.hits[
+            document.hits["file_id"].astype(str).isin(requested)
+        ].sort_values("rank")
+        if hits.empty:
+            self._status_label.setText("No Search result heatmaps were requested.")
+            return
+        requested_rows = pd.concat([references, hits], ignore_index=True)
+        if "available" in requested_rows:
+            unavailable = requested_rows.loc[
+                ~requested_rows["available"].astype(bool), "file_id"
+            ].astype(str)
+            if not unavailable.empty:
+                self._status_label.setText(
+                    "Cannot create Search heatmaps because these file_id values "
+                    "are unavailable: " + ", ".join(unavailable.tolist()[:10])
+                )
+                return
+        metadata = dict(document.metadata)
+        resolution = metadata.get("resolution_um")
+        if resolution is None:
+            self._status_label.setText(
+                "This Search result lacks voxel-resolution context; rerun the search."
+            )
+            return
+        current_resolution = float(self._atlas.resolution[0])
+        try:
+            saved_resolution = float(resolution)
+        except (TypeError, ValueError):
+            self._status_label.setText(
+                "This Search result has invalid voxel-resolution context; "
+                "rerun the search."
+            )
+            return
+        if not np.isfinite(saved_resolution) or not np.isclose(
+            saved_resolution,
+            current_resolution,
+        ):
+            self._status_label.setText(
+                "Cannot create Search heatmaps because the completed search "
+                f"used {saved_resolution:g} μm voxels but the current atlas "
+                f"uses {current_resolution:g} μm voxels."
+            )
+            return
+        saved_atlas_name = metadata.get("atlas_name")
+        current_atlas_name = getattr(self._atlas, "atlas_name", None)
+        if (
+            saved_atlas_name
+            and current_atlas_name
+            and str(saved_atlas_name) != str(current_atlas_name)
+        ):
+            self._status_label.setText(
+                "Cannot create Search heatmaps because the completed search "
+                f"used atlas {saved_atlas_name!s}, while the current atlas is "
+                f"{current_atlas_name!s}."
+            )
+            return
+        region_filter = None
+        voxel_filter = None
+        if voxel_mode == SEARCH_HEATMAP_MODE_SCORED:
+            try:
+                region_filter = cluster_region_filter_from_dict(
+                    metadata.get("region_filter")
+                )
+                voxel_filter = voxel_node_filter_from_dict(
+                    metadata.get("voxel_node_filter")
+                )
+            except (TypeError, ValueError, KeyError) as error:
+                self._status_label.setText(
+                    f"Could not reconstruct Search heatmap filters: {error}"
+                )
+                return
+
+        distance_domain = self._result_distance_domain()
+        if distance_domain is None:
+            self._status_label.setText(
+                "Cannot create Search heatmaps because the result table has no "
+                "finite Pearson distances."
+            )
+            return
+        metadata["heatmap_distance_color_domain"] = list(distance_domain)
+        metadata["heatmap_distance_color_basis"] = "completed_result_table"
+        metadata["heatmap_reference_color"] = "magenta"
+        metadata["heatmap_reference_rgba"] = list(SEARCH_REFERENCE_HEATMAP_RGBA)
+        metadata["heatmap_voxel_mode"] = voxel_mode
+        metadata["heatmap_filters_applied"] = (
+            voxel_mode == SEARCH_HEATMAP_MODE_SCORED
+        )
+        layers = [
+            SearchHeatmapLayerRequest(
+                file_ids=tuple(references["file_id"].astype(str).tolist()),
+                role=SEARCH_ROW_REFERENCE,
+                rank=0,
+                pearson_distance=None,
+                color=SEARCH_REFERENCE_HEATMAP_RGBA,
+            )
+        ]
+        layers.extend(
+            SearchHeatmapLayerRequest(
+                file_ids=(str(row.file_id),),
+                role=SEARCH_ROW_RESULT,
+                rank=int(row.rank),
+                pearson_distance=float(row.pearson_distance),
+                color=pearson_distance_to_hot_rgba(
+                    float(row.pearson_distance),
+                    distance_domain=distance_domain,
+                ),
+            )
+            for row in hits.itertuples(index=False)
+        )
+        request = SearchHeatmapRequest(
+            layers=tuple(layers),
+            region_filter=region_filter,
+            voxel_node_filter=voxel_filter,
+            resolution_um=saved_resolution,
+            metadata=metadata,
+            distance_color_domain=distance_domain,
+            voxel_mode=voxel_mode,
+        )
+        self._heatmap_busy = True
+        self._update_button_states()
+        self.search_heatmaps_requested.emit(request)
+
     def _save_results_csv(self) -> None:
         if self._result_frame.empty:
             return
@@ -847,7 +1327,10 @@ class SearchTabWidget(QWidget):
         from ..analysis.search import export_search_results_csv
 
         try:
-            saved = export_search_results_csv(output_path, self._result_frame)
+            saved = export_search_results_csv(
+                output_path,
+                self._result_document or self._result_frame,
+            )
         except Exception as error:  # noqa: BLE001 - report file-system/CSV failures in UI
             self._status_label.setText(f"Could not save search results: {error}")
             return
@@ -868,7 +1351,7 @@ class SearchTabWidget(QWidget):
         from ..analysis.search import load_search_results_csv
 
         try:
-            frame = load_search_results_csv(
+            document = load_search_results_csv(
                 input_path,
                 available_file_ids=self._available_file_ids,
             )
@@ -876,10 +1359,16 @@ class SearchTabWidget(QWidget):
             self._status_label.setText(f"Could not load search results: {error}")
             return
         self._last_result = None
-        self._set_result_frame(frame)
-        unavailable = int((~frame["available"].astype(bool)).sum())
+        self._result_document = document
+        self._set_result_frame(document.hits)
+        unavailable = sum(
+            int((~frame["available"].astype(bool)).sum())
+            for frame in (document.references, document.hits)
+            if "available" in frame
+        )
         self._status_label.setText(
-            f"Loaded {len(frame):,} result(s) from {Path(input_path).name}; "
+            f"Loaded {len(document.references):,} reference(s) and "
+            f"{len(document.hits):,} result(s) from {Path(input_path).name}; "
             f"{unavailable:,} unavailable in the loaded Parquet."
         )
 
@@ -903,8 +1392,34 @@ class SearchTabWidget(QWidget):
         self._add_selected_btn.setEnabled(
             has_results and bool(self._selected_result_rows()) and not busy
         )
+        self._annotate_btn.setEnabled(has_results and not busy)
+        heatmap_ready = (
+            has_results
+            and not busy
+            and not self._heatmap_busy
+            and self._atlas is not None
+            and self._result_document is not None
+            and self._result_document.format_version
+            >= SEARCH_RESULTS_FORMAT_VERSION
+            and not self._result_document.references.empty
+        )
+        self._heatmap_btn.setEnabled(heatmap_ready)
+        for action in (
+            self._heatmap_scored_all_action,
+            self._heatmap_whole_all_action,
+        ):
+            action.setEnabled(heatmap_ready)
+        selected_heatmap_ready = heatmap_ready and bool(
+            self._selected_result_rows()
+        )
+        for action in (
+            self._heatmap_scored_selected_action,
+            self._heatmap_whole_selected_action,
+        ):
+            action.setEnabled(selected_heatmap_ready)
         self._save_csv_btn.setEnabled(has_results and not busy)
         self._load_csv_btn.setEnabled(self._db is not None and not busy)
         self._reference_section.setEnabled(not busy)
         self._filter_section.setEnabled(not busy)
+        self._scope_combo.setEnabled(not busy)
         self._top_n_spin.setEnabled(not busy)

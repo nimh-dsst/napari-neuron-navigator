@@ -2388,7 +2388,7 @@ def _write_search_worker_parquet(path: Path) -> None:
             "subject": ["subject"] * 4,
             "node_id": [1, 2, 1, 1],
             "parent_id": [-1, 1, -1, -1],
-            "type": [2, 2, 2, 2],
+            "type": [2, 3, 2, 3],
             "x": [0.0, 0.0, 0.0, 1.0],
             "y": [0.0] * 4,
             "z": [0.0] * 4,
@@ -2482,3 +2482,109 @@ def test_search_worker_reports_errors(tmp_path):
 
     assert finished == []
     assert len(errors) == 1
+
+
+def test_search_heatmap_worker_emits_filtered_volumes_in_request_order(tmp_path):
+    from napari_neuron_navigator.analysis.search import (
+        SearchHeatmapLayerRequest,
+        SearchHeatmapRequest,
+    )
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    atlas = types.SimpleNamespace(
+        annotation=np.zeros((3, 2, 2), dtype=np.uint16),
+        resolution=(1.0, 1.0, 1.0),
+    )
+    request = SearchHeatmapRequest(
+        layers=(
+            SearchHeatmapLayerRequest(
+                file_ids=("ref",),
+                role="reference",
+                rank=0,
+                pearson_distance=None,
+                color=(1.0, 1.0, 1.0, 1.0),
+            ),
+            SearchHeatmapLayerRequest(
+                file_ids=("similar",),
+                role="search_result",
+                rank=1,
+                pearson_distance=0.0,
+                color=(1.0, 1.0, 1.0, 1.0),
+            ),
+        ),
+        region_filter=None,
+        voxel_node_filter=VoxelNodeFilter(
+            node_type_mode="include",
+            node_types=(2,),
+        ),
+        resolution_um=1.0,
+    )
+    worker = workers.SearchHeatmapWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        request=request,
+    )
+    volumes = []
+    finished = []
+    errors = []
+    worker.volume_ready.connect(lambda index, volume: volumes.append((index, volume)))
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert finished == [2]
+    assert [index for index, _volume in volumes] == [0, 1]
+    assert [float(volume.sum()) for _index, volume in volumes] == [1.0, 1.0]
+
+
+def test_search_heatmap_worker_whole_neuron_mode_bypasses_search_filters(tmp_path):
+    from napari_neuron_navigator.analysis.search import (
+        SEARCH_HEATMAP_MODE_WHOLE,
+        SearchHeatmapLayerRequest,
+        SearchHeatmapRequest,
+    )
+
+    workers = _import_workers_module()
+    path = tmp_path / "search.parquet"
+    _write_search_worker_parquet(path)
+    atlas = types.SimpleNamespace(
+        annotation=np.zeros((3, 2, 2), dtype=np.uint16),
+        resolution=(1.0, 1.0, 1.0),
+    )
+    request = SearchHeatmapRequest(
+        layers=(
+            SearchHeatmapLayerRequest(
+                file_ids=("ref",),
+                role="reference",
+                rank=0,
+                pearson_distance=None,
+                color=(1.0, 0.0, 1.0, 1.0),
+            ),
+        ),
+        region_filter=None,
+        voxel_node_filter=VoxelNodeFilter(
+            node_type_mode="include",
+            node_types=(2,),
+        ),
+        resolution_um=1.0,
+        voxel_mode=SEARCH_HEATMAP_MODE_WHOLE,
+    )
+    worker = workers.SearchHeatmapWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        request=request,
+    )
+    volumes = []
+    errors = []
+    worker.volume_ready.connect(lambda _index, volume: volumes.append(volume))
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == []
+    assert len(volumes) == 1
+    assert float(volumes[0].sum()) == 2.0

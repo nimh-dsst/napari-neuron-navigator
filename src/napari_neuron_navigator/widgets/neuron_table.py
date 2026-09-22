@@ -248,6 +248,33 @@ class AppendSummary:
         """Return the number of requested neurons already in the table."""
         return len(self.already_present_file_ids)
 
+
+@dataclass(frozen=True)
+class NeuronMetadataUpdate:
+    """Optional metadata fields applied to one existing neuron row."""
+
+    label: str | None = None
+    group: str | None = None
+    tags: tuple[str, ...] = ()
+    replace_tag_prefix: str | None = None
+
+
+@dataclass(frozen=True)
+class MetadataUpdateSummary:
+    """Outcome of one batch metadata update."""
+
+    updated_file_ids: tuple[object, ...] = ()
+    missing_file_ids: tuple[object, ...] = ()
+
+    @property
+    def updated_count(self) -> int:
+        return len(self.updated_file_ids)
+
+    @property
+    def missing_count(self) -> int:
+        return len(self.missing_file_ids)
+
+
 class NeuronTableWidget(QWidget):
     """Interactive table for neuron selection, color editing, and visibility.
 
@@ -1093,6 +1120,74 @@ class NeuronTableWidget(QWidget):
         return AppendSummary(
             added_file_ids=added_ids,
             already_present_file_ids=already_present,
+        )
+
+    def apply_metadata_updates(
+        self,
+        updates: Mapping[object, NeuronMetadataUpdate],
+    ) -> MetadataUpdateSummary:
+        """Apply label/group/tag changes to existing rows as one transaction."""
+        if not updates:
+            return MetadataUpdateSummary()
+        row_map = self._file_id_to_row_map()
+        string_ids = {str(file_id): file_id for file_id in self._entries}
+        sorting_enabled = self._table.isSortingEnabled()
+        signals_blocked = self._table.blockSignals(True)
+        self._table.setSortingEnabled(False)
+        updated: list[object] = []
+        missing: list[object] = []
+        try:
+            for requested_id, update in updates.items():
+                file_id = requested_id
+                entry = self._entries.get(file_id)
+                if entry is None:
+                    resolved = string_ids.get(str(requested_id))
+                    if resolved is not None:
+                        file_id = resolved
+                        entry = self._entries.get(resolved)
+                if entry is None:
+                    missing.append(requested_id)
+                    continue
+
+                if update.label is not None:
+                    entry.label = str(update.label).strip()
+                if update.group is not None:
+                    entry.group = str(update.group).strip()
+                retained_tags = list(entry.tags)
+                if update.replace_tag_prefix is not None:
+                    retained_tags = [
+                        tag
+                        for tag in retained_tags
+                        if not str(tag).startswith(update.replace_tag_prefix)
+                    ]
+                entry.tags = tuple(
+                    dict.fromkeys(
+                        str(tag).strip()
+                        for tag in (*retained_tags, *update.tags)
+                        if str(tag).strip()
+                    )
+                )
+
+                row = row_map.get(file_id)
+                if row is not None:
+                    self._set_text_cell(row, COL_LABEL, entry.label, editable=True)
+                    self._set_text_cell(row, COL_GROUP, entry.group, editable=True)
+                    self._set_text_cell(
+                        row,
+                        COL_TAGS,
+                        self._tags_display(entry.tags),
+                        editable=True,
+                    )
+                updated.append(file_id)
+        finally:
+            self._table.setSortingEnabled(sorting_enabled)
+            self._table.blockSignals(signals_blocked)
+
+        if updated:
+            self.state_changed.emit()
+        return MetadataUpdateSummary(
+            updated_file_ids=tuple(updated),
+            missing_file_ids=tuple(missing),
         )
 
     def remove_file_ids(

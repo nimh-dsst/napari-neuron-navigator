@@ -440,6 +440,53 @@ def test_neuron_table_append_file_ids_preserves_state_and_deduplicates() -> None
     assert widget.get_selected_file_ids() == ["n1"]
 
 
+def test_apply_metadata_updates_replaces_only_managed_search_tags() -> None:
+    module = _import_neuron_table_module()
+    entry = module.NeuronEntry(
+        file_id="n1",
+        color=[0.1, 0.2, 0.3, 1.0],
+        visible=False,
+        label="old",
+        group="old group",
+        tags=("keep", "Search filters: old"),
+        notes="preserve",
+    )
+    widget = _make_widget(module, {"n1": entry})
+    cell_updates = []
+    widget._set_text_cell = (
+        lambda row, column, text, *, editable: cell_updates.append(
+            (row, column, text, editable)
+        )
+    )
+
+    summary = widget.apply_metadata_updates(
+        {
+            "n1": module.NeuronMetadataUpdate(
+                label="Rank 1",
+                group="search result",
+                tags=("Search scope: Current Table", "Search filters: none"),
+                replace_tag_prefix="Search ",
+            ),
+            "missing": module.NeuronMetadataUpdate(group="reference"),
+        }
+    )
+
+    assert summary.updated_file_ids == ("n1",)
+    assert summary.missing_file_ids == ("missing",)
+    assert entry.label == "Rank 1"
+    assert entry.group == "search result"
+    assert entry.tags == (
+        "keep",
+        "Search scope: Current Table",
+        "Search filters: none",
+    )
+    assert entry.notes == "preserve"
+    assert entry.color == [0.1, 0.2, 0.3, 1.0]
+    assert entry.visible is False
+    assert len(cell_updates) == 3
+    assert len(widget.state_changed.calls) == 1
+
+
 def test_neuron_table_sort_by_cluster_delegates_to_cluster_column_sort() -> None:
     module = _import_neuron_table_module()
     widget = _make_widget(

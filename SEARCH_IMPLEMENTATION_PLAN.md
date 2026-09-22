@@ -1,10 +1,412 @@
 # Similar-Neuron Search Implementation Plan
 
-> Implementation status (2026-09-22): implemented. Automated tests cover the
-> analysis, import/export, Data-table append, and worker paths; the manual
-> napari workflow in UC-020 remains unverified.
+> Implementation status (2026-09-22): releases 1 and 2 are implemented.
+> Automated tests cover search scoring and scope, versioned import/export,
+> Data-table append and annotation, filtered heatmap construction and layer
+> metadata, and worker paths. The expanded manual napari workflow in UC-020
+> remains unverified, so its status is still **Not run**.
 
-## Outcome
+## Release 2: Scope, Annotation, and Distance Heatmaps
+
+### Outcome
+
+Extend the released Search tab so a completed search is a reusable, visible
+cohort rather than only a ranked list. Users can restrict the candidate pool to
+the whole Parquet, the current Data table, or selected Data rows; export both
+the references and matches; add and annotate the complete search cohort in the
+Data table; and create CCFv3 heatmaps whose colors communicate similarity to
+the search reference.
+
+None of these actions changes the Pearson scorer. References and per-neuron
+data remain keyed only by `file_id`.
+
+### Recommended Product Decisions
+
+#### Candidate scope
+
+- Add **Input neurons:** with the same choices and ordering as Analysis:
+  **Whole Parquet**, **Current Table**, and **Selected Rows**.
+- Scope restricts candidate neurons only. A reference may sit outside the
+  candidate scope and must still contribute its complete filtered query vector.
+  References that also occur in the scope remain excluded from ranked hits.
+- Snapshot the Current Table or Selected Rows `file_id` values when **Run
+  Search** is clicked. Later table or selection changes cannot affect a running
+  search or the completed result.
+- A scoped search needs at least one non-reference candidate. This differs from
+  Analysis clustering, which needs at least two input neurons.
+- Keep the single-reference selector backed by the whole-Parquet catalog. Do
+  not silently narrow it when candidate scope changes.
+- Keep the existing Search region and voxel-filter settings when scope changes,
+  but clear an active dendrite-label cohort restriction. The coverage scan must
+  be rerun against the new scope, just as it is in Analysis.
+- Status and export metadata record the resolved scope label and candidate
+  count. For example: `Current Table (37 rows; 35 non-reference candidates)`.
+
+Use a Search-owned scope resolver rather than calling private Analysis widget
+methods. `NeuronViewerWidget` should provide both the current-table and
+selected-row callbacks to Search. The resolved IDs populate the existing
+`VoxelSearchRequest.candidate_file_ids`; `None` continues to mean Whole
+Parquet. The analysis core already unions references into the filtered source
+view, so an out-of-scope reference remains available without becoming a hit.
+
+#### Reference rows in CSV
+
+Export references as actual CSV rows before the ranked hits:
+
+```text
+format_version,row_role,rank,file_id,neuron_id,subject,pearson_distance,...
+2,reference,0,<file_id>,<neuron_id>,<subject>,,
+2,search_result,1,<file_id>,<neuron_id>,<subject>,0.1234,
+```
+
+- Every captured reference gets `row_role=reference` and `rank=0`. Multiple
+  aggregate members therefore legitimately share rank zero.
+- Leave `pearson_distance` empty for reference rows. In aggregate mode an
+  individual member is not distance zero from the summed query, so writing
+  zero would be a false measurement.
+- Hits use `row_role=search_result`, retain ranks `1..N`, and require a finite
+  distance in `[0, 2]`.
+- Bump the export format to version 2. The loader accepts both version 1 and
+  version 2: version 1 imports as results with no recoverable references;
+  version 2 restores the reference set and completed-run context.
+- Reject a `file_id` duplicated within or across roles. Validate role/rank
+  consistency rather than inferring role from rank alone.
+- Preserve captured reference order in the exported row order. Aggregate
+  summation is order-independent, so all reference ranks remain zero.
+- Unknown reference and result IDs remain visible as unavailable after import
+  and are never resolved through `neuron_id`.
+
+Add enough compact run context to version 2 to reproduce annotations and
+filtered heatmaps after reopening the CSV. A `search_context_json` column
+repeats the same canonical, sorted JSON object on every row; this is redundant
+but survives row reordering and filtering better than storing it on only the
+first row. It should contain the candidate scope, resolution, region-filter
+rules, voxel-node filter, metric/policy names, and deterministic filter tags.
+The importer must require every non-empty context value in one file to match.
+Do not treat the source path in the context as identity for the currently
+loaded Parquet; availability is still checked by exact `file_id`.
+
+Represent a loaded document explicitly instead of returning one undifferentiated
+DataFrame. For example:
+
+```python
+@dataclass(frozen=True)
+class SearchResultsDocument:
+    references: pd.DataFrame
+    hits: pd.DataFrame
+    metadata: dict[str, object]
+    format_version: int
+```
+
+The live `VoxelSearchResult` should likewise carry reference catalog rows, not
+only `reference_file_ids`, so export never has to reverse-map a display ID.
+
+#### Add and annotate the search cohort
+
+Keep **Add Selected to Data** and **Add All Results to Data** unchanged. Add a
+separate explicit action named **Add & Annotate Search in Data**. It performs
+one parent-owned transaction:
+
+1. Append every available reference, in captured order, followed by every
+   available hit in rank order.
+2. Apply any saved/project table state to newly appended rows.
+3. Apply the current search annotations so this explicit action wins over old
+   saved metadata.
+4. Run the existing scene, heatmap-membership, cluster, and summary refreshes
+   once.
+
+Apply these exact annotations:
+
+| Search role | Group | Label |
+| --- | --- | --- |
+| Reference | `reference` | Preserve the existing label |
+| Ranked hit | `search result` | `Rank 1`, `Rank 2`, and so on |
+
+All cohort rows receive deterministic tags derived from the completed run, not
+from whatever controls happen to be visible later. Recommended tags are one
+atomic table tag per active term:
+
+```text
+Search scope: Current Table
+Search include: MOp (+10%)
+Search exclude: VISp
+Search node types: include 2|3
+Search dendrite labels: required
+Search soma distance: >=200 um
+```
+
+If no anatomical or voxel-node filter is active, add `Search filters: none`.
+Scope is recorded separately because it changes the candidate cohort rather
+than the vectors' row filtering.
+
+The annotation operation is intentionally idempotent. Preserve all tags that
+do not start with the managed `Search ` prefix, replace older managed Search
+tags on affected rows with the current run's tags, and de-duplicate tags while
+preserving order. The explicit action may replace a hit's existing **Group**
+and **Label** as described above; it must not change color, visibility, notes,
+cluster assignments, scene membership, or heatmap membership. A reference
+takes precedence if malformed imported data ever assigns the same ID both
+roles.
+
+Add a public batch metadata API to `NeuronTableWidget` rather than reaching
+into `_entries`, for example:
+
+```python
+def apply_metadata_updates(
+    self,
+    updates: Mapping[object, NeuronMetadataUpdate],
+) -> MetadataUpdateSummary: ...
+```
+
+It should disable sorting while updating, refresh visible cells, emit one
+`state_changed`, and return updated/missing counts. The Search-to-viewer signal
+should carry an immutable annotation request containing references, ranked
+hits, and filter tags rather than a bare list of IDs. The final status reports
+appended, already present, annotated, and unavailable counts separately.
+
+#### Pearson-distance heatmaps
+
+Add an **Add Search Heatmaps** menu with two explicit modes, each offering:
+
+- **Selected Results + Reference**
+- **All Results + Reference**
+
+The modes are:
+
+- **Scored Voxels**: apply the completed search's immutable region and
+  voxel-node filters so the layer shows exactly the node rows that contributed
+  to Pearson distance.
+- **Whole Neuron**: bypass those search filters and show every valid,
+  in-atlas source voxel for each requested neuron. The layer color still
+  represents the distance calculated from the scored voxels.
+
+The action snapshots the completed result and creates one heatmap for each
+requested hit. It also creates the corresponding query heatmap for visual
+comparison:
+
+- single-reference mode: one heatmap for that reference;
+- aggregate mode: one combined heatmap containing the summed filtered counts
+  of all reference members.
+
+The aggregate layer is preferable to one layer per member because hits were
+scored against the summed query, not against each member independently. Its
+metadata lists every reference `file_id`. Individual aggregate-member
+heatmaps can be considered later if users need to inspect contribution balance.
+
+**Scored Voxels** must use the same immutable region and voxel-node filters as
+the completed search. **Whole Neuron** is intentionally contextual rather than
+metric-exact, so its layer name and metadata must say that search filters were
+not applied. A reopened version-2 CSV may create either mode only when all
+requested IDs are present in the loaded Parquet and its reference set can be
+recovered. Version-1 imports lack recoverable references, so the action should
+explain that the search must be rerun.
+
+Each hit layer uses a transparent-to-fixed-color colormap: voxel count controls
+brightness/opacity, while the fixed RGB color encodes Pearson distance. Normalize
+against the observed minimum and maximum across the complete result table, even
+when the user renders only selected rows. This uses the available color range
+without making a selected subset change colors:
+
+```text
+normalized = 0 if table_max == table_min else
+             clip((pearson_distance - table_min) / (table_max - table_min), 0, 1)
+similarity = 1 - normalized
+hot_coordinate = 0.25 + 0.75 * similarity
+color = hot(hot_coordinate)
+```
+
+This deliberately reverses the distance direction: closer result neurons look
+hotter/brighter, while distant result neurons are dark red. Sampling `hot` no
+lower than `0.25` avoids the farthest result becoming black and effectively
+invisible with additive blending. If all table distances are equal, every
+result uses `hot(1.0)` because there is no relative distance difference to
+encode. The query layer uses fixed magenta, outside the result colorscale, and
+is named as a reference without claiming that aggregate members individually
+have distance zero. Show the observed table range near the action and explain
+that **magenta = reference; white/yellow = closest result; dark red = farthest
+result**.
+
+Use recognizable layer names such as:
+
+```text
+Search Reference (Scored Voxels) Heatmap
+Search Rank 1 (d=0.1234; Whole Neuron) Heatmap
+```
+
+Store `file_ids`, role, rank, exact distance, voxel mode, whether filters were
+applied, color mapping/domain, source search filters, and Search run context in
+layer metadata. Continue using additive blending and the individual-heatmap
+contrast policy so sparse projections remain visible. Do not recolor Data-table
+swatches; the search heatmap color is metric state, not the neuron's persistent
+display color.
+
+Reuse the existing sequential selected-neuron heatmap queue, layer lifecycle,
+and memory estimator where practical. Estimate retained memory for the query
+layer plus every requested hit before starting. Above the existing 1 GiB
+threshold, default the confirmation dialog to **Cancel**. Disable the Search
+heatmap action for the full queue, stop pending work after an error, retain any
+layers already completed, and report `completed/total`. Creating heatmaps must
+not implicitly add or annotate Data-table rows.
+
+### Implementation Design
+
+#### 1. Search models and portable format
+
+- Extend `VoxelSearchResult` with reference catalog rows and canonical run
+  context, while retaining `reference_file_ids` for convenient identity checks.
+- Add a pure filter-tag formatter shared by live results, CSV import/export,
+  and Data annotation. It formats `type = 2` as **Axon-typed (type 2)** if a
+  human-facing node-type name is used; never call it verified axon.
+- Add version-2 export composition: rank-zero references first, then hits.
+- Add a structured version-1/version-2 loader. Validate context JSON, roles,
+  ranks, distances, duplicate `file_id`, and availability independently.
+- Record the scope and exact snapshotted candidate IDs/counts in in-memory
+  metadata. Do not put the potentially large candidate-ID list in every CSV
+  row; the scope label and count are sufficient portable provenance.
+
+#### 2. Search scope UI and request building
+
+- Add `_current_table_file_ids_provider` and a setter to `SearchTabWidget`.
+- Add the scope combo above **Top results** with the exact Analysis labels.
+- Implement a Search-specific resolver returning candidate IDs, display label,
+  and input count. De-duplicate by exact stringified `file_id` while preserving
+  table/selection order.
+- On **Run Search**, resolve scope, reject empty/no-non-reference cohorts, and
+  construct one immutable request. Use that same candidate scope for preflight,
+  dendrite-label scanning, scoring, status, tags, and export metadata.
+- When scope changes, invalidate only scope-dependent dendrite coverage; do not
+  erase unrelated filter controls or the last completed result. Result actions
+  continue to use that result's stored context until a new search completes.
+
+#### 3. Data-table annotation handoff
+
+- Add immutable annotation/update models and the public batch table API.
+- Connect a new Search signal in `NeuronViewerWidget`.
+- Append available IDs, restore saved state, apply annotations, and perform one
+  normal membership refresh in the parent widget.
+- Return a structured summary to Search for user-visible counts. Unknown IDs
+  from an imported CSV are counted and skipped.
+
+#### 4. Search heatmap handoff
+
+- Add a Search heatmap request model containing the query IDs, selected hit
+  rows, exact filters, distance colors, and imported/live provenance.
+- Let `NeuronViewerWidget` own worker queues and napari layer creation; the
+  Search widget must not manipulate the viewer directly.
+- Extend the heatmap build path to accept Search's region and voxel-node
+  filters and to combine aggregate references before layer creation.
+- Add a pure, independently tested `pearson_distance_to_hot_rgba()` helper.
+- Tag layers distinctly from ordinary `selected_neurons` heatmaps so project
+  persistence and the existing **Heatmap** column can restore membership
+  without confusing their creation mode.
+
+#### 5. Documentation and manual validation
+
+- Expand UC-020 instead of creating a duplicate use case. Add scope,
+  rank-zero CSV rows, annotation, and distance-heatmap actions and boundary
+  behavior.
+- Leave UC-020 at **Not run** until all paths are exercised in napari. Record
+  the verification date and any partially tested OS/atlas combination.
+- Update the Search section in user documentation after UI labels stabilize.
+
+### Delivery Phases
+
+1. **Portable result context:** reference catalog rows, version-2 CSV,
+   version-1 compatibility, filter tags, and format tests.
+2. **Candidate scopes:** providers, combo/resolver, scoped coverage scan,
+   request snapshots, and scope-aware status.
+3. **Data annotations:** table batch API, parent-owned add/annotate transaction,
+   UI action, and project-state tests.
+4. **Distance heatmaps:** filtered heatmap requests, hot mapping, aggregate
+   reference layer, queue/memory handling, metadata, and UI action.
+5. **Validation and documentation:** focused tests, full `pixi run test`, visual
+   heatmap checks in napari, and UC-020/manual updates.
+
+CSV/context work comes first because both later actions need a durable
+distinction between references and ranked hits. Annotation precedes heatmaps
+because it is smaller and pins the role/rank semantics before visualization
+adds worker and memory concerns.
+
+### Automated Test Plan for Release 2
+
+#### Scope and scorer integration
+
+- Whole Parquet preserves release-1 results.
+- Current Table and Selected Rows pass exactly the snapshotted `file_id` cohort
+  in stable order; selection changes after launch do not change the request.
+- References outside the candidate scope still score correctly and never
+  appear as hits.
+- Empty scopes and scopes containing only references fail before a worker is
+  launched with actionable messages.
+- Repeated `neuron_id` values remain distinct because scope, query, and output
+  all use `file_id`.
+- Changing scope clears scope-dependent dendrite coverage, and the scan uses
+  the same cohort as the eventual search.
+
+#### CSV and context
+
+- Single and aggregate references export as rank-zero `reference` rows before
+  results, with blank reference distances.
+- Version-2 round trip preserves reference order, hit ranks/distances, scope,
+  filters, and availability.
+- Version-1 CSVs remain loadable as result-only documents.
+- Duplicate IDs across roles, bad role/rank pairs, non-empty reference
+  distances, invalid result distances, and conflicting context JSON fail with
+  corrective errors.
+- String-like numeric `file_id` values retain leading zeros.
+
+#### Data annotations
+
+- The action appends references first and hits in rank order, then assigns the
+  exact Group/Label values.
+- Existing non-Search tags, notes, colors, visibility, cluster assignments,
+  selection, scene state, and heatmap membership survive.
+- Older managed Search tags are replaced, the current tags are de-duplicated,
+  and repeating the action is idempotent.
+- Reference precedence is deterministic; unavailable imported IDs are skipped
+  and counted.
+- Sorting is restored and only one table state-change notification is emitted.
+
+#### Heatmaps
+
+- The query/reference layer uses fixed magenta and is not sampled from the
+  result-table distance colorscale.
+- Scored Voxels applies the completed run's exact filters, while Whole Neuron
+  bypasses them and retains all valid, in-atlas source voxels.
+- The result-table minimum, midpoint, and maximum map to the expected `hot`
+  samples, and color is monotonic from hotter/closer to darker/farther. A
+  selected subset retains the complete table's domain.
+- Each hit volume contains only its own nodes and follows its requested voxel
+  mode; aggregate reference counts equal the sum of its reference members.
+- Selected and All actions preserve rank order and always prepend one query
+  layer.
+- Layer names and metadata contain role, IDs, rank, exact distance, voxel mode,
+  filter-application state, source filters, and color mapping.
+- Memory estimation includes the query layer; cancelling above the threshold
+  creates no layer. Mid-queue errors retain completed layers and stop pending
+  requests with accurate status.
+- Search heatmaps do not add rows or change Data-table colors. Version-1
+  imports cannot silently create unfiltered heatmaps.
+
+### Release 2 Acceptance Criteria
+
+1. Search offers **Whole Parquet**, **Current Table**, and **Selected Rows** and
+   scores only the snapshotted non-reference candidates from that scope.
+2. Every exported reference is a rank-zero, explicitly typed CSV row, including
+   every member of an aggregate reference; older CSVs still load.
+3. One explicit action adds all available cohort neurons and assigns
+   `reference`, `search result`, `Rank N`, and completed-run filter tags without
+   damaging unrelated Data-table state.
+4. Selected or all ranked hits can be rendered with the actual query heatmap
+   as either metric-exact **Scored Voxels** or contextual **Whole Neuron**
+   layers, using a documented, result-table-normalized hot-distance mapping
+   where hotter means closer.
+5. Large heatmap batches are guarded by an accurate memory estimate, and all
+   background actions snapshot their inputs and report partial/error outcomes.
+6. Automated tests pass through `pixi run test`, and the expanded UC-020 is
+   manually exercised before its status changes from **Not run**.
+
+## Release 1 Outcome (Implemented)
 
 Add a top-level **Search** tab that ranks neurons by the same CCFv3 voxel-count
 Pearson distance used by **Analysis** > **Voxel Correlation**. A user can use one
@@ -438,16 +840,20 @@ The first release is complete when:
    silently disappearing.
 8. UC-020 has been exercised manually in napari and its status updated.
 
-## Explicitly Deferred
+## Still Deferred After Release 2
 
 - Flat map + Depth search and depth-collapsed flatmap search.
-- Candidate scopes other than Whole Parquet.
 - Per-reference weights or equal-neuron normalization before aggregation.
 - Boolean/nested query builders, saved named searches, and search histories.
 - Distance thresholds in addition to Top N.
 - Approximate-nearest-neighbor indexes and persistent vector caches.
 - Searching across multiple Parquet datasets.
-- Automatically rendering, clustering, tagging, or recoloring matches.
+- One separate heatmap per aggregate-reference member; release 2 renders the
+  summed query that candidates were actually scored against.
+- Automatically mutating the Data table or creating heatmaps as a side effect
+  of **Run Search**. Release 2 actions remain explicit.
+- Automatically clustering or recoloring persistent neuron display state from
+  search results.
 
-The analysis API should leave room for these additions, but none should block
-the focused first release.
+The analysis API should leave room for these additions, but they are not part
+of release 2.
