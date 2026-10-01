@@ -42,6 +42,60 @@ class VoxelSegmentPortion:
     voxel_index: tuple[int, int, int] | None
 
 
+@dataclass(frozen=True)
+class AtlasVoxelTraverser:
+    """Validated atlas geometry reusable across many cable segments."""
+
+    annotation: NDArray[np.integer]
+    resolution_um: float | Sequence[float] | NDArray[np.floating]
+    left_right_axis: int
+    midline_um: float
+
+    def __post_init__(self) -> None:
+        volume = np.asarray(self.annotation)
+        if volume.ndim != 3:
+            raise ValueError("annotation must be a three-dimensional array")
+        if not np.issubdtype(volume.dtype, np.integer):
+            raise ValueError("annotation labels must have an integer dtype")
+        axis = int(self.left_right_axis)
+        if not 0 <= axis < 3:
+            raise ValueError("left_right_axis must be 0, 1, or 2")
+        midline = float(self.midline_um)
+        if not math.isfinite(midline):
+            raise ValueError("midline_um must be finite")
+        object.__setattr__(self, "annotation", volume)
+        object.__setattr__(
+            self, "resolution_um", _resolution_vector(self.resolution_um)
+        )
+        object.__setattr__(self, "left_right_axis", axis)
+        object.__setattr__(self, "midline_um", midline)
+
+    def traverse(
+        self,
+        start_um: Sequence[float] | NDArray[np.floating],
+        stop_um: Sequence[float] | NDArray[np.floating],
+    ) -> tuple[VoxelSegmentPortion, ...]:
+        """Validate and split one segment using the prepared atlas geometry."""
+        start = _coordinate_vector(start_um, name="start_um")
+        stop = _coordinate_vector(stop_um, name="stop_um")
+        return self.traverse_validated(start, stop)
+
+    def traverse_validated(
+        self,
+        start_um: NDArray[np.float64],
+        stop_um: NDArray[np.float64],
+    ) -> tuple[VoxelSegmentPortion, ...]:
+        """Split finite ``(3,)`` float arrays without repeating atlas checks."""
+        return _traverse_prepared(
+            start_um,
+            stop_um,
+            self.annotation,
+            self.resolution_um,
+            left_right_axis=self.left_right_axis,
+            midline_um=self.midline_um,
+        )
+
+
 def _coordinate_vector(
     value: Sequence[float] | NDArray[np.floating],
     *,
@@ -107,9 +161,7 @@ def _deduplicate_parameters(parameters: list[float]) -> list[float]:
     unique: list[float] = []
     for parameter in parameters:
         tolerance = (
-            16.0 * max(math.ulp(parameter), math.ulp(unique[-1]))
-            if unique
-            else 0.0
+            16.0 * max(math.ulp(parameter), math.ulp(unique[-1])) if unique else 0.0
         )
         if not unique or parameter - unique[-1] > tolerance:
             unique.append(parameter)
@@ -172,19 +224,25 @@ def traverse_atlas_voxels(
     responsibility of the annotated source Parquet; this convention applies
     only to physical cable allocation.
     """
-    volume = np.asarray(annotation)
-    if volume.ndim != 3:
-        raise ValueError("annotation must be a three-dimensional array")
-    if not np.issubdtype(volume.dtype, np.integer):
-        raise ValueError("annotation labels must have an integer dtype")
-    if not 0 <= int(left_right_axis) < 3:
-        raise ValueError("left_right_axis must be 0, 1, or 2")
-    if not math.isfinite(float(midline_um)):
-        raise ValueError("midline_um must be finite")
+    traverser = AtlasVoxelTraverser(
+        annotation=annotation,
+        resolution_um=resolution_um,
+        left_right_axis=left_right_axis,
+        midline_um=midline_um,
+    )
+    return traverser.traverse(start_um, stop_um)
 
-    start = _coordinate_vector(start_um, name="start_um")
-    stop = _coordinate_vector(stop_um, name="stop_um")
-    resolution = _resolution_vector(resolution_um)
+
+def _traverse_prepared(
+    start: NDArray[np.float64],
+    stop: NDArray[np.float64],
+    volume: NDArray[np.integer],
+    resolution: NDArray[np.float64],
+    *,
+    left_right_axis: int,
+    midline_um: float,
+) -> tuple[VoxelSegmentPortion, ...]:
+    """Split one segment after atlas geometry and coordinates are validated."""
     delta = stop - start
     total_length = float(np.linalg.norm(delta))
     if total_length == 0.0:
@@ -198,9 +256,7 @@ def traverse_atlas_voxels(
 
     lr_axis = int(left_right_axis)
     lr_delta = float(delta[lr_axis])
-    segment_on_midline = (
-        float(start[lr_axis]) == float(midline_um) and lr_delta == 0.0
-    )
+    segment_on_midline = float(start[lr_axis]) == float(midline_um) and lr_delta == 0.0
     if lr_delta != 0.0:
         midline_parameter = (float(midline_um) - float(start[lr_axis])) / lr_delta
         if 0.0 < midline_parameter < 1.0:
@@ -215,9 +271,7 @@ def traverse_atlas_voxels(
         midpoint = start + midpoint_t * delta
         voxel = np.floor(midpoint / resolution).astype(np.int64)
         in_bounds = all(0 <= int(voxel[axis]) < shape[axis] for axis in range(3))
-        voxel_index = (
-            tuple(int(index) for index in voxel) if in_bounds else None
-        )
+        voxel_index = tuple(int(index) for index in voxel) if in_bounds else None
         region_id = int(volume[voxel_index]) if voxel_index is not None else 0
         portions.append(
             VoxelSegmentPortion(
@@ -245,6 +299,7 @@ def sum_portion_lengths(
 
 __all__ = [
     "AtlasAxisSide",
+    "AtlasVoxelTraverser",
     "VoxelSegmentPortion",
     "sum_portion_lengths",
     "traverse_atlas_voxels",

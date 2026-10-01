@@ -1,6 +1,6 @@
 # Regional Profile and Boolean Region Search Implementation Plan
 
-> Planning status (2026-09-24): Stage 0 complete; Stage 1 not started. This
+> Planning status (2026-10-01): Stages 0 and 1 complete; Stage 2 not started. This
 > document divides the work into independently reviewable stages. Finish and
 > validate each stage before beginning the next one; do not treat later-stage
 > acceptance criteria as evidence that an earlier stage is complete. Stage 0
@@ -488,6 +488,10 @@ an annotated neuron Parquet and a compatible loaded atlas.
   table.
 - No Regions-tab control depends on the new builder yet.
 
+Stage 1 satisfied these criteria on 2026-10-01. The implementation, real-data
+measurements, compatibility behavior, and automated evidence are recorded in
+`REGION_SEARCH_STAGE1_RESULTS.md`.
+
 ### Stage 2: Core Boolean Query Engine
 
 #### Outcome
@@ -813,7 +817,7 @@ state where appropriate, and document it as a repeatable user capability.
 | Stage | Deliverable | Status |
 | --- | --- | --- |
 | 0 | Semantics, fixtures, traversal prototype, budgets | Complete (2026-09-24) |
-| 1 | Regional-profile sidecar builder | Not started |
+| 1 | Regional-profile sidecar builder | Complete (2026-10-01) |
 | 2 | Core Boolean query engine | Not started |
 | 3 | Structured Regions-tab query builder | Not started |
 | 4 | Text query parser | Not started |
