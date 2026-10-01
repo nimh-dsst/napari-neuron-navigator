@@ -1,6 +1,6 @@
 # Regional Profile and Boolean Region Search Implementation Plan
 
-> Planning status (2026-10-01): Stages 0 and 1 complete; Stage 2 not started. This
+> Planning status (2026-10-01): Stages 0, 1, and 2 complete; Stage 3 not started. This
 > document divides the work into independently reviewable stages. Finish and
 > validate each stage before beginning the next one; do not treat later-stage
 > acceptance criteria as evidence that an earlier stage is complete. Stage 0
@@ -542,6 +542,10 @@ without Qt and return the repository's standard neuron catalog rows.
 - Query serialization round-trips without losing hierarchy or laterality
   semantics.
 
+Stage 2 satisfied these criteria on 2026-10-01. The headless API, query
+semantics, performance measurement, and automated evidence are recorded in
+`REGION_SEARCH_STAGE2_RESULTS.md`.
+
 ### Stage 3: Structured Query Builder in the Regions Tab
 
 #### Outcome
@@ -818,7 +822,7 @@ state where appropriate, and document it as a repeatable user capability.
 | --- | --- | --- |
 | 0 | Semantics, fixtures, traversal prototype, budgets | Complete (2026-09-24) |
 | 1 | Regional-profile sidecar builder | Complete (2026-10-01) |
-| 2 | Core Boolean query engine | Not started |
+| 2 | Core Boolean query engine | Complete (2026-10-01) |
 | 3 | Structured Regions-tab query builder | Not started |
 | 4 | Text query parser | Not started |
 | 5 | Sparse ML feature matrices | Not started |
