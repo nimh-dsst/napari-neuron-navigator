@@ -245,3 +245,5 @@ example_data_aligned/
 # records the findings; the raw data stays local.
 anisotropy_fix_data/
 *.xlsx
+*.swc
+*.xml

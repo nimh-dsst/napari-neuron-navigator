@@ -106,6 +106,24 @@ remain visible but cannot be added. Lower distance means a more similar spatial
 count pattern. `file_id` is always the neuron identity; `neuron_id` and
 `subject` are display fields only.
 
+## Compound Regional-Profile Queries
+
+The **Regions** tab includes **Compound Region Query** alongside the existing
+Atlas Regions, Custom Regions, and Mask Layer modes. Its structured editor can
+combine soma location with non-soma neurite intersection, cable length, node
+count, termini, and soma-relative ipsilateral or contralateral conditions using
+nested AND, OR, and NOT groups. Queries can use the **Whole Parquet** or
+**Current Table** scope and always identify neurons by `file_id`.
+
+Compound queries read a compact `source.region_profile.parquet` sidecar. Use
+**Build Regional Profile** in the editor when a compatible sidecar is missing;
+construction is cancellable and runs in the background. The sidecar is
+validated against both the loaded source Parquet and atlas before each query.
+Queries also run in the background and expose **Cancel Query** without changing
+the current Data table.
+See [UC-021](USE_CASES.md#uc-021-build-and-run-a-compound-regional-profile-query)
+for the repeatable workflow and expected behavior.
+
 ### Running Tests
 
 To run the test suite:

@@ -46,6 +46,7 @@ Unless a use case says otherwise:
 | [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
 | [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Not run |
+| [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Build a regional profile and combine soma, neurite, laterality, and measurement conditions in the Regions tab | Partially run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2506,6 +2507,111 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   Search-distance color transfer, distance-color/layer metadata, append
   semantics, flatmap rectangular-grid/depth-mode parity, and background
   workers. Manual napari verification is still required.
+
+### UC-021: Build and Run a Compound Regional-Profile Query
+
+**Capability**
+
+The user can build a validated regional-profile sidecar for the loaded neuron
+Parquet and use it to find neurons with nested Boolean combinations of soma
+location, non-soma neurite intersection, cable length, node count, termini,
+and soma-relative laterality. The structured builder keeps this workflow in
+the existing **Regions** tab and sends matches through the same **Data** table
+path as the existing simple Atlas, Custom, and Mask queries.
+
+**Prerequisites**
+
+- Load an Allen mouse atlas that matches the CCFv3 coordinates and
+  `region_id` annotations in the neuron Parquet.
+- Use a neuron Parquet with valid `file_id`, `node_id`, `parent_id`, `type`,
+  `x`, `y`, `z`, and `region_id` columns.
+- Include neurons whose somas occupy MOp5 or MOs5 and whose non-soma neurites
+  intersect contralateral CP or ipsilateral pons so both example queries have
+  an independently known result.
+- To test **Current Table**, first populate **Data** > **Selected Neurons**
+  with a mixture of matching and non-matching `file_id` values.
+
+**Steps and expected results**
+
+1. **Action:** In **Regions**, set **Query source** to **Compound Region
+   Query** before loading a Parquet or atlas.
+   **Expected:** The structured editor explains that it uses Soma versus
+   Projection (all non-soma neurites). The raw **Node types** control is hidden,
+   and the profile status explains which prerequisite is missing.
+2. **Action:** Load the prerequisite Parquet and atlas, then return to
+   **Compound Region Query**.
+   **Expected:** The editor offers **Build Regional Profile**. If the default
+   sidecar already exists, the status names it and explains that compatibility
+   will be validated before execution.
+3. **Action:** Click **Build Regional Profile**, observe its progress, and test
+   **Cancel Build** once before completing a subsequent build.
+   **Expected:** Construction runs without blocking napari, progress describes
+   the active phase, and cancellation stops at a safe checkpoint without
+   replacing an older valid sidecar. A completed build reports neuron count,
+   sparse row count, and elapsed time.
+4. **Action:** In the first condition, choose **Soma** > **In region**, click
+   **Edit Regions...**, select MOp5 and MOs5, and confirm the picker.
+   **Expected:** One shared hierarchy picker opens and restores the clause's
+   exact direct region selection when reopened. The canonical query updates to
+   show the two soma regions.
+5. **Action:** Click **Add**, set the new condition to **Projection (all
+   non-soma neurites)** > **Intersects**, **Contralateral**, and select CP with
+   descendants. Keep **Combine with** set to **AND**.
+   **Expected:** Only controls applicable to the selected subject and condition
+   are visible. The canonical query reads as a motor-soma condition AND a
+   contralateral CP neurite-intersection condition. The active clause drives
+   the existing mesh or segmentation preview when that preview is enabled.
+6. **Action:** Use **Duplicate**, **Group**, **Add Group**, **NOT group**, and
+   **Remove** to create and then simplify a nested AND/OR expression.
+   **Expected:** Every clause retains its own region selection. Nested groups
+   and negation are reflected immediately in the canonical structured query,
+   and removing or duplicating one clause does not alter another clause's
+   regions.
+7. **Action:** In **Custom Regions**, select one or more terminal custom
+   regions. Return to **Compound Region Query**, activate a condition, and
+   click **Use Custom Selection**.
+   **Expected:** The selected terminal numeric atlas IDs are copied into that
+   condition as direct regions. They are not inferred from display acronyms and
+   do not change another condition.
+8. **Action:** Set **Search scope** to **Whole Parquet**, click **Run Compound
+   Region Query** for the two-clause contralateral CP query, and exercise
+   **Cancel Query** once before completing a subsequent run.
+   **Expected:** The sidecar is validated against the source and atlas before
+   evaluation. The query runs in the background; cancellation interrupts it
+   without changing Data. A completed run replaces the Data-table query result
+   and reports matched neurons, scope, canonical query, profile identity,
+   atlas, unavailable catalog IDs, and runtime. Results are unique by `file_id`
+   even when display `neuron_id` values repeat.
+9. **Action:** Repopulate Data, set **Search scope** to **Current Table**, and
+   run the same query. Then clear Data and try again.
+   **Expected:** The populated run restricts and retains only matching current
+   `file_id` rows while preserving their existing table state. An empty table
+   produces an actionable message and does not start work or alter Data.
+10. **Action:** Change the second clause to **Ipsilateral** pons and rerun. Then
+    switch atlases or replace the source Parquet with one incompatible with the
+    sidecar and try again.
+    **Expected:** The motivating ipsilateral pons query returns its known
+    fixture membership. Atlas changes refresh valid clause labels and clear
+    clause selections containing unavailable numeric IDs. A missing, stale, or
+    incompatible profile blocks the query without altering Data and directs
+    the user to **Build Regional Profile**.
+11. **Action:** Switch **Query source** back to **Atlas Regions**, **Custom
+    Regions**, and **Mask Layer**, and repeat one existing simple query in each
+    mode.
+    **Expected:** Existing selectors, the raw **Node types** control, mask
+    behavior, scope behavior, previews, and Data-table results retain their
+    prior semantics.
+
+**Manual verification**
+
+- Status: Partially run
+- Last verified: 2026-10-01
+- Notes: The core compound regional-profile workflow was exercised manually in
+  napari and behaved as expected. The full set of documented cases, including
+  cancellation, stale or incompatible sidecars, atlas changes, empty-table
+  handling, and regression checks for every existing query mode, was not run.
+  Stage 3 also has headless model, worker, scope, table-handoff, and
+  existing-mode regression coverage.
 
 ## Use-Case Template
 

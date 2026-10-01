@@ -2635,3 +2635,214 @@ def test_search_heatmap_worker_whole_neuron_mode_bypasses_search_filters(tmp_pat
     assert errors == []
     assert len(volumes) == 1
     assert float(volumes[0].sum()) == 2.0
+
+
+def test_regional_profile_build_worker_forwards_progress_and_result(
+    monkeypatch,
+    tmp_path,
+):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.analysis.region_profile as profile_module
+
+    metadata = object()
+    calls = []
+
+    def fake_build(source_path, atlas, *, cancel_check, progress_callback):
+        calls.append((Path(source_path), atlas, cancel_check()))
+        progress_callback("Building batch 1 of 2...", 1, 2)
+        return metadata
+
+    monkeypatch.setattr(profile_module, "build_region_profile", fake_build)
+    atlas = object()
+    worker = workers.RegionalProfileBuildWorker(tmp_path / "source.parquet", atlas)
+    progress = []
+    finished = []
+    cancelled = []
+    errors = []
+    worker.progress.connect(lambda *args: progress.append(args))
+    worker.finished.connect(finished.append)
+    worker.cancelled.connect(cancelled.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert calls == [(tmp_path / "source.parquet", atlas, False)]
+    assert progress == [("Building batch 1 of 2...", 1, 2)]
+    assert finished == [metadata]
+    assert cancelled == []
+    assert errors == []
+
+
+def test_regional_profile_build_worker_cancellation_is_distinct_from_error(
+    monkeypatch,
+    tmp_path,
+):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.analysis.region_profile as profile_module
+
+    def fake_build(_source_path, _atlas, *, cancel_check, progress_callback):
+        _ = progress_callback
+        assert cancel_check()
+        raise profile_module.RegionProfileBuildCancelled("cancelled safely")
+
+    monkeypatch.setattr(profile_module, "build_region_profile", fake_build)
+    worker = workers.RegionalProfileBuildWorker(
+        tmp_path / "source.parquet",
+        object(),
+    )
+    cancelled = []
+    errors = []
+    worker.cancelled.connect(cancelled.append)
+    worker.error.connect(errors.append)
+    worker.cancel()
+
+    worker.run()
+
+    assert cancelled == ["cancelled safely"]
+    assert errors == []
+
+
+def test_regional_query_worker_uses_worker_owned_engine_and_scope(
+    monkeypatch,
+    tmp_path,
+):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.analysis.region_query as query_module
+
+    query = object()
+    scope = object()
+    atlas = object()
+    catalog = pd.DataFrame(
+        {"file_id": ["a"], "neuron_id": ["n"], "subject": ["s"]}
+    )
+    result = object()
+    calls = []
+
+    class FakeEngine:
+        def __init__(self, connection, **kwargs):
+            calls.append((connection, kwargs))
+
+        def execute(self, received_query, *, scope):
+            calls.append((received_query, scope))
+            return result
+
+    monkeypatch.setattr(query_module, "RegionQueryEngine", FakeEngine)
+    worker = workers.RegionalQueryWorker(
+        source_path=tmp_path / "source.parquet",
+        sidecar_path=tmp_path / "source.region_profile.parquet",
+        atlas=atlas,
+        catalog=catalog,
+        query=query,
+        scope=scope,
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert calls[0][1]["source_path"] == tmp_path / "source.parquet"
+    assert calls[0][1]["sidecar_path"] == (
+        tmp_path / "source.region_profile.parquet"
+    )
+    assert calls[0][1]["atlas"] is atlas
+    pd.testing.assert_frame_equal(calls[0][1]["catalog"], catalog)
+    assert calls[1] == (query, scope)
+    assert finished == [result]
+    assert errors == []
+
+
+def test_regional_query_worker_loads_catalog_inside_worker(
+    monkeypatch,
+    tmp_path,
+):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.analysis.region_query as query_module
+    import napari_neuron_navigator.db as db_module
+
+    catalog = pd.DataFrame(
+        {"file_id": ["a"], "neuron_id": ["n"], "subject": ["s"]}
+    )
+    source_path = tmp_path / "source.parquet"
+    calls = []
+
+    class FakeDatabase:
+        def __init__(self, path):
+            calls.append(("database", Path(path)))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def get_neuron_catalog(self):
+            calls.append(("catalog",))
+            return catalog
+
+    class FakeEngine:
+        def __init__(self, _connection, **kwargs):
+            calls.append(("engine", kwargs["catalog"]))
+
+        def execute(self, _query, *, scope):
+            calls.append(("execute", scope))
+            return "result"
+
+    monkeypatch.setattr(db_module, "NeuronDatabase", FakeDatabase)
+    monkeypatch.setattr(query_module, "RegionQueryEngine", FakeEngine)
+    worker = workers.RegionalQueryWorker(
+        source_path=source_path,
+        sidecar_path=tmp_path / "source.region_profile.parquet",
+        atlas=object(),
+        query=object(),
+        scope="whole",
+    )
+    finished = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert calls[:2] == [("database", source_path), ("catalog",)]
+    pd.testing.assert_frame_equal(calls[2][1], catalog)
+    assert calls[3] == ("execute", "whole")
+    assert finished == ["result"]
+    assert errors == []
+
+
+def test_regional_query_worker_cancels_before_catalog_or_query(
+    monkeypatch,
+    tmp_path,
+):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.analysis.region_query as query_module
+
+    def fail_engine(*_args, **_kwargs):
+        raise AssertionError("a pre-cancelled worker must not create an engine")
+
+    monkeypatch.setattr(query_module, "RegionQueryEngine", fail_engine)
+    worker = workers.RegionalQueryWorker(
+        source_path=tmp_path / "source.parquet",
+        sidecar_path=tmp_path / "source.region_profile.parquet",
+        atlas=object(),
+        catalog=pd.DataFrame(
+            {"file_id": ["a"], "neuron_id": ["n"], "subject": ["s"]}
+        ),
+        query=object(),
+        scope=object(),
+    )
+    finished = []
+    cancelled = []
+    errors = []
+    worker.finished.connect(finished.append)
+    worker.cancelled.connect(cancelled.append)
+    worker.error.connect(errors.append)
+
+    worker.cancel()
+    worker.run()
+
+    assert finished == []
+    assert cancelled == ["Compound regional query was cancelled."]
+    assert errors == []

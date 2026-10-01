@@ -13,6 +13,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -286,6 +287,132 @@ class AtlasLoadWorker(QObject):
         except Exception as e:
             logger.exception("Atlas load failed")
             self.error.emit(str(e))
+
+
+class RegionalProfileBuildWorker(QObject):
+    """Build a regional-profile sidecar without blocking the Qt event loop."""
+
+    progress = Signal(str, int, int)
+    finished = Signal(object)
+    cancelled = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, source_path: str | Path, atlas: object):
+        super().__init__()
+        self._source_path = Path(source_path)
+        self._atlas = atlas
+        self._cancel_event = Event()
+
+    def cancel(self) -> None:
+        """Request cancellation at the next safe builder checkpoint."""
+        self._cancel_event.set()
+
+    def run(self) -> None:
+        """Build, validate, and atomically publish the default sidecar."""
+        from .analysis.region_profile import (
+            RegionProfileBuildCancelled,
+            build_region_profile,
+        )
+
+        try:
+            metadata = build_region_profile(
+                self._source_path,
+                self._atlas,
+                cancel_check=self._cancel_event.is_set,
+                progress_callback=lambda message, completed, total: self.progress.emit(
+                    str(message), int(completed), int(total)
+                ),
+            )
+            self.finished.emit(metadata)
+        except RegionProfileBuildCancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            logger.exception("Regional-profile build failed")
+            self.error.emit(str(exc))
+
+
+class RegionalQueryWorker(QObject):
+    """Validate a regional profile and execute one immutable query snapshot."""
+
+    finished = Signal(object)
+    cancelled = Signal(str)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        source_path: str | Path,
+        sidecar_path: str | Path,
+        atlas: object,
+        query: object,
+        scope: object,
+        catalog=None,
+    ) -> None:
+        super().__init__()
+        self._source_path = Path(source_path)
+        self._sidecar_path = Path(sidecar_path)
+        self._atlas = atlas
+        self._catalog = None if catalog is None else catalog.copy()
+        self._query = query
+        self._scope = scope
+        self._cancel_event = Event()
+        self._connection = None
+
+    def cancel(self) -> None:
+        """Request cancellation and interrupt an active DuckDB operation."""
+        self._cancel_event.set()
+        connection = self._connection
+        interrupt = getattr(connection, "interrupt", None)
+        if callable(interrupt):
+            try:
+                interrupt()
+            except Exception:
+                logger.debug(
+                    "Could not interrupt the regional-query connection",
+                    exc_info=True,
+                )
+
+    def run(self) -> None:
+        """Run profile registration and querying on a worker-owned connection."""
+        import duckdb
+
+        from .analysis.region_query import RegionQueryEngine
+        from .db import NeuronDatabase
+
+        connection = duckdb.connect()
+        self._connection = connection
+        try:
+            if self._cancel_event.is_set():
+                self.cancelled.emit("Compound regional query was cancelled.")
+                return
+            catalog = self._catalog
+            if catalog is None:
+                with NeuronDatabase(self._source_path) as database:
+                    catalog = database.get_neuron_catalog()
+            if self._cancel_event.is_set():
+                self.cancelled.emit("Compound regional query was cancelled.")
+                return
+            engine = RegionQueryEngine(
+                connection,
+                sidecar_path=self._sidecar_path,
+                source_path=self._source_path,
+                atlas=self._atlas,
+                catalog=catalog,
+            )
+            result = engine.execute(self._query, scope=self._scope)
+            if self._cancel_event.is_set():
+                self.cancelled.emit("Compound regional query was cancelled.")
+            else:
+                self.finished.emit(result)
+        except Exception as exc:
+            if self._cancel_event.is_set():
+                self.cancelled.emit("Compound regional query was cancelled.")
+            else:
+                logger.exception("Compound regional query failed")
+                self.error.emit(str(exc))
+        finally:
+            self._connection = None
+            connection.close()
 
 
 def _attach_cluster_run_metadata(

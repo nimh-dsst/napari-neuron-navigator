@@ -1,7 +1,7 @@
 # Regional Profile and Boolean Region Search Implementation Plan
 
-> Planning status (2026-10-01): Stages 0, 1, and 2 complete; Stage 3 not started. This
-> document divides the work into independently reviewable stages. Finish and
+> Planning status (2026-10-01): Stages 0 through 3 complete; Stage 4 not started.
+> This document divides the work into independently reviewable stages. Finish and
 > validate each stage before beginning the next one; do not treat later-stage
 > acceptance criteria as evidence that an earlier stage is complete. Stage 0
 > decisions and measurements are recorded in
@@ -626,6 +626,11 @@ the UI must clearly identify which clause is being previewed.
 - No second, inconsistent atlas hierarchy implementation is introduced.
 - Existing Regions-tab automated tests remain green.
 
+Stage 3 satisfied these criteria on 2026-10-01. The structured editor,
+background build/query integration, cancellation behavior, scope and Data-table
+handoff, automated evidence, and outstanding manual verification are recorded
+in `REGION_SEARCH_STAGE3_RESULTS.md` and `USE_CASES.md` UC-021.
+
 ### Stage 4: Text Query Input and Canonical Parsing
 
 #### Outcome
@@ -823,7 +828,7 @@ state where appropriate, and document it as a repeatable user capability.
 | 0 | Semantics, fixtures, traversal prototype, budgets | Complete (2026-09-24) |
 | 1 | Regional-profile sidecar builder | Complete (2026-10-01) |
 | 2 | Core Boolean query engine | Complete (2026-10-01) |
-| 3 | Structured Regions-tab query builder | Not started |
+| 3 | Structured Regions-tab query builder | Complete (2026-10-01) |
 | 4 | Text query parser | Not started |
 | 5 | Sparse ML feature matrices | Not started |
 | 6 | Optimization, persistence, and documentation | Not started |

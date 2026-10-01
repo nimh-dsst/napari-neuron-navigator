@@ -124,10 +124,12 @@ logger = logging.getLogger(__name__)
 _REGION_QUERY_SOURCE_ATLAS = "Atlas Regions"
 _REGION_QUERY_SOURCE_CUSTOM = "Custom Regions"
 _REGION_QUERY_SOURCE_MASK = "Mask Layer"
+_REGION_QUERY_SOURCE_COMPOUND = "Compound Region Query"
 
 _REGION_QUERY_PAGE_ATLAS = 0
 _REGION_QUERY_PAGE_CUSTOM = 1
 _REGION_QUERY_PAGE_MASK = 2
+_REGION_QUERY_PAGE_COMPOUND = 3
 
 _FLATMAP_LAYER_SPACE_KEY = "napari_neuron_navigator_space"
 _LEGACY_FLATMAP_LAYER_SPACE_KEY = "napari_swc_viewer_space"
@@ -703,6 +705,13 @@ class NeuronViewerWidget(QWidget):
             self._cached_atlas_worker = None
             self._atlas_load_thread: QThread | None = None
             self._atlas_load_worker = None
+            self._regional_profile_thread: QThread | None = None
+            self._regional_profile_worker = None
+            self._regional_profile_source_path: str | None = None
+            self._regional_profile_atlas_object: object | None = None
+            self._regional_query_thread: QThread | None = None
+            self._regional_query_worker = None
+            self._regional_query_snapshot: dict[str, object] | None = None
             self._pending_reference_action: str | None = None
             self._show_template_after_cached_atlas_load = False
 
@@ -1174,6 +1183,20 @@ class NeuronViewerWidget(QWidget):
 
     def _on_neuron_viewer_destroyed(self, *_args) -> None:
         """Release all plugin-owned flatmap viewers during widget teardown."""
+        cancel_profile = getattr(
+            getattr(self, "_regional_profile_worker", None),
+            "cancel",
+            None,
+        )
+        if callable(cancel_profile):
+            cancel_profile()
+        cancel_query = getattr(
+            getattr(self, "_regional_query_worker", None),
+            "cancel",
+            None,
+        )
+        if callable(cancel_query):
+            cancel_query()
         try:
             self._retire_closed_flatmap_viewers()
             viewers = list(getattr(self, "_flatmap_viewers", ()))
@@ -2227,6 +2250,7 @@ class NeuronViewerWidget(QWidget):
                 _REGION_QUERY_SOURCE_ATLAS,
                 _REGION_QUERY_SOURCE_CUSTOM,
                 _REGION_QUERY_SOURCE_MASK,
+                _REGION_QUERY_SOURCE_COMPOUND,
             ]
         )
         self._region_query_source_combo.currentTextChanged.connect(
@@ -2250,11 +2274,13 @@ class NeuronViewerWidget(QWidget):
         scope_row.addWidget(self._region_query_scope_combo)
         layout.addLayout(scope_row)
 
-        node_type_row = QHBoxLayout()
+        self._region_node_type_controls = QWidget()
+        node_type_row = QHBoxLayout(self._region_node_type_controls)
+        node_type_row.setContentsMargins(0, 0, 0, 0)
         node_type_row.addWidget(QLabel("Node types:"))
         self._region_node_type_combo = NodeTypeSelectorComboBox()
         node_type_row.addWidget(self._region_node_type_combo)
-        layout.addLayout(node_type_row)
+        layout.addWidget(self._region_node_type_controls)
 
         self._region_query_stack = QStackedWidget()
 
@@ -2348,6 +2374,26 @@ class NeuronViewerWidget(QWidget):
         mask_layout.addStretch()
         self._region_query_stack.addWidget(mask_page)
 
+        from .compound_region_query import CompoundRegionQueryWidget
+
+        compound_page = QWidget()
+        compound_layout = QVBoxLayout(compound_page)
+        compound_layout.setContentsMargins(0, 0, 0, 0)
+        self._compound_region_query = CompoundRegionQueryWidget(
+            custom_selection_provider=self._compound_custom_region_selection,
+        )
+        self._compound_region_query.active_selection_changed.connect(
+            self._on_compound_region_selection_changed
+        )
+        self._compound_region_query.build_profile_requested.connect(
+            self._start_regional_profile_build
+        )
+        self._compound_region_query.cancel_profile_requested.connect(
+            self._cancel_regional_profile_build
+        )
+        compound_layout.addWidget(self._compound_region_query)
+        self._region_query_stack.addWidget(compound_page)
+
         layout.addWidget(self._region_query_stack)
 
         query_btn_row = QHBoxLayout()
@@ -2357,6 +2403,12 @@ class NeuronViewerWidget(QWidget):
         )
         self._region_query_find_btn.setEnabled(False)
         query_btn_row.addWidget(self._region_query_find_btn)
+        self._region_query_cancel_btn = QPushButton("Cancel Query")
+        self._region_query_cancel_btn.clicked.connect(
+            self._cancel_regional_query
+        )
+        self._region_query_cancel_btn.setVisible(False)
+        query_btn_row.addWidget(self._region_query_cancel_btn)
         layout.addLayout(query_btn_row)
 
         clear_table_row = QHBoxLayout()
@@ -2907,6 +2959,11 @@ class NeuronViewerWidget(QWidget):
         if search_tab is not None:
             search_tab.set_database(self._db)
         self._termini_section_widget.set_database(self._db)
+        profile_status_refresher = getattr(
+            self, "_refresh_regional_profile_status", None
+        )
+        if callable(profile_status_refresher):
+            profile_status_refresher()
         self._regions_status_label.setText("")
         flatmap_tab = getattr(self, "_flatmap_tab", None)
         invalidate_flatmap = getattr(
@@ -3745,6 +3802,11 @@ class NeuronViewerWidget(QWidget):
             ) as selector_timing:
                 set_atlas(atlas)
                 selector_timing.set(items=len(getattr(selector, "_items_by_id", {})))
+        compound_query = getattr(self, "_compound_region_query", None)
+        set_compound_atlas = getattr(compound_query, "set_atlas", None)
+        if callable(set_compound_atlas):
+            set_compound_atlas(atlas)
+            self._refresh_regional_profile_status()
         self._set_custom_region_hierarchy_for_atlas(atlas)
         appearance_editor = getattr(self, "_region_appearance_editor", None)
         if appearance_editor is not None:
@@ -6406,15 +6468,21 @@ class NeuronViewerWidget(QWidget):
             _REGION_QUERY_SOURCE_ATLAS: _REGION_QUERY_PAGE_ATLAS,
             _REGION_QUERY_SOURCE_CUSTOM: _REGION_QUERY_PAGE_CUSTOM,
             _REGION_QUERY_SOURCE_MASK: _REGION_QUERY_PAGE_MASK,
+            _REGION_QUERY_SOURCE_COMPOUND: _REGION_QUERY_PAGE_COMPOUND,
         }.get(text, _REGION_QUERY_PAGE_ATLAS)
         self._region_query_stack.setCurrentIndex(page_index)
         self._sync_region_query_scope_selector()
+        node_type_controls = getattr(self, "_region_node_type_controls", None)
+        if node_type_controls is not None:
+            node_type_controls.setVisible(text != _REGION_QUERY_SOURCE_COMPOUND)
         find_button = getattr(self, "_region_query_find_btn", None)
         if find_button is not None:
             if text == _REGION_QUERY_SOURCE_MASK:
                 find_button.setText("Find Neurons in Selected Mask Layers")
             elif text == _REGION_QUERY_SOURCE_CUSTOM:
                 find_button.setText("Find Neurons in Selected Custom Regions")
+            elif text == _REGION_QUERY_SOURCE_COMPOUND:
+                find_button.setText("Run Compound Region Query")
             else:
                 find_button.setText("Find Neurons in Selected Regions")
         else:
@@ -6427,6 +6495,7 @@ class NeuronViewerWidget(QWidget):
         if text in {
             _REGION_QUERY_SOURCE_ATLAS,
             _REGION_QUERY_SOURCE_CUSTOM,
+            _REGION_QUERY_SOURCE_COMPOUND,
         }:
             self._sync_active_region_reference_layers()
         refresh_appearance = getattr(self, "_refresh_region_appearance_selection", None)
@@ -6446,6 +6515,7 @@ class NeuronViewerWidget(QWidget):
         ) in {
             _REGION_QUERY_SOURCE_ATLAS,
             _REGION_QUERY_SOURCE_CUSTOM,
+            _REGION_QUERY_SOURCE_COMPOUND,
         }:
             self._sync_active_region_reference_layers()
         refresh_appearance = getattr(self, "_refresh_region_appearance_selection", None)
@@ -6579,8 +6649,42 @@ class NeuronViewerWidget(QWidget):
             return ()
         return tuple(get_groups())
 
+    def _compound_custom_region_selection(self):
+        """Return active Custom terminal IDs in the shared query value model."""
+        groups = self._active_custom_region_groups()
+        region_ids = tuple(
+            dict.fromkeys(
+                int(region_id)
+                for group in groups
+                for region_id in group.region_ids
+            )
+        )
+        if not region_ids or self._atlas is None:
+            return None
+        from ..analysis.region_query import RegionSelection
+
+        return RegionSelection.from_ids(
+            region_ids,
+            structures=self._atlas.structures,
+            include_descendants=False,
+        )
+
     def _active_region_preview_acronyms(self) -> list[str]:
         """Return directly selected atlas acronyms for preview layers."""
+        if (
+            getattr(self, "_region_query_source", _REGION_QUERY_SOURCE_ATLAS)
+            == _REGION_QUERY_SOURCE_COMPOUND
+        ):
+            compound = getattr(self, "_compound_region_query", None)
+            getter = getattr(compound, "active_region_selection", None)
+            selection = getter() if callable(getter) else None
+            if selection is None:
+                return []
+            return [
+                region.acronym
+                for region in selection.regions
+                if region.acronym
+            ]
         selector = self._active_region_selector()
         if selector is None:
             return []
@@ -6618,6 +6722,11 @@ class NeuronViewerWidget(QWidget):
             return sorted(
                 {int(region_id) for region_id in get_selected() if int(region_id) > 0}
             )
+        if source == _REGION_QUERY_SOURCE_COMPOUND:
+            compound = getattr(self, "_compound_region_query", None)
+            getter = getattr(compound, "active_region_selection", None)
+            selection = getter() if callable(getter) else None
+            return [] if selection is None else sorted(selection.region_ids)
         if source != _REGION_QUERY_SOURCE_ATLAS:
             return []
 
@@ -6644,6 +6753,8 @@ class NeuronViewerWidget(QWidget):
             _REGION_QUERY_SOURCE_ATLAS,
         )
         if source == _REGION_QUERY_SOURCE_CUSTOM:
+            return self._active_flatmap_region_ids()
+        if source == _REGION_QUERY_SOURCE_COMPOUND:
             return self._active_flatmap_region_ids()
         if source != _REGION_QUERY_SOURCE_ATLAS:
             return []
@@ -6683,6 +6794,8 @@ class NeuronViewerWidget(QWidget):
                 for region_id in self._active_flatmap_region_ids()
                 if region_id in acronym_by_id
             ]
+        if source == _REGION_QUERY_SOURCE_COMPOUND:
+            return self._active_region_preview_acronyms()
         if source != _REGION_QUERY_SOURCE_ATLAS:
             return []
 
@@ -6706,6 +6819,7 @@ class NeuronViewerWidget(QWidget):
             _REGION_QUERY_SOURCE_ATLAS: "atlas_regions",
             _REGION_QUERY_SOURCE_CUSTOM: "custom_regions",
             _REGION_QUERY_SOURCE_MASK: "mask_layer",
+            _REGION_QUERY_SOURCE_COMPOUND: "atlas_regions",
         }.get(source, "atlas_regions")
 
     def _active_flatmap_region_scope(self) -> str:
@@ -6763,7 +6877,12 @@ class NeuronViewerWidget(QWidget):
         )
         root_ids = (
             self._active_flatmap_parent_region_ids()
-            if source in {_REGION_QUERY_SOURCE_ATLAS, _REGION_QUERY_SOURCE_CUSTOM}
+            if source
+            in {
+                _REGION_QUERY_SOURCE_ATLAS,
+                _REGION_QUERY_SOURCE_CUSTOM,
+                _REGION_QUERY_SOURCE_COMPOUND,
+            }
             else []
         )
         editor.set_selection(root_ids)
@@ -6900,8 +7019,394 @@ class NeuronViewerWidget(QWidget):
         for button in buttons:
             button.setEnabled(enabled)
 
+    def _regional_profile_sidecar_path(self) -> Path | None:
+        """Return the default sidecar path for the loaded node Parquet."""
+        if self._db is None:
+            return None
+        from ..analysis.region_profile import default_region_profile_path
+
+        return default_region_profile_path(self._db.parquet_path)
+
+    def _refresh_regional_profile_status(self) -> None:
+        """Show cheap sidecar availability without scanning source node rows."""
+        editor = getattr(self, "_compound_region_query", None)
+        setter = getattr(editor, "set_profile_status", None)
+        if not callable(setter):
+            return
+        if self._db is None:
+            setter(
+                "Load a neuron Parquet before building a regional profile.",
+                build_enabled=False,
+            )
+            return
+        if self._atlas is None:
+            setter(
+                "Load a compatible Allen atlas before building a regional profile.",
+                build_enabled=False,
+            )
+            return
+        sidecar = self._regional_profile_sidecar_path()
+        if sidecar is not None and sidecar.exists():
+            setter(
+                f"Found {sidecar.name}. Source and atlas compatibility will be "
+                "validated before the query runs."
+            )
+        else:
+            setter(
+                "No regional profile is available for this Parquet and atlas. "
+                "Build it before running the compound query."
+            )
+
+    def _set_regional_query_busy(self, busy: bool, *, building: bool = False) -> None:
+        """Keep Regions controls consistent during a profile/query worker run."""
+        editor = getattr(self, "_compound_region_query", None)
+        setter = getattr(editor, "set_busy", None)
+        if callable(setter):
+            setter(busy, building=building)
+        cancel_button = getattr(self, "_region_query_cancel_btn", None)
+        if cancel_button is not None:
+            query_active = bool(busy and not building)
+            cancel_button.setVisible(query_active)
+            cancel_button.setEnabled(query_active)
+        self._set_region_query_buttons_enabled(not busy and self._db is not None)
+
+    def _on_compound_region_selection_changed(self, _selection: object) -> None:
+        """Preview the active compound clause without changing query semantics."""
+        if (
+            getattr(self, "_region_query_source", _REGION_QUERY_SOURCE_ATLAS)
+            != _REGION_QUERY_SOURCE_COMPOUND
+        ):
+            return
+        if hasattr(self, "_regions_status_label"):
+            self._regions_status_label.setText("")
+        self._sync_active_region_reference_layers()
+        refresh_appearance = getattr(self, "_refresh_region_appearance_selection", None)
+        if callable(refresh_appearance):
+            refresh_appearance()
+
+    def _start_regional_profile_build(self) -> None:
+        """Start cancellable sidecar construction in a dedicated QThread."""
+        if self._regional_profile_thread is not None:
+            return
+        if self._regional_query_thread is not None:
+            self._regions_status_label.setText(
+                "Wait for the active compound query to finish before rebuilding its profile."
+            )
+            return
+        if self._db is None or self._atlas is None:
+            self._refresh_regional_profile_status()
+            return
+
+        from ..workers import RegionalProfileBuildWorker
+
+        source_path = Path(self._db.parquet_path)
+        sidecar = self._regional_profile_sidecar_path()
+        thread = QThread()
+        worker = RegionalProfileBuildWorker(source_path, self._atlas)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_regional_profile_progress)
+        worker.finished.connect(self._on_regional_profile_finished)
+        worker.cancelled.connect(self._on_regional_profile_cancelled)
+        worker.error.connect(self._on_regional_profile_error)
+        worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda: self._cleanup_regional_profile_thread(thread, worker)
+        )
+        self._regional_profile_thread = thread
+        self._regional_profile_worker = worker
+        self._regional_profile_source_path = str(source_path)
+        self._regional_profile_atlas_object = self._atlas
+        self._set_regional_query_busy(True, building=True)
+        message = (
+            f"Building regional profile {sidecar.name}..."
+            if sidecar is not None
+            else "Building regional profile..."
+        )
+        self._regions_status_label.setText(message)
+        editor = getattr(self, "_compound_region_query", None)
+        progress = getattr(editor, "set_profile_progress", None)
+        if callable(progress):
+            progress(message, 0, 0)
+        thread.start()
+
+    def _cancel_regional_profile_build(self) -> None:
+        """Request cancellation without deleting a previous valid sidecar."""
+        worker = self._regional_profile_worker
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+            self._regions_status_label.setText(
+                "Cancelling regional-profile construction at the next safe checkpoint..."
+            )
+
+    def _on_regional_profile_progress(
+        self,
+        message: str,
+        completed: int,
+        total: int,
+    ) -> None:
+        editor = getattr(self, "_compound_region_query", None)
+        progress = getattr(editor, "set_profile_progress", None)
+        if callable(progress):
+            progress(message, completed, total)
+        self._regions_status_label.setText(str(message))
+
+    def _on_regional_profile_finished(self, metadata: object) -> None:
+        current_source = None if self._db is None else str(self._db.parquet_path)
+        if (
+            current_source != self._regional_profile_source_path
+            or self._atlas is not self._regional_profile_atlas_object
+        ):
+            self._set_regional_query_busy(False)
+            self._refresh_regional_profile_status()
+            return
+        summary = getattr(metadata, "build_summary", None)
+        neurons = int(getattr(summary, "neuron_count", 0))
+        profile_rows = int(getattr(summary, "profile_row_count", 0))
+        elapsed = float(getattr(summary, "elapsed_seconds", 0.0))
+        message = (
+            f"Regional profile ready: {neurons:,} neurons, "
+            f"{profile_rows:,} sparse rows in {elapsed:.3f} s."
+        )
+        self._regions_status_label.setText(message)
+        editor = getattr(self, "_compound_region_query", None)
+        setter = getattr(editor, "set_profile_status", None)
+        if callable(setter):
+            setter(message)
+        self._set_regional_query_busy(False)
+
+    def _on_regional_profile_cancelled(self, message: str) -> None:
+        text = str(message).strip() or "Regional-profile construction was cancelled."
+        self._regions_status_label.setText(text)
+        self._set_regional_query_busy(False)
+        self._refresh_regional_profile_status()
+
+    def _on_regional_profile_error(self, message: str) -> None:
+        text = f"Regional-profile build failed: {message}"
+        self._regions_status_label.setText(text)
+        editor = getattr(self, "_compound_region_query", None)
+        setter = getattr(editor, "set_profile_status", None)
+        if callable(setter):
+            setter(text)
+        self._set_regional_query_busy(False)
+
+    def _cleanup_regional_profile_thread(
+        self,
+        thread: QThread,
+        worker: object,
+    ) -> None:
+        if self._regional_profile_thread is thread:
+            self._regional_profile_thread = None
+        if self._regional_profile_worker is worker:
+            self._regional_profile_worker = None
+            self._regional_profile_source_path = None
+            self._regional_profile_atlas_object = None
+
+    def _run_compound_region_query(self) -> None:
+        """Snapshot and launch one structured regional-profile query."""
+        if self._regional_query_thread is not None:
+            return
+        if self._regional_profile_thread is not None:
+            self._regions_status_label.setText(
+                "Wait for regional-profile construction to finish before querying."
+            )
+            return
+        if self._db is None or self._atlas is None:
+            self._regions_status_label.setText(
+                "Load a neuron Parquet and compatible Allen atlas before querying."
+            )
+            return
+        editor = getattr(self, "_compound_region_query", None)
+        query_getter = getattr(editor, "query", None)
+        canonical_getter = getattr(editor, "canonical_query", None)
+        if not callable(query_getter):
+            return
+        from ..analysis.region_query import RegionQueryValidationError
+
+        try:
+            query = query_getter()
+            canonical = canonical_getter() if callable(canonical_getter) else ""
+        except RegionQueryValidationError as exc:
+            self._regions_status_label.setText(f"Compound query is incomplete: {exc}")
+            return
+
+        proceed, base_file_ids, scope_label, input_count = (
+            self._resolve_region_query_file_scope()
+        )
+        if not proceed:
+            return
+        sidecar = self._regional_profile_sidecar_path()
+        if sidecar is None or not sidecar.exists():
+            self._regions_status_label.setText(
+                "No regional profile is available. Click Build Regional Profile, "
+                "then run the compound query again."
+            )
+            self._refresh_regional_profile_status()
+            return
+
+        from ..analysis.region_query import QueryScope
+        from ..workers import RegionalQueryWorker
+
+        scope = (
+            QueryScope.whole_parquet()
+            if base_file_ids is None
+            else QueryScope.explicit(base_file_ids)
+        )
+        self._regional_query_snapshot = {
+            "preserve_existing": base_file_ids is not None,
+            "scope_label": scope_label,
+            "input_count": input_count,
+            "canonical": canonical,
+            "source_path": str(self._db.parquet_path),
+            "atlas_object": self._atlas,
+        }
+        thread = QThread()
+        worker = RegionalQueryWorker(
+            source_path=self._db.parquet_path,
+            sidecar_path=sidecar,
+            atlas=self._atlas,
+            query=query,
+            scope=scope,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_regional_query_finished)
+        worker.cancelled.connect(self._on_regional_query_cancelled)
+        worker.error.connect(self._on_regional_query_error)
+        worker.finished.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda: self._cleanup_regional_query_thread(thread, worker)
+        )
+        self._regional_query_thread = thread
+        self._regional_query_worker = worker
+        self._set_regional_query_busy(True)
+        self._regions_status_label.setText(
+            "Validating the regional profile and running the compound query..."
+        )
+        thread.start()
+
+    def _cancel_regional_query(self) -> None:
+        """Interrupt the active profile query without changing the Data table."""
+        worker = self._regional_query_worker
+        cancel = getattr(worker, "cancel", None)
+        if callable(cancel):
+            cancel()
+            cancel_button = getattr(self, "_region_query_cancel_btn", None)
+            if cancel_button is not None:
+                cancel_button.setEnabled(False)
+            self._regions_status_label.setText(
+                "Cancelling the compound regional query..."
+            )
+
+    def _on_regional_query_finished(self, result: object) -> None:
+        snapshot = self._regional_query_snapshot or {}
+        current_source = None if self._db is None else str(self._db.parquet_path)
+        if (
+            current_source != snapshot.get("source_path")
+            or self._atlas is not snapshot.get("atlas_object")
+        ):
+            self._regions_status_label.setText(
+                "Discarded compound-query results because the loaded Parquet or "
+                "atlas changed while the query was running."
+            )
+            self._set_regional_query_busy(False)
+            return
+        rows = result.rows
+        self._populate_neuron_table(
+            rows,
+            preserve_existing=bool(snapshot.get("preserve_existing", False)),
+        )
+        metadata = result.metadata
+        scope_suffix = self._query_scope_status_suffix(
+            str(snapshot.get("scope_label", "whole parquet")),
+            snapshot.get("input_count"),
+        )
+        unavailable = len(metadata.missing_catalog_file_ids)
+        unavailable_text = (
+            f"; {unavailable} matched file_id value(s) were unavailable in the catalog"
+            if unavailable
+            else ""
+        )
+        canonical = str(snapshot.get("canonical", metadata.canonical_query))
+        message = (
+            f"Found {metadata.matched_count} neuron(s){scope_suffix} in "
+            f"{metadata.runtime_seconds:.3f} s{unavailable_text}. Query: {canonical}"
+        )
+        self._regions_status_label.setText(message)
+        editor = getattr(self, "_compound_region_query", None)
+        setter = getattr(editor, "set_profile_status", None)
+        if callable(setter):
+            setter(
+                "Validated regional profile "
+                f"{metadata.sidecar_identity[:12]} for "
+                f"{metadata.atlas_identity.atlas_name}."
+            )
+        logger.info(message)
+        self._set_regional_query_busy(False)
+
+    def _on_regional_query_cancelled(self, message: str) -> None:
+        """Report cancellation while preserving the current Data table."""
+        text = str(message).strip() or "Compound regional query was cancelled."
+        self._regions_status_label.setText(
+            f"{text} The Data table was not changed."
+        )
+        self._set_regional_query_busy(False)
+
+    def _on_regional_query_error(self, message: str) -> None:
+        snapshot = self._regional_query_snapshot or {}
+        current_source = None if self._db is None else str(self._db.parquet_path)
+        if (
+            current_source != snapshot.get("source_path")
+            or self._atlas is not snapshot.get("atlas_object")
+        ):
+            self._regions_status_label.setText(
+                "Discarded a compound-query failure because the loaded Parquet "
+                "or atlas changed while it was running."
+            )
+            self._set_regional_query_busy(False)
+            return
+        text = (
+            "Compound region query failed before changing the Data table: "
+            f"{message}. Rebuild the Regional Profile if it is missing, stale, "
+            "or incompatible."
+        )
+        self._regions_status_label.setText(text)
+        editor = getattr(self, "_compound_region_query", None)
+        setter = getattr(editor, "set_profile_status", None)
+        if callable(setter):
+            setter(text)
+        self._set_regional_query_busy(False)
+
+    def _cleanup_regional_query_thread(
+        self,
+        thread: QThread,
+        worker: object,
+    ) -> None:
+        if self._regional_query_thread is thread:
+            self._regional_query_thread = None
+            self._regional_query_snapshot = None
+        if self._regional_query_worker is worker:
+            self._regional_query_worker = None
+
     def _query_neurons_for_active_region_source(self) -> None:
         """Query neurons from the active Regions-tab source."""
+        source = getattr(
+            self,
+            "_region_query_source",
+            _REGION_QUERY_SOURCE_ATLAS,
+        )
+        if source == _REGION_QUERY_SOURCE_COMPOUND:
+            self._run_compound_region_query()
+            return
         selector = getattr(self, "_selected_region_query_node_types", None)
         if callable(selector):
             node_types = selector()
@@ -6910,11 +7415,6 @@ class NeuronViewerWidget(QWidget):
             getter = getattr(combo, "selected_node_types", None)
             node_types = getter() if callable(getter) else None
         membership = NodeTypeSelectorComboBox.query_text(node_types)
-        source = getattr(
-            self,
-            "_region_query_source",
-            _REGION_QUERY_SOURCE_ATLAS,
-        )
         if source == _REGION_QUERY_SOURCE_MASK:
             self._regions_status_label.setText(
                 f"Searching for neurons with {membership} in selected mask layers. Please wait..."
