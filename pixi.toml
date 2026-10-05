@@ -8,6 +8,8 @@ platforms = ["win-64", "osx-arm64", "linux-64"]
 [tasks]
 test = "pytest -v"
 test-cov = "pytest -v --cov=napari_neuron_navigator --cov-report=xml"
+# This suite uses synthetic data and no Qt fixtures or downloaded atlas.
+test-region-profile = { cmd = "pytest -v --tb=long tests/test_region_profile_stage0.py tests/test_region_profile_stage1.py tests/test_region_query_stage2.py", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1" } }
 build = "python scripts/cleanup_legacy_install.py && pip install -e . --no-deps"
 napari = { cmd = "napari", depends-on = ["build"] }
 download-cpd2 = "python scripts/download_cpd2.py"

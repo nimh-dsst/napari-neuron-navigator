@@ -1303,7 +1303,9 @@ def _emit_progress(
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as stream:
+    # Windows' _commit/FlushFileBuffers requires a writable handle. Reopen
+    # without truncating the completed Parquet, whose writer is already closed.
+    with path.open("r+b") as stream:
         os.fsync(stream.fileno())
 
 

@@ -138,6 +138,26 @@ To run tests with coverage:
 pixi run test-cov
 ```
 
+To run the regional-profile sidecar tests without launching napari or loading
+its pytest plugins:
+
+```bash
+pixi run test-region-profile
+```
+
+These tests generate small synthetic neuron Parquets and an in-memory atlas;
+no local datasets or atlas downloads are needed. They cover sidecar creation,
+validation and queries, rebuilding an existing sidecar, single and staged
+batches, paths with spaces/apostrophes/Unicode, and cleanup after failed writes.
+The file-flush regression also checks Windows' writable-handle requirement on
+macOS and Linux.
+
+GitHub Actions runs this suite in the dedicated **Regional-profile sidecar
+(Windows, Python 3.11)** job on pull requests to `main`, pushes to `main`, and
+manual runs of the **Test** workflow. It uses `pixi run -e ci test-region-profile`
+and uploads a `region-profile-windows-results` JUnit report, including on test
+failure. The same tests also remain part of the full cross-platform suite.
+
 ### Test Data Attribution
 
 `tests/test_hemisphere_integration.py` uses a vendored SWC test fixture from the

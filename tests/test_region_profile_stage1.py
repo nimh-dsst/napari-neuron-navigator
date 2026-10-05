@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from pathlib import Path
@@ -235,6 +236,136 @@ def test_default_sidecar_name() -> None:
     assert default_region_profile_path("folder/source.parquet") == Path(
         "folder/source.region_profile.parquet"
     )
+
+
+@pytest.mark.parametrize("max_batch_neurons", [1, 1024], ids=["staged", "single"])
+@pytest.mark.parametrize("custom_output", [False, True], ids=["default", "custom"])
+def test_sidecar_create_rebuild_and_release_files(
+    tmp_path: Path,
+    profile_atlas: RegionalProfileAtlas,
+    max_batch_neurons: int,
+    custom_output: bool,
+) -> None:
+    """Exercise real file handles and native paths, including on Windows CI."""
+    folder = tmp_path / "researcher's data" / "régions"
+    folder.mkdir(parents=True)
+    source = folder / "neurons.parquet"
+    frame = _write_source(source)
+    destination = (
+        folder / "output" / "custom.parquet"
+        if custom_output
+        else default_region_profile_path(source)
+    )
+    kwargs = {"output_path": destination} if custom_output else {}
+
+    # Rebuild with a different source so merely retaining the old sidecar
+    # cannot pass. Both original neurons share neuron_id and node_id values.
+    for expected_neurons in (2, 1):
+        if expected_neurons == 1:
+            frame = frame.loc[frame["file_id"] == "mirror-lower.swc"].copy()
+            _write_source(source, frame)
+        source_bytes = source.read_bytes()
+        metadata = build_region_profile(
+            source,
+            profile_atlas,
+            max_batch_neurons=max_batch_neurons,
+            row_group_size=2,
+            **kwargs,
+        )
+
+        inspection = inspect_region_profile(
+            destination,
+            source_path=source,
+            atlas=profile_atlas,
+            validate_contents=True,
+        )
+        assert inspection.valid and inspection.compatible, inspection.issues
+        assert inspection.metadata == metadata
+        assert metadata.build_summary.neuron_count == expected_neurons
+        assert metadata.build_summary.batch_count == (
+            expected_neurons if max_batch_neurons == 1 else 1
+        )
+        result = _read_profile(destination)
+        assert set(result["file_id"]) == set(frame["file_id"])
+        assert result.groupby("file_id")["node_count"].sum().to_dict() == {
+            file_id: 3 for file_id in frame["file_id"].unique()
+        }
+        assert result["terminus_count"].sum() == expected_neurons
+        assert result["cable_length_um"].sum() == pytest.approx(20 * expected_neurons)
+        assert source.read_bytes() == source_bytes
+        assert set(destination.parent.iterdir()) == (
+            {destination} if custom_output else {source, destination}
+        )
+
+    # Windows refuses these operations if the builder/inspector leaked a
+    # handle that denies deletion. Test both the input and the published file.
+    for path in (source, destination):
+        moved = path.with_suffix(".moved.parquet")
+        path.rename(moved)
+        moved.unlink()
+
+
+def test_fsync_file_requires_write_access_without_truncation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce Windows' writable-handle requirement on macOS/Linux too."""
+    path = tmp_path / "pending.parquet"
+    _write_source(path)
+    original = path.read_bytes()
+    real_fsync = os.fsync
+    synced = []
+
+    def require_writable_descriptor(descriptor: int) -> None:
+        # A zero-byte write checks access without changing the file. With the
+        # old read-only open this raises EBADF even on a POSIX developer host.
+        os.write(descriptor, b"")
+        real_fsync(descriptor)
+        synced.append(descriptor)
+
+    monkeypatch.setattr(profile_module.os, "fsync", require_writable_descriptor)
+    profile_module._fsync_file(path)
+
+    assert len(synced) == 1
+    assert path.read_bytes() == original
+    with pytest.raises(OSError) as closed:
+        os.fstat(synced[0])
+    assert closed.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("error_number", [errno.EBADF, errno.EIO])
+def test_fsync_failure_preserves_valid_sidecar_and_cleans_up(
+    tmp_path: Path,
+    profile_atlas: RegionalProfileAtlas,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    source = tmp_path / "neurons.parquet"
+    _write_source(source)
+    destination = default_region_profile_path(source)
+    build_region_profile(source, profile_atlas)
+    original = destination.read_bytes()
+
+    def fail_fsync(_descriptor: int) -> None:
+        raise OSError(error_number, "injected file flush failure")
+
+    # Inject at the OS call, after the real writers have completed. A failed
+    # flush must propagate; suppressing it would publish an unflushed file.
+    with monkeypatch.context() as patch:
+        patch.setattr(profile_module.os, "fsync", fail_fsync)
+        with pytest.raises(OSError, match="injected file flush failure") as failure:
+            build_region_profile(source, profile_atlas, max_batch_neurons=1)
+
+    assert failure.value.errno == error_number
+    assert destination.read_bytes() == original
+    assert set(tmp_path.iterdir()) == {source, destination}
+    inspection = inspect_region_profile(
+        destination, source_path=source, atlas=profile_atlas, validate_contents=True
+    )
+    assert inspection.compatible, inspection.issues
+    # Retry with real fsync to verify cleanup left no locked staging files.
+    build_region_profile(source, profile_atlas, max_batch_neurons=1)
+    assert set(tmp_path.iterdir()) == {source, destination}
 
 
 def test_builder_uses_relative_laterality_and_retains_region_zero(
