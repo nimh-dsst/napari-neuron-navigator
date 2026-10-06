@@ -1636,6 +1636,33 @@ def _captured_unfiltered_request(widget):
     return widget._start_clustering_preflight.call_args.args[0]
 
 
+@pytest.mark.parametrize("corrected", [True, False])
+def test_ccf_pearson_choice_is_snapshotted_before_preflight(monkeypatch, corrected):
+    module = _import_analysis_tab_module()
+    widget = module.AnalysisTabWidget(_DummyViewer())
+    assert widget._corrected_pearson_cb.isChecked()
+    widget._corrected_pearson_cb.setChecked(corrected)
+    request = _captured_unfiltered_request(widget)
+    assert request.use_corrected_pearson is corrected
+    # A later UI change must not change the pending run.
+    widget._corrected_pearson_cb.setChecked(not corrected)
+    created = []
+
+    class Worker:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    workers = types.ModuleType("napari_neuron_navigator.workers")
+    workers.CorrelationWorker = Worker
+    workers.FlatmapParquetCorrelationWorker = object
+    workers.SomaClusterWorker = object
+    workers.FlatmapSomaClusterWorker = object
+    monkeypatch.setitem(sys.modules, "napari_neuron_navigator.workers", workers)
+    widget._start_background_worker = MagicMock()
+    widget._launch_clustering_request(request, None)
+    assert created[0]["use_corrected_pearson"] is corrected
+
+
 def test_large_clustering_warning_text_formats_node_count() -> None:
     module = _import_analysis_tab_module()
 
@@ -2295,7 +2322,10 @@ def test_update_button_states_disables_export_controls_without_result():
 
 
 @pytest.mark.parametrize("zero_variance_count", [0, 1])
-def test_on_correlation_finished_leaves_clustermap_unrendered(zero_variance_count):
+@pytest.mark.parametrize("corrected", [True, False, None])
+def test_on_correlation_finished_leaves_clustermap_unrendered(
+    zero_variance_count, corrected
+):
     """Clustering completion should not auto-render the dendrogram preview."""
     AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
     widget = AnalysisTabWidget.__new__(AnalysisTabWidget)
@@ -2318,13 +2348,24 @@ def test_on_correlation_finished_leaves_clustermap_unrendered(zero_variance_coun
         lambda result, color_map: emitted.append((result, color_map))
     )
 
+    policy = {"zero_variance_neuron_count": zero_variance_count}
+    if corrected is not None:
+        from napari_neuron_navigator.analysis.pearson_policy import (
+            ccf_pearson_policy_metadata,
+        )
+
+        policy.update(ccf_pearson_policy_metadata(corrected))
+    omitted = zero_variance_count if corrected is not False else 0
+    widget._corrected_pearson_cb = types.SimpleNamespace(
+        isChecked=lambda: not corrected
+    )
     result = types.SimpleNamespace(
         neuron_ids=["n1", "n2"],
         labels=np.array([1, 2], dtype=np.int32),
-        unassigned_neuron_ids=["constant"] if zero_variance_count else [],
+        unassigned_neuron_ids=["constant"] if omitted else [],
         metadata=types.SimpleNamespace(
             extra_metadata={
-                "correlation": {"zero_variance_neuron_count": zero_variance_count},
+                "correlation": policy,
             }
         ),
     )
@@ -2339,12 +2380,17 @@ def test_on_correlation_finished_leaves_clustermap_unrendered(zero_variance_coun
     ]
     assert "Table updated and sorted by cluster." in widget._progress_label.text()
     assert (
-        f"{zero_variance_count} neuron(s) are unclustered after region/coordinate filtering."
+        f"{omitted} neuron(s) are unclustered after region/coordinate filtering."
         in widget._progress_label.text()
     )
     assert (
         "Pearson correlation is undefined" in widget._progress_label.text()
-    ) == bool(zero_variance_count)
+    ) == bool(omitted)
+    if corrected is None:
+        assert "CCF Pearson:" not in widget._progress_label.text()
+    else:
+        mode = "corrected" if corrected else "legacy"
+        assert f"CCF Pearson: {mode}." in widget._progress_label.text()
     assert "Auto-colored" not in widget._progress_label.text()
 
 
@@ -2444,14 +2490,24 @@ def test_completed_selected_run_saves_sparse_assignment_and_lineage() -> None:
     assert saved.runtime_result is result
 
 
-def test_restored_assignment_drives_heatmap_groups_without_runtime_matrices() -> None:
+@pytest.mark.parametrize("corrected", [True, False, None])
+def test_restored_assignment_drives_heatmap_groups_without_runtime_matrices(
+    corrected,
+) -> None:
+    from napari_neuron_navigator.analysis.pearson_policy import (
+        ccf_pearson_policy_metadata,
+    )
+
     AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
     widget = AnalysisTabWidget(_DummyViewer())
+    widget._corrected_pearson_cb.setChecked(not corrected)
+    policy = {} if corrected is None else ccf_pearson_policy_metadata(corrected)
     store = ClusterAssignmentStore()
     store.add(
         name="Restored Groups",
         assignments={"n1": 1, "n2": 2, "n3": 1},
         input_file_ids=["n1", "n2", "n3"],
+        run_metadata={"extra_metadata": {"correlation": policy}},
         label_colors={
             1: [0.1, 0.2, 0.3, 1.0],
             2: [0.8, 0.7, 0.6, 1.0],
@@ -2464,6 +2520,14 @@ def test_restored_assignment_drives_heatmap_groups_without_runtime_matrices() ->
     assert widget._cluster_file_ids(1) == ("n1", "n3")
     assert widget._heat_cluster_combo.count() == 3
     assert "Rerun required" in widget._progress_label.text()
+    if corrected is None:
+        assert "CCF Pearson:" not in widget._progress_label.text()
+    else:
+        assert (
+            f"CCF Pearson: {'corrected' if corrected else 'legacy'}."
+            in widget._progress_label.text()
+        )
+    assert widget._corrected_pearson_cb.isChecked() is (not corrected)
 
 
 def test_deleting_last_assignment_clears_live_analysis_result() -> None:

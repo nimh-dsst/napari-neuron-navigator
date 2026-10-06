@@ -44,7 +44,8 @@ def _write_count_vectors(path, counts):
 
 
 @pytest.mark.parametrize("use_map", [False, True])
-def test_sparse_pearson_matches_numpy_for_every_pair(tmp_path, use_map):
+@pytest.mark.parametrize("corrected", [True, False])
+def test_sparse_pearson_matches_numpy_for_every_pair(tmp_path, use_map, corrected):
     counts = np.array(
         [
             [3, 1, 0, 0, 0, 0],
@@ -66,14 +67,20 @@ def test_sparse_pearson_matches_numpy_for_every_pair(tmp_path, use_map):
             voxel_map,
             25.0,
             file_ids=ids,
+            use_corrected_pearson=corrected,
         )
     frame, matrix = correlation_long_to_matrix(correlations)
     assert len(correlations) == len(ids) ** 2
     assert frame.index.tolist() == ids
     # Jointly empty columns are outside the existing occupied-union policy.
     expected = np.corrcoef(counts[:4, :5])
+    if not corrected:
+        expected[(counts[:4] @ counts[:4].T) == 0] = -1.0
     np.testing.assert_allclose(matrix, expected, atol=1e-7)
-    assert -1.0 < frame.loc["file-0", "file-2"] < 0.0
+    assert (frame.loc["file-0", "file-2"] > -1.0) == corrected
+    assert (
+        correlations.attrs["correlation_metadata"]["use_corrected_pearson"] is corrected
+    )
 
 
 @pytest.mark.parametrize(
@@ -84,22 +91,29 @@ def test_sparse_pearson_matches_numpy_for_every_pair(tmp_path, use_map):
         ([[1, 1], [3, 3]], ["file-0", "file-1"]),
     ],
 )
-def test_zero_variance_neurons_are_omitted_with_diagnostics(
-    tmp_path, counts, invalid_ids
+@pytest.mark.parametrize("corrected", [True, False])
+def test_zero_variance_neurons_follow_selected_policy(
+    tmp_path, counts, invalid_ids, corrected
 ):
     path = tmp_path / "constant.parquet"
     _write_count_vectors(path, counts)
     with duckdb.connect() as conn:
-        correlations = compute_pearson_correlation_matrix(conn, str(path), None, 25.0)
+        correlations = compute_pearson_correlation_matrix(
+            conn, str(path), None, 25.0, use_corrected_pearson=corrected
+        )
     frame, matrix = correlation_long_to_matrix(correlations)
     assert set(frame.columns) == {f"file-{i}" for i in range(len(counts))} - set(
-        invalid_ids
+        invalid_ids if corrected else []
     )
     assert np.isfinite(matrix).all()
     assert (
         correlations.attrs["correlation_metadata"]["zero_variance_file_ids"]
         == invalid_ids
     )
+    if not corrected:
+        for file_id in invalid_ids:
+            assert frame.loc[file_id, file_id] == 1.0
+            assert (frame.loc[file_id].drop(file_id) == -1.0).all()
 
 
 @pytest.mark.parametrize("bad_value", [None, np.nan, np.inf])
@@ -114,7 +128,8 @@ def test_matrix_rejects_missing_or_undefined_correlations(bad_value):
 
 
 @pytest.mark.parametrize("scoped", [False, True])
-def test_worker_reports_zero_variance_as_unclustered(tmp_path, scoped):
+@pytest.mark.parametrize("corrected", [True, False])
+def test_worker_reports_zero_variance_as_unclustered(tmp_path, scoped, corrected):
     from tests.test_workers import _import_workers_module
 
     path = tmp_path / "worker.parquet"
@@ -126,6 +141,7 @@ def test_worker_reports_zero_variance_as_unclustered(tmp_path, scoped):
         file_ids=[f"file-{i}" for i in range(4)] if scoped else None,
         linkage_method="ward",
         n_clusters=2,
+        use_corrected_pearson=corrected,
     )
     finished, errors = [], []
     worker.finished.connect(finished.append)
@@ -134,16 +150,19 @@ def test_worker_reports_zero_variance_as_unclustered(tmp_path, scoped):
     assert errors == []
     assert len(finished) == 1
     result = finished[0]
-    assert result.neuron_ids == ["file-0", "file-1", "file-2"]
-    assert result.unassigned_neuron_ids == ["file-3"]
+    assert result.neuron_ids == [f"file-{i}" for i in range(3 if corrected else 4)]
+    assert result.unassigned_neuron_ids == (["file-3"] if corrected else [])
     diagnostics = result.metadata.to_dict()["extra_metadata"]["correlation"]
     assert diagnostics["zero_variance_file_ids"] == ["file-3"]
     assert diagnostics["zero_variance_neuron_count"] == 1
-    assert diagnostics["implementation"] == "ccf_pearson_complete_pairs_v2"
+    assert diagnostics["implementation"] == (
+        "ccf_pearson_complete_pairs_v2" if corrected else "ccf_pearson_legacy_v1"
+    )
 
 
-@pytest.mark.parametrize("counts", [[[1], [3]], [[1, 0], [1, 1]]])
-def test_worker_rejects_too_few_nonconstant_neurons(tmp_path, counts):
+@pytest.mark.parametrize("counts", [[[1], [3]], [[1, 0], [1, 1]], [[1]], [[1, 2]]])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_worker_requires_two_neurons_eligible_under_policy(tmp_path, counts, corrected):
     from tests.test_workers import _import_workers_module
 
     path = tmp_path / "unclusterable.parquet"
@@ -152,15 +171,33 @@ def test_worker_rejects_too_few_nonconstant_neurons(tmp_path, counts):
         parquet_path=str(path),
         atlas=SimpleNamespace(resolution=(25.0,) * 3, atlas_name="test"),
         region_selection=None,
+        use_corrected_pearson=corrected,
     )
     finished, errors = [], []
     worker.finished.connect(finished.append)
     worker.error.connect(errors.append)
     worker.run()
+    if not corrected and len(counts) >= 2:
+        assert errors == []
+        assert len(finished) == 1
+        assert finished[0].neuron_ids == ["file-0", "file-1"]
+        return
     assert finished == []
     assert len(errors) == 1
     assert "at least 2 neurons" in errors[0]
-    assert "zero variance" in errors[0]
+    assert ("zero variance" in errors[0]) == corrected
+
+
+@pytest.mark.parametrize("corrected", [True, False])
+def test_genuine_anticorrelation_is_retained(tmp_path, corrected):
+    path = tmp_path / "anticorrelated.parquet"
+    _write_count_vectors(path, [[3, 1], [1, 3]])
+    with duckdb.connect() as conn:
+        correlations = compute_pearson_correlation_matrix(
+            conn, str(path), None, 25.0, use_corrected_pearson=corrected
+        )
+    _, matrix = correlation_long_to_matrix(correlations)
+    np.testing.assert_allclose(matrix, [[1, -1], [-1, 1]])
 
 
 def test_count_correlation_input_nodes_supports_unfiltered_file_scope(tmp_path) -> None:

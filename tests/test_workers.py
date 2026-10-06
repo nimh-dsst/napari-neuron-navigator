@@ -932,11 +932,13 @@ def test_correlation_worker_uses_multi_region_mask_and_attaches_metadata(monkeyp
         voxel_id_map,
         resolution,
         file_ids=None,
+        use_corrected_pearson=True,
     ):
         calls["parquet_path"] = parquet_path
         calls["voxel_id_map_shape"] = voxel_id_map.shape
         calls["resolution"] = resolution
         calls["file_ids"] = file_ids
+        assert use_corrected_pearson is True
         return pd.DataFrame({"swc_id_1": [], "swc_id_2": [], "r": []})
 
     def fake_correlation_long_to_matrix(_corr_df):
@@ -1028,8 +1030,10 @@ def test_correlation_worker_allows_unfiltered_ccf_scope(monkeypatch):
         voxel_id_map,
         resolution,
         file_ids=None,
+        use_corrected_pearson=True,
     ):
         calls["voxel_id_map"] = voxel_id_map
+        assert use_corrected_pearson is True
         calls["file_ids"] = file_ids
         return pd.DataFrame(
             {
@@ -1082,8 +1086,10 @@ def test_correlation_worker_reuses_preflight_region_filter(monkeypatch):
         resolution,
         file_ids=None,
         prepared_region_filter=None,
+        use_corrected_pearson=True,
     ):
         captured["prepared"] = prepared_region_filter
+        assert use_corrected_pearson is True
         return pd.DataFrame(
             {
                 "swc_id_1": ["n1", "n1", "n2", "n2"],

@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from .pearson_policy import ccf_pearson_policy_metadata
+
 if TYPE_CHECKING:
     import duckdb
     from numpy.typing import NDArray
@@ -281,6 +283,8 @@ def compute_pearson_correlation_matrix(
     prepared_region_filter: PreparedClusterRegionFilter | None = None,
     voxel_node_filter: VoxelNodeFilter | None = None,
     prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
+    *,
+    use_corrected_pearson: bool = True,
 ) -> pd.DataFrame:
     """Compute pairwise Pearson correlation of neuron node counts per voxel.
 
@@ -302,14 +306,17 @@ def compute_pearson_correlation_matrix(
         Restrict the computation to this working set of neuron ``file_id`` values.
     progress_callback : callable, optional
         Called with (step_name: str, step_number: int, total_steps: int).
+    use_corrected_pearson : bool, optional
+        If False, reproduce legacy CCF correlations: disjoint and undefined
+        pairs have r=-1, and constant vectors are retained with diagonal r=1.
 
     Returns
     -------
     pd.DataFrame
         Long-form correlation table with columns: swc_id_1, swc_id_2, r.
-        Includes every pair of nonconstant vectors and the diagonal (r=1).
+        Includes every retained pair and the diagonal (r=1).
         The voxel universe is the occupied union after filtering. Constant
-        vectors are omitted; their file IDs and calculation provenance are
+        vectors are omitted in corrected mode; their IDs and provenance are
         recorded in ``attrs["correlation_metadata"]``.
     """
 
@@ -383,7 +390,7 @@ def compute_pearson_correlation_matrix(
         """).fetchall()
     ]
     voxel_count = int(conn.execute("SELECT V FROM voxel_universe").fetchone()[0])
-    if zero_variance_ids:
+    if zero_variance_ids and use_corrected_pearson:
         logger.warning(
             "%d neuron(s) have zero variance in their voxel counts; "
             "Pearson correlation is undefined and they will remain unclustered.",
@@ -391,12 +398,13 @@ def compute_pearson_correlation_matrix(
         )
 
     # Assign numeric IDs for ordering (to compute only upper triangle)
-    conn.execute("""
+    eligibility = "WHERE variance_term > 0" if use_corrected_pearson else ""
+    conn.execute(f"""
         CREATE OR REPLACE TEMP TABLE swc_numeric AS
         SELECT
             swc_id,
             ROW_NUMBER() OVER (ORDER BY swc_id) AS swc_num
-        FROM per_neuron WHERE variance_term > 0
+        FROM per_neuron {eligibility}
     """)
 
     # Pairwise cross-products via voxel join (upper triangle only)
@@ -416,39 +424,49 @@ def compute_pearson_correlation_matrix(
         GROUP BY a.swc_id, b.swc_id
     """)
 
-    # Enumerate every valid pair. A missing sparse cross-product means Sxy=0,
-    # not r=-1: the shared voxel universe and per-neuron means still matter.
+    # Both policies return complete tables. Legacy fallback is explicit here,
+    # so the matrix converter can still reject accidentally missing values.
+    if use_corrected_pearson:
+        correlation_sql = (
+            "(vu.V * COALESCE(p.Sxy, 0.0) - x.Sx * y.Sx) "
+            "/ SQRT(x.variance_term * y.variance_term)"
+        )
+        pair_eligibility = "WHERE x.variance_term > 0 AND y.variance_term > 0"
+    else:
+        correlation_sql = (
+            "COALESCE((vu.V * p.Sxy - x.Sx * y.Sx) / NULLIF("
+            "SQRT(GREATEST(x.variance_term, 0.0) * "
+            "GREATEST(y.variance_term, 0.0)), 0.0), -1.0)"
+        )
+        pair_eligibility = ""
     _progress("Computing Pearson correlations", 6)
-    conn.execute("""
+    conn.execute(f"""
         CREATE OR REPLACE TEMP TABLE corr_pairs AS
         SELECT
             x.swc_id AS i,
             y.swc_id AS j,
-            (vu.V * COALESCE(p.Sxy, 0.0) - x.Sx * y.Sx)
-            / SQRT(x.variance_term * y.variance_term) AS r
+            {correlation_sql} AS r
         FROM per_neuron x
         JOIN per_neuron y ON x.swc_id < y.swc_id
         CROSS JOIN voxel_universe vu
         LEFT JOIN pairwise_xy p ON p.i = x.swc_id AND p.j = y.swc_id
-        WHERE x.variance_term > 0 AND y.variance_term > 0
+        {pair_eligibility}
     """)
 
     # Build symmetric matrix (both triangles + diagonal)
     _progress("Building symmetric correlation table", 7)
-    result_df = conn.execute("""
+    result_df = conn.execute(f"""
         SELECT i AS swc_id_1, j AS swc_id_2, r FROM corr_pairs
         UNION ALL
         SELECT j AS swc_id_1, i AS swc_id_2, r FROM corr_pairs
         UNION ALL
         SELECT swc_id AS swc_id_1, swc_id AS swc_id_2, 1.0 AS r
-        FROM per_neuron WHERE variance_term > 0
+        FROM per_neuron {eligibility}
     """).fetchdf()
     result_df.attrs["correlation_metadata"] = {
-        "implementation": "ccf_pearson_complete_pairs_v2",
+        **ccf_pearson_policy_metadata(use_corrected_pearson),
         "voxel_universe": "occupied_union_after_filtering",
         "voxel_count": voxel_count,
-        "no_overlap_policy": "zero_cross_product",
-        "zero_variance_policy": "unclustered",
         "zero_variance_neuron_count": len(zero_variance_ids),
         "zero_variance_file_ids": zero_variance_ids,
     }

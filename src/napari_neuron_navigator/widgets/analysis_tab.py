@@ -45,6 +45,11 @@ from ..analysis.flatmap_correlation import (
     DEFAULT_FLATMAP_DEPTH_SCALE,
     DEFAULT_FLATMAP_SOMA_DBSCAN_EPS,
 )
+from ..analysis.pearson_policy import (
+    CORRECTED_PEARSON_LABEL,
+    CORRECTED_PEARSON_TOOLTIP,
+    ccf_pearson_mode_text,
+)
 from ..flatmap_heatmap import (
     DEFAULT_FLATMAP_DEPTH_BIN_UM,
     DEFAULT_FLATMAP_Y_BINS,
@@ -173,6 +178,7 @@ class _ClusteringRequest:
     flatmap_depth_scale: float = DEFAULT_FLATMAP_DEPTH_SCALE
     flatmap_include_depth: bool = True
     voxel_node_filter: VoxelNodeFilter | None = None
+    use_corrected_pearson: bool = True
 
 
 @dataclass(frozen=True)
@@ -574,6 +580,12 @@ class AnalysisTabWidget(QWidget):
         self.refresh_flatmap_coordinate_availability()
         ready = self._db is not None and self._atlas is not None
         busy = self._worker_thread is not None and self._worker_thread.isRunning()
+        pearson_checkbox = getattr(self, "_corrected_pearson_cb", None)
+        if pearson_checkbox is not None:
+            pearson_checkbox.setEnabled(
+                self._worker_thread is None
+                and getattr(self, "_pending_clustering_request", None) is None
+            )
         self._run_corr_btn.setEnabled(ready and not busy)
         self._run_heat_btn.setEnabled(ready and not busy)
         dendrite_scan = getattr(self, "_voxel_dendrite_scan_btn", None)
@@ -797,6 +809,11 @@ class AnalysisTabWidget(QWidget):
         self._n_clusters_spin.setValue(5)
         self._clusters_row.addWidget(self._n_clusters_spin)
         corr_layout.addLayout(self._clusters_row)
+
+        self._corrected_pearson_cb = QCheckBox(CORRECTED_PEARSON_LABEL)
+        self._corrected_pearson_cb.setChecked(True)
+        self._corrected_pearson_cb.setToolTip(CORRECTED_PEARSON_TOOLTIP)
+        corr_layout.addWidget(self._corrected_pearson_cb)
 
         # DBSCAN eps.  Units depend on the coordinate space: microns for CCFv3,
         # normalized hemisphere fractions for flat map space.  Both remembered
@@ -1724,6 +1741,9 @@ class AnalysisTabWidget(QWidget):
         is_flatmap = self._current_coordinate_space() == _COORD_SPACE_FLATMAP
         method = self._clustering_method_combo.currentText()
         is_soma = method == _CLUSTER_METHOD_SOMA
+        pearson_checkbox = getattr(self, "_corrected_pearson_cb", None)
+        if pearson_checkbox is not None:
+            pearson_checkbox.setVisible(not is_flatmap and not is_soma)
 
         voxel_filter_section = getattr(self, "_voxel_node_filter_section", None)
         if voxel_filter_section is not None:
@@ -2146,6 +2166,7 @@ class AnalysisTabWidget(QWidget):
             flatmap_depth_scale=float(self._flatmap_depth_scale_spin.value()),
             flatmap_include_depth=(not self._flatmap_ignore_depth_cb.isChecked()),
             voxel_node_filter=voxel_node_filter,
+            use_corrected_pearson=self._corrected_pearson_cb.isChecked(),
         )
         self._capture_cluster_run_context(
             clustering_method,
@@ -2346,6 +2367,7 @@ class AnalysisTabWidget(QWidget):
                 n_clusters=request.n_clusters,
                 file_ids=file_ids,
                 voxel_id_map=voxel_id_map,
+                use_corrected_pearson=request.use_corrected_pearson,
                 **filter_kwargs,
                 **voxel_filter_kwargs,
             )
@@ -2619,12 +2641,20 @@ class AnalysisTabWidget(QWidget):
                 f"{assignment.name} assignments restored. Rerun required for "
                 "dendrogram and distance exports."
             )
-            progress = getattr(self, "_progress_label", None)
-            if progress is not None:
-                progress.setText(message)
             clustermap_status = getattr(self, "_clustermap_status_label", None)
             if clustermap_status is not None:
                 clustermap_status.setText(message)
+        else:
+            message = (
+                f"{assignment.name}: {len(assignment.assignments):,} neurons assigned."
+            )
+        policy = assignment.run_metadata.get("extra_metadata", {}).get(
+            "correlation", {}
+        )
+        policy_text = ccf_pearson_mode_text(policy)
+        progress = getattr(self, "_progress_label", None)
+        if progress is not None:
+            progress.setText(message + (f" {policy_text}" if policy_text else ""))
 
     def _all_cluster_heatmap_requests(self) -> list[_HeatmapRequest]:
         """Return heatmap requests for every cluster-specific option."""
@@ -2794,7 +2824,14 @@ class AnalysisTabWidget(QWidget):
             else {}
         )
         zero_variance_count = correlation_metadata.get("zero_variance_neuron_count", 0)
-        if zero_variance_count:
+        policy_text = ccf_pearson_mode_text(correlation_metadata)
+        if policy_text:
+            progress_message += f" {policy_text}"
+        if (
+            zero_variance_count
+            and correlation_metadata.get("zero_variance_policy")
+            != "pearson_r_minus_one"
+        ):
             progress_message += (
                 f" {int(zero_variance_count):,} neuron(s) have zero variance in "
                 "their voxel counts and remain unclustered because Pearson "

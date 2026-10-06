@@ -128,6 +128,10 @@ def _search_context(metadata: Mapping[str, object]) -> dict[str, object]:
         "coordinate_space",
         "distance_metric",
         "missing_correlation_policy",
+        "use_corrected_pearson",
+        "implementation",
+        "no_overlap_policy",
+        "zero_variance_policy",
         "zero_variance_candidate_count",
         "aggregate_mode",
         "resolution_um",
@@ -308,6 +312,7 @@ class VoxelSearchRequest:
     flatmap_depth_bin_um: float = 25.0
     flatmap_include_depth_minus_one: bool = True
     flatmap_collapse_depth: bool = False
+    use_corrected_pearson: bool = True  # CCF only; flatmap keeps its own policy.
 
     def __post_init__(self) -> None:
         references = _unique_strings(self.reference_file_ids)
@@ -524,10 +529,10 @@ def compute_voxel_search(
 
     CCF searches match :func:`compute_pearson_correlation_matrix`; flatmap
     searches use the same rectangular grid and bin expressions as Analysis.
-    No-overlap cross-products are zero in both coordinate spaces. CCF omits
-    candidates with zero-variance vectors and rejects an aggregate reference
-    with zero variance. Flatmap follows its existing Analysis convention of
-    ``r = 0`` for an undefined denominator.
+    Corrected CCF omits zero-variance candidates and rejects a constant
+    aggregate reference. Legacy CCF assigns r=-1 to disjoint or undefined
+    correlations. Flatmap retains zero cross-products and r=0 if undefined,
+    independently of ``use_corrected_pearson``.
     """
     from .correlation import _cleanup_region_nodes_view, _prepare_region_nodes_view
 
@@ -842,8 +847,12 @@ def compute_voxel_search(
         """)
 
         progress("Computing and ranking Pearson distances...", 5)
+        is_ccf = request.coordinate_space == SEARCH_SPACE_CCF
+        corrected_ccf = is_ccf and request.use_corrected_pearson
+        legacy_ccf = is_ccf and not request.use_corrected_pearson
+        cross_product = "xprod.sxy" if legacy_ccf else "COALESCE(xprod.sxy, 0.0)"
         undefined_correlation = (
-            "NULL" if request.coordinate_space == SEARCH_SPACE_CCF else "0.0"
+            "NULL" if corrected_ccf else "-1.0" if legacy_ccf else "0.0"
         )
         score_frame = conn.execute(
             f"""
@@ -863,7 +872,7 @@ def compute_voxel_search(
                 vu.v * qstats.syy - qstats.sy * qstats.sy AS query_variance,
                 COALESCE(
                     (
-                        vu.v * COALESCE(xprod.sxy, 0.0) - cstats.sx * qstats.sy
+                        vu.v * {cross_product} - cstats.sx * qstats.sy
                     ) / NULLIF(
                         SQRT(
                             GREATEST(vu.v * cstats.sxx - cstats.sx * cstats.sx, 0.0)
@@ -881,7 +890,7 @@ def compute_voxel_search(
         ).fetchdf()
 
         zero_variance_ids = []
-        if request.coordinate_space == SEARCH_SPACE_CCF and not score_frame.empty:
+        if corrected_ccf and not score_frame.empty:
             if float(score_frame["query_variance"].iloc[0]) <= 0.0:
                 raise ValueError(
                     "The aggregate reference has zero variance in its voxel "
@@ -976,7 +985,9 @@ def compute_voxel_search(
             "distance_metric": "one_minus_pearson_r",
             "missing_correlation_policy": (
                 "zero_cross_product_omit_zero_variance"
-                if request.coordinate_space == SEARCH_SPACE_CCF
+                if corrected_ccf
+                else "pearson_r_minus_one"
+                if legacy_ccf
                 else "flatmap_dense_zero_filled_r_zero_if_undefined"
             ),
             "zero_variance_candidate_file_ids": zero_variance_ids,
@@ -1002,6 +1013,14 @@ def compute_voxel_search(
             "voxel_node_filter": voxel_filter_metadata,
             "filter_tags": filter_tags,
         }
+        if is_ccf:
+            from .pearson_policy import ccf_pearson_policy_metadata
+
+            metadata.update(ccf_pearson_policy_metadata(request.use_corrected_pearson))
+            if corrected_ccf:
+                metadata["zero_variance_policy"] = (
+                    "omit_candidates_reject_constant_reference"
+                )
         metadata.update(flatmap_provenance)
         catalog_by_file_id = catalog.set_index("file_id", drop=False)
         reference_rows = pd.DataFrame(

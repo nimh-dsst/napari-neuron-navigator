@@ -2114,11 +2114,14 @@ is always evaluated from CCFv3 node coordinates.
    including per-rule dilation, node types, and thresholds. **Region Filters**
    remains visible in both coordinate spaces.
 5. **Action:** Choose **CCFv3 Coordinates** and **Voxel Correlation**, configure
-   overlapping Include and Exclude rules, and run clustering.
+   overlapping Include and Exclude rules, leave **Use corrected Pearson
+   correlation** checked, and run clustering.
    **Expected:** Included masks are unioned after their independent dilations.
    Every node in any excluded mask is removed even if it is also included and
    regardless of the Exclude row's node-type and threshold values. The
    large-run warning, if shown, reports the final surviving node count.
+   The checkbox defaults to checked in a new widget session and is disabled
+   during preflight and clustering. Its tooltip explains both policies.
 6. **Action:** Inspect the assignment when one neuron has no usable nodes after
    voxel filtering. Repeat with filters that leave fewer than two clusterable
    neurons.
@@ -2126,8 +2129,8 @@ is always evaluated from CCFv3 node coordinates.
    **Unclustered**, while the other neurons cluster normally. With fewer than
    two clusterable neurons, the run stops with a corrective message and creates
    no assignment.
-   For CCFv3, also test a neuron with identical counts in every voxel of the
-   cohort's occupied union. Its Pearson correlation is undefined; it remains
+   For corrected CCFv3, also test a neuron with identical counts in every voxel
+   of the cohort's occupied union. Its Pearson correlation is undefined; it remains
    **Unclustered**, and the completion message reports the zero-variance count.
    If fewer than two nonconstant vectors remain, the error explains this reason.
 7. **Action:** Choose **Soma Location**. Confirm that each retained neuron's
@@ -2161,10 +2164,13 @@ is always evaluated from CCFv3 node coordinates.
     Legacy selected/represented fields summarize Include rules. The legacy
     dilation value is `null` when Include rules use different dilations.
     New CCFv3 voxel runs record `extra_metadata.correlation.implementation` as
-    `ccf_pearson_complete_pairs_v2`, together with the occupied voxel count,
-    zero-cross-product policy, and zero-variance neuron count and `file_id` list.
-    Previously saved assignments keep their original results; rerun clustering
-    to apply the corrected correlation calculation.
+    `ccf_pearson_complete_pairs_v2` when checked or `ccf_pearson_legacy_v1` when
+    unchecked, together with `use_corrected_pearson`, the effective policies,
+    occupied voxel count, and zero-variance neuron count and `file_id` list.
+    Cluster and distance workbooks preserve these fields. Previously saved
+    assignments keep their original results; missing policy metadata remains
+    unspecified. Selecting a saved assignment displays its recorded policy
+    independently of the checkbox's current value.
 11. **Action:** Reproduce the MOs challenge using
     `isocortex_total_right_brainglobe_flatmap.parquet`, the cached
     `allen_mouse_25um` v1.2 atlas, and the 1,898 distinct `file_id` values whose
@@ -2179,6 +2185,24 @@ is always evaluated from CCFv3 node coordinates.
     descendants. Exclusion changes the nodes used to calculate similarity;
     it does not guarantee that cortical and brainstem projection populations
     receive separate cluster labels.
+12. **Action:** Repeat steps 5, 6, and 11 with **Use corrected Pearson
+    correlation** unchecked. Switch to Soma Location and Flat map + Depth,
+    then return to CCFv3 Voxel Correlation. Inspect the independent Search
+    checkbox. Change the Analysis checkbox after completing a run and export
+    its workbooks without rerunning.
+    **Expected:** Unchecked restores the full legacy policy: disjoint or
+    undefined pair correlations are `-1`, zero-variance neurons remain eligible,
+    and every retained neuron's diagonal is `1`. A run with fewer than two
+    usable neurons still stops. Legacy completion messages do not describe
+    constant vectors as excluded. Checked uses zero cross-products for disjoint
+    pairs and excludes undefined vectors. The occupied voxel universe, filters,
+    and preflight counts are identical in both modes. The checkbox is hidden
+    for Soma Location and flatmap, retains its choice on returning to CCFv3,
+    and does not change Search's choice. Completed-result messages and exports
+    retain the run's recorded policy after later checkbox changes.
+    For step 11's 1,898-neuron Ward k=5 run, corrected cluster sizes are
+    206, 2, 511, 301, and 878; legacy sizes are 469, 497, 443, 278, and 211.
+    Cluster labels are arbitrary; compare assignments after label matching.
 
 **Manual verification**
 
@@ -2214,6 +2238,17 @@ is always evaluated from CCFv3 node coordinates.
   variance. These backend checks do not verify anatomical cluster quality or
   the manual rendering workflow; the new zero-variance UI checks are **Not run**
   in napari.
+
+  The selectable-policy workflows in steps 5, 6, 10, and 12 are **Not run**
+  manually (added 2026-10-06). A backend rerun on that date reproduced both
+  saved MOs baselines with the same 1,898 neurons, 25 µm atlas, MOs exclusion
+  at 0%, Ward linkage, and k=5: both matrices were bit-identical at float32
+  precision, and each mode's assignments matched its own baseline completely
+  after label alignment (adjusted Rand index 1.0). Automated tests cover real
+  Qt checkbox defaults, visibility and disabled state, request snapshots,
+  policy-specific numerical behavior, and metadata persistence through
+  assignment/project and workbook exports. These do not establish a manual
+  napari pass or verify anatomical cluster quality.
 
   Automated tests cover rule validation and metadata, mask unions and
   precedence, exclusion-only out-of-atlas behavior, per-rule soma thresholds
@@ -2437,8 +2472,8 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    cohort restriction and asks for a new scan.
 5. **Action:** Populate the Data table with the same candidate cohort, run
    Analysis voxel-correlation clustering with **Current Table** and matching
-   filters, and compare the reference neuron's exported distance row with
-   Search.
+   filters and **Use corrected Pearson correlation** checked in both tabs,
+   and compare the reference neuron's exported distance row with Search.
    **Expected:** Every single-reference Search distance matches the
    corresponding Analysis distance. In CCFv3, pairs with no shared voxel use a
    zero cross-product in the Pearson formula rather than a fixed correlation.
@@ -2448,7 +2483,13 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    `missing_correlation_policy = zero_cross_product_omit_zero_variance` and the
    zero-variance candidate count. These updated CCFv3 checks are **Not run**
    manually; automated tests cover the distances, omissions, errors, and CSV
-   provenance round trip.
+   provenance round trip. Repeat with the checkbox unchecked in both tabs:
+   distances must still agree, but disjoint or undefined correlations become
+   `-1` (distance `2`), constant candidates remain eligible, and a constant
+   reference returns legacy distances. Legacy status must not report those
+   constant candidates as omitted. CSV context records
+   `use_corrected_pearson`, the implementation identifier, and both effective
+   policies; legacy `missing_correlation_policy` is `pearson_r_minus_one`.
 6. **Action:** With the version-3 Parquet loaded, change **Coordinate space**
    to **Flat map + Depth**, choose each available **Flatmap style**, set **Y
    bins**, **Depth bin (μm)**, and **Include depth -1 plane**, then run Search.
@@ -2466,7 +2507,12 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    user to add the cohort to Data, click **Apply Search Colors to Data**, and
    inspect it in **Flatmap**. The color action remains enabled. Switching back
    to **CCFv3 Coordinates** restores the original CCFv3 heatmap controls and
-   behavior.
+   behavior. **Use corrected Pearson correlation** is visible only for CCFv3
+   Search, defaults to checked in a new widget session, retains its choice
+   across space changes, and is independent of Analysis. Changing this option
+   has no effect on flatmap calculations. It is disabled during preflight and
+   Search execution and becomes available again after completion, error, or
+   cancellation of the large-run prompt.
 7. **Action:** Expand **Search Filters** and inspect both **Include** and
    **Exclude** trees. Compare the available hierarchy with **Analysis** >
    **Clustering** > **Region Filters** for the same atlas and Parquet. Search
@@ -2569,7 +2615,11 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     matching run-context JSON. Reference order, scope, filters, rank, and
     availability round trip. Loading does not alter Data until an explicit Add
     action is clicked, and reopened version-2 results can reproduce annotation
-    and heatmap actions.
+    and heatmap actions. Change **Use corrected Pearson correlation** after
+    completing a run, then save and reopen its CSV: the results and status
+    retain their recorded policy regardless of the current checkbox. Repeat
+    with a historical CSV lacking policy metadata; its results remain
+    unchanged and no policy is inferred or displayed.
 16. **Action:** Reopen the version-2 CSV with a different Parquet loaded,
     including some but not all exported reference and result `file_id` values.
     Also open a release-1 Search CSV.
@@ -2604,6 +2654,10 @@ of dendritic projections mislabeled as type `2` has not been quantified.
 - Region hierarchy checks in step 7: **Not run** (added 2026-10-06). Automated
   regression coverage checks ancestor visibility, parent-to-descendant
   resolution, and retention of independent rules and dilation on refresh.
+- Both Pearson checkbox workflows in steps 5, 6, and 15: **Not run** manually
+  (added 2026-10-06). Automated regressions cover both calculation policies,
+  constant references/candidates, agreement with Analysis, immutable requests,
+  real Qt controls, cancellation, CSV provenance, and recorded-result messages.
 
 ### UC-021: Build and Run a Compound Regional-Profile Query
 
