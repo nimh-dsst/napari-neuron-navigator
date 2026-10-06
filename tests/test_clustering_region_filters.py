@@ -164,11 +164,13 @@ def test_ccf_mos_exclusion_preserves_distinct_projection_populations(
     assert labels["cortex-a"] == labels["cortex-b"]
     assert labels["brainstem-a"] == labels["brainstem-b"]
     assert labels["cortex-a"] != labels["brainstem-a"]
-    # The CCF backend currently assigns r=-1 to pairs with no common voxel.
-    for i, left in enumerate(result.neuron_ids):
-        for j, right in enumerate(result.neuron_ids):
-            expected = 1.0 if left.split("-")[0] == right.split("-")[0] else -1.0
-            assert result.correlation_matrix[i, j] == pytest.approx(expected)
+    # Independent dense Pearson oracle includes zero cross-products for
+    # disjoint populations; their r is -2/3, not perfect anticorrelation.
+    np.testing.assert_allclose(
+        result.correlation_matrix,
+        np.corrcoef([vectors[file_id] for file_id in result.neuron_ids]),
+        atol=1e-7,
+    )
 
 
 class _Atlas:

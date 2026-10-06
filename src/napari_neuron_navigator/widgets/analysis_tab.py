@@ -2788,6 +2788,18 @@ class AnalysisTabWidget(QWidget):
         )
         metadata = getattr(result, "metadata", None)
         extra_metadata = getattr(metadata, "extra_metadata", {})
+        correlation_metadata = (
+            extra_metadata.get("correlation", {})
+            if isinstance(extra_metadata, dict)
+            else {}
+        )
+        zero_variance_count = correlation_metadata.get("zero_variance_neuron_count", 0)
+        if zero_variance_count:
+            progress_message += (
+                f" {int(zero_variance_count):,} neuron(s) have zero variance in "
+                "their voxel counts and remain unclustered because Pearson "
+                "correlation is undefined."
+            )
         voxel_filter_metadata = (
             extra_metadata.get("voxel_node_filter")
             if isinstance(extra_metadata, dict)

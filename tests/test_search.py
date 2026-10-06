@@ -212,7 +212,8 @@ def test_single_reference_search_matches_analysis_distance_row(tmp_path) -> None
     }
     actual = result.hits.set_index("file_id")["pearson_distance"].to_dict()
     assert actual == pytest.approx(expected)
-    assert actual["disjoint"] == pytest.approx(2.0)
+    expected_disjoint = 1.0 - np.corrcoef([2, 1, 0, 0], [0, 0, 0, 3])[0, 1]
+    assert actual["disjoint"] == pytest.approx(expected_disjoint)
     assert next(iter(result.hits["file_id"])) == "similar"
     assert result.input_candidate_count == 3
     assert result.usable_candidate_count == 3
@@ -437,7 +438,8 @@ def test_search_reports_candidates_omitted_by_filter(tmp_path) -> None:
             "node_id": [1, 2, 1, 1],
             "parent_id": [-1, 1, -1, -1],
             "type": [2, 2, 2, 3],
-            "x": [0.0, 1.0, 0.0, 2.0],
+            # Disjoint, nonconstant reference/candidate vectors after filtering.
+            "x": [0.0, 0.0, 1.0, 2.0],
             "y": [0.0] * 4,
             "z": [0.0] * 4,
         }
@@ -463,6 +465,73 @@ def test_search_reports_candidates_omitted_by_filter(tmp_path) -> None:
     assert result.input_candidate_count == 2
     assert result.usable_candidate_count == 1
     assert result.hits["file_id"].tolist() == ["kept"]
+
+
+def test_ccf_search_reports_zero_variance_candidates(tmp_path):
+    import duckdb
+
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+    from tests.test_correlation import _write_count_vectors
+
+    path = tmp_path / "constant_candidate.parquet"
+    _write_count_vectors(path, [[2, 1, 0], [0, 0, 3], [1, 1, 1]])
+    with duckdb.connect() as conn:
+        result = compute_voxel_search(
+            conn, path, VoxelSearchRequest(reference_file_ids=("file-0",))
+        )
+    assert result.hits["file_id"].tolist() == ["file-1"]
+    assert result.omitted_candidate_file_ids == ("file-2",)
+    assert result.input_candidate_count == 2
+    assert result.usable_candidate_count == 1
+    assert result.metadata["zero_variance_candidate_count"] == 1
+    assert (
+        result.metadata["missing_correlation_policy"]
+        == "zero_cross_product_omit_zero_variance"
+    )
+
+    messages = []
+    widget = types.SimpleNamespace(
+        _set_result_frame=lambda frame: None,
+        _status_label=types.SimpleNamespace(setText=messages.append),
+    )
+    SearchTabWidget._on_search_finished(widget, result)
+    assert "1 candidate(s) were omitted" in messages[0]
+    assert "Pearson correlation is undefined" in messages[0]
+    output = tmp_path / "constant_candidate.csv"
+    export_search_results_csv(output, result)
+    restored = load_search_results_csv(output)
+    assert (
+        restored.metadata["missing_correlation_policy"]
+        == result.metadata["missing_correlation_policy"]
+    )
+    assert restored.metadata["zero_variance_candidate_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "counts, references, message",
+    [
+        ([[1, 1], [3, 0]], ("file-0",), "aggregate reference has zero variance"),
+        (
+            [[1, 0], [0, 1], [3, 0]],
+            ("file-0", "file-1"),
+            "aggregate reference has zero variance",
+        ),
+        ([[3, 0], [1, 1]], ("file-0",), "No candidate neurons have nonzero variance"),
+    ],
+)
+def test_ccf_search_rejects_undefined_correlations(
+    tmp_path, counts, references, message
+):
+    import duckdb
+
+    from tests.test_correlation import _write_count_vectors
+
+    path = tmp_path / "undefined.parquet"
+    _write_count_vectors(path, counts)
+    with duckdb.connect() as conn, pytest.raises(ValueError, match=message):
+        compute_voxel_search(
+            conn, path, VoxelSearchRequest(reference_file_ids=references)
+        )
 
 
 def test_search_csv_round_trip_and_availability(tmp_path) -> None:

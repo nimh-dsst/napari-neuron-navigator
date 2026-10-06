@@ -2294,7 +2294,8 @@ def test_update_button_states_disables_export_controls_without_result():
     assert not widget._add_all_cluster_heatmaps_btn.isEnabled()
 
 
-def test_on_correlation_finished_leaves_clustermap_unrendered():
+@pytest.mark.parametrize("zero_variance_count", [0, 1])
+def test_on_correlation_finished_leaves_clustermap_unrendered(zero_variance_count):
     """Clustering completion should not auto-render the dendrogram preview."""
     AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
     widget = AnalysisTabWidget.__new__(AnalysisTabWidget)
@@ -2320,6 +2321,12 @@ def test_on_correlation_finished_leaves_clustermap_unrendered():
     result = types.SimpleNamespace(
         neuron_ids=["n1", "n2"],
         labels=np.array([1, 2], dtype=np.int32),
+        unassigned_neuron_ids=["constant"] if zero_variance_count else [],
+        metadata=types.SimpleNamespace(
+            extra_metadata={
+                "correlation": {"zero_variance_neuron_count": zero_variance_count},
+            }
+        ),
     )
 
     widget._on_correlation_finished(result)
@@ -2332,9 +2339,12 @@ def test_on_correlation_finished_leaves_clustermap_unrendered():
     ]
     assert "Table updated and sorted by cluster." in widget._progress_label.text()
     assert (
-        "0 neuron(s) are unclustered after region/coordinate filtering."
+        f"{zero_variance_count} neuron(s) are unclustered after region/coordinate filtering."
         in widget._progress_label.text()
     )
+    assert (
+        "Pearson correlation is undefined" in widget._progress_label.text()
+    ) == bool(zero_variance_count)
     assert "Auto-colored" not in widget._progress_label.text()
 
 

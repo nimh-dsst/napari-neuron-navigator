@@ -1627,11 +1627,16 @@ class CorrelationWorker(QObject):
                 conn.close()
 
             self.progress.emit("Building correlation matrix...", 3, total)
+            correlation_metadata = dict(corr_df.attrs.get("correlation_metadata", {}))
+            zero_variance_ids = correlation_metadata.get("zero_variance_file_ids", [])
             mat_df, mat = correlation_long_to_matrix(corr_df)
             if len(mat_df.columns) < 2:
                 self.error.emit(
                     "Voxel correlation requires at least 2 neurons with usable "
-                    "nodes after applying region and coordinate filters."
+                    "nodes and nonzero variance in their voxel counts after "
+                    "filtering. "
+                    f"{len(zero_variance_ids)} neuron(s) have zero variance "
+                    "and undefined Pearson correlation."
                 )
                 return
 
@@ -1649,21 +1654,19 @@ class CorrelationWorker(QObject):
                     or self._region_filter is not None
                     or self._voxel_node_filter is not None
                 )
-                else list(result.neuron_ids)
+                else [*result.neuron_ids, *zero_variance_ids]
             )
             clustered_ids = set(result.neuron_ids)
             result.unassigned_neuron_ids = [
                 file_id for file_id in input_ids if file_id not in clustered_ids
             ]
-            extra_metadata = None
+            extra_metadata = {"correlation": correlation_metadata}
             if self._voxel_node_filter is not None:
-                extra_metadata = {
-                    "voxel_node_filter": (
-                        self._prepared_voxel_filter.metadata()
-                        if self._prepared_voxel_filter is not None
-                        else self._voxel_node_filter.to_dict()
-                    )
-                }
+                extra_metadata["voxel_node_filter"] = (
+                    self._prepared_voxel_filter.metadata()
+                    if self._prepared_voxel_filter is not None
+                    else self._voxel_node_filter.to_dict()
+                )
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,

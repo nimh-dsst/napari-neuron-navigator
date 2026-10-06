@@ -128,6 +128,7 @@ def _search_context(metadata: Mapping[str, object]) -> dict[str, object]:
         "coordinate_space",
         "distance_metric",
         "missing_correlation_policy",
+        "zero_variance_candidate_count",
         "aggregate_mode",
         "resolution_um",
         "flatmap_style",
@@ -523,10 +524,10 @@ def compute_voxel_search(
 
     CCF searches match :func:`compute_pearson_correlation_matrix`; flatmap
     searches use the same rectangular grid and bin expressions as Analysis.
-    CCF preserves its historical ``r = -1`` fallback for no shared occupancy
-    or an undefined denominator. Flatmap follows Analysis's dense zero-filled
-    vectors: no-overlap cross-products are zero and an undefined denominator
-    produces ``r = 0``.
+    No-overlap cross-products are zero in both coordinate spaces. CCF omits
+    candidates with zero-variance vectors and rejects an aggregate reference
+    with zero variance. Flatmap follows its existing Analysis convention of
+    ``r = 0`` for an undefined denominator.
     """
     from .correlation import _cleanup_region_nodes_view, _prepare_region_nodes_view
 
@@ -841,13 +842,8 @@ def compute_voxel_search(
         """)
 
         progress("Computing and ranking Pearson distances...", 5)
-        cross_product = (
-            "xprod.sxy"
-            if request.coordinate_space == SEARCH_SPACE_CCF
-            else "COALESCE(xprod.sxy, 0.0)"
-        )
         undefined_correlation = (
-            -1.0 if request.coordinate_space == SEARCH_SPACE_CCF else 0.0
+            "NULL" if request.coordinate_space == SEARCH_SPACE_CCF else "0.0"
         )
         score_frame = conn.execute(
             f"""
@@ -864,17 +860,18 @@ def compute_voxel_search(
             )
             SELECT
                 cstats.file_id,
+                vu.v * qstats.syy - qstats.sy * qstats.sy AS query_variance,
                 COALESCE(
                     (
-                        vu.v * {cross_product} - cstats.sx * qstats.sy
+                        vu.v * COALESCE(xprod.sxy, 0.0) - cstats.sx * qstats.sy
                     ) / NULLIF(
                         SQRT(
-                            (vu.v * cstats.sxx - cstats.sx * cstats.sx)
-                            * (vu.v * qstats.syy - qstats.sy * qstats.sy)
+                            GREATEST(vu.v * cstats.sxx - cstats.sx * cstats.sx, 0.0)
+                            * GREATEST(vu.v * qstats.syy - qstats.sy * qstats.sy, 0.0)
                         ),
                         0
                     ),
-                    {undefined_correlation!r}
+                    {undefined_correlation}
                 ) AS pearson_r
             FROM search_candidate_stats cstats
             LEFT JOIN search_cross_products xprod USING (file_id)
@@ -883,13 +880,37 @@ def compute_voxel_search(
             """
         ).fetchdf()
 
+        zero_variance_ids = []
+        if request.coordinate_space == SEARCH_SPACE_CCF and not score_frame.empty:
+            if float(score_frame["query_variance"].iloc[0]) <= 0.0:
+                raise ValueError(
+                    "The aggregate reference has zero variance in its voxel "
+                    "counts, so Pearson correlation is undefined. Change the "
+                    "references or filters."
+                )
+            valid = np.isfinite(score_frame["pearson_r"].to_numpy(dtype=float))
+            zero_variance_ids = sorted(score_frame.loc[~valid, "file_id"].astype(str))
+            score_frame = score_frame.loc[valid].copy()
+            usable_ids.difference_update(zero_variance_ids)
+            omitted = tuple(
+                file_id for file_id in result_candidate_ids if file_id not in usable_ids
+            )
+            usable_candidate_ids = tuple(
+                file_id for file_id in result_candidate_ids if file_id in usable_ids
+            )
+            if not usable_candidate_ids:
+                raise ValueError(
+                    "No candidate neurons have nonzero variance in their voxel "
+                    "counts after filtering; Pearson correlation is undefined."
+                )
+
         if score_frame.empty:
             hits = _empty_hits()
         else:
             correlations = np.clip(
-                pd.to_numeric(score_frame["pearson_r"], errors="coerce")
-                .fillna(undefined_correlation)
-                .to_numpy(dtype=np.float64),
+                pd.to_numeric(score_frame["pearson_r"], errors="coerce").to_numpy(
+                    dtype=np.float64
+                ),
                 -1.0,
                 1.0,
             )
@@ -954,10 +975,12 @@ def compute_voxel_search(
             "coordinate_space": request.coordinate_space,
             "distance_metric": "one_minus_pearson_r",
             "missing_correlation_policy": (
-                "pearson_r_minus_one"
+                "zero_cross_product_omit_zero_variance"
                 if request.coordinate_space == SEARCH_SPACE_CCF
                 else "flatmap_dense_zero_filled_r_zero_if_undefined"
             ),
+            "zero_variance_candidate_file_ids": zero_variance_ids,
+            "zero_variance_candidate_count": len(zero_variance_ids),
             "aggregate_mode": "sum_voxel_counts",
             "source_parquet_path": str(Path(parquet_path)),
             "resolution_um": float(request.resolution_um),

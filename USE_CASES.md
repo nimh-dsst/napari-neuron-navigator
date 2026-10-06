@@ -2126,6 +2126,10 @@ is always evaluated from CCFv3 node coordinates.
    **Unclustered**, while the other neurons cluster normally. With fewer than
    two clusterable neurons, the run stops with a corrective message and creates
    no assignment.
+   For CCFv3, also test a neuron with identical counts in every voxel of the
+   cohort's occupied union. Its Pearson correlation is undefined; it remains
+   **Unclustered**, and the completion message reports the zero-variance count.
+   If fewer than two nonconstant vectors remain, the error explains this reason.
 7. **Action:** Choose **Soma Location**. Confirm that each retained neuron's
    averaged soma lies in an Include mask. Configure two Exclude rules with
    different node types and thresholds, testing counts immediately below and
@@ -2156,6 +2160,11 @@ is always evaluated from CCFv3 node coordinates.
     numeric node types and labels, thresholds, and the `exclude_wins` policy.
     Legacy selected/represented fields summarize Include rules. The legacy
     dilation value is `null` when Include rules use different dilations.
+    New CCFv3 voxel runs record `extra_metadata.correlation.implementation` as
+    `ccf_pearson_complete_pairs_v2`, together with the occupied voxel count,
+    zero-cross-product policy, and zero-variance neuron count and `file_id` list.
+    Previously saved assignments keep their original results; rerun clustering
+    to apply the corrected correlation calculation.
 11. **Action:** Reproduce the MOs challenge using
     `isocortex_total_right_brainglobe_flatmap.parquet`, the cached
     `allen_mouse_25um` v1.2 atlas, and the 1,898 distinct `file_id` values whose
@@ -2189,12 +2198,22 @@ is always evaluated from CCFv3 node coordinates.
   napari. A backend audit on 2026-10-06 reproduced step 11's cohort and counts,
   checked every retained node against an independent atlas annotation lookup,
   and matched retained counts for every `file_id`. Ward at k=5 clustered all
-  1,898 neurons into groups of 469, 497, 443, 278, and 211. Of 1,800,253 neuron
-  pairs, 981,643 (54.53%) shared no remaining 25 µm voxel. The existing CCF
-  matrix assigns such pairs `r = -1`, so they all have distance 2; this is a
-  limitation of the similarity calculation, not evidence of MOs nodes leaking
-  through the filter. These backend checks do not verify anatomical cluster
-  quality or the manual rendering workflow.
+  1,898 neurons into groups of 469, 497, 443, 278, and 211 with the original
+  correlation calculation. Of 1,800,253 neuron pairs, 981,643 (54.53%) shared no
+  remaining 25 µm voxel. The original CCF matrix incorrectly assigned these
+  pairs `r = -1`, giving them all distance 2.
+
+  A second backend audit on 2026-10-06 used complete Pearson correlations with
+  zero cross-products for disjoint pairs. The same 1,898-neuron cohort, MOs
+  exclusion, 25 µm grid, Ward linkage, k=5, and `1 - r` distance produced cluster
+  sizes 206, 2, 511, 301, and 878. After optimal cluster-label matching,
+  545/1,898 neurons (28.71%) changed assignment; adjusted Rand index was 0.5576.
+  All previously computed correlations for overlapping pairs were unchanged
+  at float32 precision. Corrected disjoint-pair correlations ranged from
+  -0.00301638 to -0.00000238 over 5,041,328 occupied voxels. No neuron had zero
+  variance. These backend checks do not verify anatomical cluster quality or
+  the manual rendering workflow; the new zero-variance UI checks are **Not run**
+  in napari.
 
   Automated tests cover rule validation and metadata, mask unions and
   precedence, exclusion-only out-of-atlas behavior, per-rule soma thresholds
@@ -2205,6 +2224,9 @@ is always evaluated from CCFv3 node coordinates.
   MOs challenge through preflight and the correlation worker. The latter
   compares exclusion with a separately filtered projection-only Parquet under
   Ward and average linkage, both with and without a root Include rule.
+  Pearson regression tests compare every pair against NumPy, check file scope
+  and unused mask voxels, reject incomplete/nonfinite matrices, and verify
+  zero-variance omissions, worker errors, user messages, and export provenance.
 
 ### UC-019: Filter Voxel Correlation by Node Type, Dendrite-Label Coverage, or Soma Distance
 
@@ -2418,8 +2440,15 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    filters, and compare the reference neuron's exported distance row with
    Search.
    **Expected:** Every single-reference Search distance matches the
-   corresponding Analysis distance, including the established behavior for
-   neurons with no shared occupied voxel.
+   corresponding Analysis distance. In CCFv3, pairs with no shared voxel use a
+   zero cross-product in the Pearson formula rather than a fixed correlation.
+   Candidates whose count vector has zero variance are omitted and counted in
+   the status message. A constant aggregate reference stops the search with an
+   explanation. Search CSV context records
+   `missing_correlation_policy = zero_cross_product_omit_zero_variance` and the
+   zero-variance candidate count. These updated CCFv3 checks are **Not run**
+   manually; automated tests cover the distances, omissions, errors, and CSV
+   provenance round trip.
 6. **Action:** With the version-3 Parquet loaded, change **Coordinate space**
    to **Flat map + Depth**, choose each available **Flatmap style**, set **Y
    bins**, **Depth bin (μm)**, and **Include depth -1 plane**, then run Search.

@@ -1178,6 +1178,14 @@ class SearchTabWidget(QWidget):
         )
         self._set_result_frame(frame)
         omitted = len(result.omitted_candidate_file_ids)
+        zero_variance_count = result.metadata.get("zero_variance_candidate_count", 0)
+        variance_message = (
+            f" {int(zero_variance_count):,} candidate(s) were omitted because "
+            "their voxel counts have zero variance and Pearson correlation "
+            "is undefined."
+            if zero_variance_count
+            else ""
+        )
         self._status_label.setText(
             f"Reference neurons: {len(result.reference_file_ids):,}; scanned "
             f"{result.input_candidate_count:,} candidates; "
@@ -1186,7 +1194,7 @@ class SearchTabWidget(QWidget):
             f"{result.retained_node_count:,} node rows in "
             f"{SEARCH_SPACE_LABELS.get(result.metadata.get('coordinate_space'), 'the selected space')} from "
             f"{result.metadata.get('candidate_scope_label', 'the selected scope')}. "
-            "Lower distance is more similar."
+            "Lower distance is more similar." + variance_message
         )
 
     def _on_search_thread_finished(self) -> None:
