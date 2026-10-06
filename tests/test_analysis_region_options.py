@@ -150,6 +150,7 @@ class _DummyLineEdit(_DummyWidget):
     def __init__(self, text: str = "", *_args, **_kwargs) -> None:
         super().__init__()
         self._text = text
+        self.editingFinished = _BoundSignal()
 
     def text(self) -> str:
         return self._text
@@ -3042,7 +3043,9 @@ def test_draw_clustermap_emits_debug_logs(caplog):
     }
     populate_calls: list[tuple[object, object, object, tuple[float, float], int]] = []
 
-    def _fake_populate(figure, result, cluster_color_map, *, figsize, dpi):
+    def _fake_populate(
+        figure, result, cluster_color_map, *, figsize, dpi, contrast=None
+    ):
         populate_calls.append(
             (figure, result, cluster_color_map, tuple(figsize), int(dpi))
         )
@@ -3102,7 +3105,9 @@ def test_draw_clustermap_uses_physical_canvas_size_when_figure_size_unavailable(
     widget._cluster_color_map = None
     populate_calls: list[tuple[object, object, object, tuple[float, float], int]] = []
 
-    def _fake_populate(figure, result, cluster_color_map, *, figsize, dpi):
+    def _fake_populate(
+        figure, result, cluster_color_map, *, figsize, dpi, contrast=None
+    ):
         populate_calls.append(
             (figure, result, cluster_color_map, tuple(figsize), int(dpi))
         )

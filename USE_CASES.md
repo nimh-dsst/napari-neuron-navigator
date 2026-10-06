@@ -47,6 +47,7 @@ Unless a use case says otherwise:
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
 | [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Partially run |
 | [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Build a regional profile and combine soma, neurite, laterality, and measurement conditions in the Regions tab | Partially run |
+| [UC-022](#uc-022-adjust-clustermap-contrast-and-compare-color-scales) | Reveal small distance differences and lock clustermap color limits across comparable runs | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2769,6 +2770,91 @@ path as the existing simple Atlas, Custom, and Mask queries.
   handling, and regression checks for every existing query mode, was not run.
   Stage 3 also has headless model, worker, scope, table-handoff, and
   existing-mode regression coverage.
+
+### UC-022: Adjust Clustermap Contrast and Compare Color Scales
+
+**Capability**
+
+Analysis can stretch clustermap colors over a narrow range of distances while
+preserving the numerical analysis. Automatic contrast uses the 1st and 99th
+percentiles of finite distances between different neurons. Manual limits and
+an optional lock allow comparisons between runs on the same color scale.
+Preview and PNG export share the same resolved limits; clustering, dendrogram
+order, assignments, and workbook/Parquet numerical exports remain unchanged.
+
+**Prerequisites**
+
+- Complete a clustering run with its distance matrix still available in the
+  current session. Restored assignments without runtime matrices require a
+  rerun before building or exporting a clustermap.
+- For the MOs contrast example, use UC-018 step 11: the 1,898-neuron cohort in
+  `isocortex_total_right_brainglobe_flatmap.parquet`, `allen_mouse_25um` v1.2,
+  CCFv3 Voxel Correlation, no Include rules, MOs exclusion at 0%, Ward, k=5,
+  no additional voxel node filters, and corrected Pearson enabled.
+- Have a second clustering result using Pearson distance, and a CCFv3 Soma
+  Location result using distance in micrometres, for the lock checks.
+
+**Steps and expected results**
+
+1. **Action:** Open **Analysis** > **Clustermap** after the MOs clustering run
+   and click **Build Dendrogram**.
+   **Expected:** **Auto contrast** is the default, and **Lock limits across
+   runs** is unchecked. **Color minimum** and **Color maximum** show about
+   `0.9916492772` and `1.001549363`. Within-cluster variation is visible instead
+   of nearly uniform red. The colorbar shows actual distances and **Auto**;
+   endpoint triangles indicate values outside the displayed range. Self-distance
+   zeros do not influence automatic limits. Resizing retains the same limits.
+2. **Action:** Click **Full range**, then **Auto contrast**.
+   **Expected:** Full range includes the entire finite matrix, including its
+   diagonal: approximately `0` to `1.003016353` for this MOs run. The plot
+   returns to nearly uniform red. Auto contrast restores the percentile limits
+   and stronger contrast. Neither action reruns clustering or changes labels.
+3. **Action:** Enter `0.995` in **Color minimum** and `1.001` in **Color maximum**,
+   pressing Enter or leaving each field to apply. Also try scientific notation.
+   Then try blank text, `nan`, `inf`, equal bounds, and reversed bounds.
+   **Expected:** Valid limits update an already built plot and identify the
+   scale as **Manual contrast**. Invalid entries show an explanatory message
+   while retaining the previous valid scale. Auto contrast and Full range also
+   restore valid values in the fields. Focus changes without edits do not
+   change the active scale or mode.
+4. **Action:** With manual limits applied, check **Lock limits across runs**
+   and run another Pearson clustering. Build its dendrogram, then switch to
+   CCFv3 Soma Location and run clustering again.
+   **Expected:** The second Pearson result retains exactly the locked limits
+   and uses a manual scale. The metric change clears the lock, explains why,
+   and computes fresh automatic limits. When unlocked, each new result starts
+   in automatic mode. Selecting another live assignment follows these same
+   rules, and the previous result's plot is cleared until rebuilt.
+5. **Action:** Set manual limits, choose an export DPI, click **Save Dendrogram**,
+   and compare the PNG with the preview. Repeat at another DPI and in automatic
+   mode. Export a distance workbook as well.
+   **Expected:** PNG colors, limits, mode, and endpoint extensions match the
+   preview even when the number of rendered cells differs. Colorbar ticks
+   distinguish small differences without rounding them all to `1`. The
+   workbook retains the full original distances. Contrast choices are session
+   display settings; reopening a project does not restore them.
+6. **Action:** Test a result with identical finite off-diagonal distances, for
+   example clustering exactly two usable neurons. Also test a result where
+   percentiles coincide but some pairs have different distances.
+   **Expected:** Identical pair distances receive one uniform color and an
+   explanation that there is no contrast to stretch. Coincident percentiles
+   with remaining variation fall back to the full off-diagonal range. Finite
+   off-diagonal values alone determine automatic statistics.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-06
+- Notes: Automated regressions cover numerical edge cases, unchanged analysis
+  arrays, real Qt controls, invalid edits, cached statistics, lock/reset behavior,
+  metric changes, and preview/export agreement. On 2026-10-06, full-range and
+  automatic PNGs were generated and visually inspected from the saved corrected
+  1,898-neuron MOs matrix with Ward k=5. Automatic limits were
+  `0.9916492772102355–1.0015493631362915`, full limits were
+  `0–1.0030163526535034`, and distances remained bit-identical. The automatic
+  image revealed visible block structure and variation. This is an exported
+  image check, not a manual napari workflow pass or biological validation.
 
 ## Use-Case Template
 

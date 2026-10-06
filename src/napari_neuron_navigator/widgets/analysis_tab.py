@@ -41,6 +41,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from ..analysis.clustermap_contrast import ClustermapContrast
 from ..analysis.flatmap_correlation import (
     DEFAULT_FLATMAP_DEPTH_SCALE,
     DEFAULT_FLATMAP_SOMA_DBSCAN_EPS,
@@ -220,6 +221,7 @@ def _populate_embedded_clustermap_figure(
     *,
     figsize: tuple[float, float] = (6.0, 6.0),
     dpi: int | None = None,
+    contrast: ClustermapContrast | None = None,
 ) -> Figure:
     """Populate the persistent dendrogram preview figure used by the tab."""
     from ..analysis.export import populate_clustermap_figure
@@ -230,6 +232,7 @@ def _populate_embedded_clustermap_figure(
         cluster_color_map,
         figsize=figsize,
         dpi=dpi,
+        contrast=contrast,
     )
 
 
@@ -430,6 +433,9 @@ class AnalysisTabWidget(QWidget):
         self._dataset_region_ids: set[int] = set()
         self._dataset_node_types: tuple[int, ...] = ()
         self._clustermap_rendered = False
+        self._clustermap_contrast_result = None
+        self._clustermap_contrast: ClustermapContrast | None = None
+        self._clustermap_contrast_metric: str | None = None
         self._cluster_region_query_scope = _ANALYSIS_SCOPE_WHOLE
         self._current_table_file_ids_provider = None
         self._selected_table_file_ids_provider = None
@@ -600,6 +606,11 @@ class AnalysisTabWidget(QWidget):
         if hasattr(self, "_add_all_cluster_heatmaps_btn"):
             self._add_all_cluster_heatmaps_btn.setEnabled(has_cluster_heatmap_options)
         analysis_ready = self._last_cluster_result is not None and not busy
+        if hasattr(self, "_clustermap_contrast_controls"):
+            self._sync_clustermap_contrast_result()
+            self._clustermap_contrast_controls.setEnabled(
+                analysis_ready and self._clustermap_contrast is not None
+            )
         if hasattr(self, "_render_clustermap_btn"):
             self._render_clustermap_btn.setEnabled(analysis_ready)
         if hasattr(self, "_build_clustermap_btn"):
@@ -1109,6 +1120,48 @@ class AnalysisTabWidget(QWidget):
             "Run clustering, then click 'Build Dendrogram' to render the cluster map."
         )
         clustermap_layout.addWidget(self._clustermap_status_label)
+        self._clustermap_contrast_controls = QWidget()
+        contrast_layout = QVBoxLayout(self._clustermap_contrast_controls)
+        contrast_layout.setContentsMargins(0, 0, 0, 0)
+        limits_row = QHBoxLayout()
+        self._clustermap_min_edit = QLineEdit()
+        self._clustermap_max_edit = QLineEdit()
+        for label, edit in (
+            ("Color minimum", self._clustermap_min_edit),
+            ("Color maximum", self._clustermap_max_edit),
+        ):
+            limits_row.addWidget(QLabel(label))
+            limits_row.addWidget(edit)
+            edit.setToolTip(
+                "Enter a finite distance, including scientific notation. Press Enter or leave the field to apply."
+            )
+            edit.editingFinished.connect(self._apply_manual_clustermap_contrast)
+        contrast_layout.addLayout(limits_row)
+        contrast_actions = QHBoxLayout()
+        self._clustermap_auto_btn = QPushButton("Auto contrast")
+        self._clustermap_auto_btn.setToolTip(
+            "Use the 1st and 99th percentiles of finite off-diagonal distances in the full matrix."
+        )
+        self._clustermap_auto_btn.clicked.connect(
+            lambda: self._reset_clustermap_contrast("auto")
+        )
+        self._clustermap_full_btn = QPushButton("Full range")
+        self._clustermap_full_btn.clicked.connect(
+            lambda: self._reset_clustermap_contrast("full")
+        )
+        contrast_actions.addWidget(self._clustermap_auto_btn)
+        contrast_actions.addWidget(self._clustermap_full_btn)
+        contrast_layout.addLayout(contrast_actions)
+        self._clustermap_lock_cb = QCheckBox("Lock limits across runs")
+        self._clustermap_lock_cb.setToolTip(
+            "Reuse these limits for subsequent results with the same distance metric. A different metric clears the lock."
+        )
+        contrast_layout.addWidget(self._clustermap_lock_cb)
+        self._clustermap_contrast_label = QLabel("Run clustering to set color limits.")
+        self._clustermap_contrast_label.setWordWrap(True)
+        contrast_layout.addWidget(self._clustermap_contrast_label)
+        self._clustermap_contrast_controls.setEnabled(False)
+        clustermap_layout.addWidget(self._clustermap_contrast_controls)
         self._build_clustermap_btn = QPushButton("Build Dendrogram")
         self._build_clustermap_btn.clicked.connect(self._render_clustermap_requested)
         clustermap_layout.addWidget(self._build_clustermap_btn)
@@ -3127,6 +3180,90 @@ class AnalysisTabWidget(QWidget):
         self._update_button_states()
         logger.error(f"Analysis pipeline error: {message}")
 
+    def _sync_clustermap_contrast_result(self) -> None:
+        """Resolve a new result once; keep locked limits only for matching metrics."""
+        result = self._last_cluster_result
+        if result is self._clustermap_contrast_result:
+            return
+        self._clustermap_contrast_result = result
+        previous = self._clustermap_contrast
+        previous_metric = self._clustermap_contrast_metric
+        metric = getattr(getattr(result, "metadata", None), "distance_metric", None)
+        self._clustermap_contrast_metric = metric
+        lock_cleared = False
+        if self._clustermap_lock_cb.isChecked() and (
+            metric is None or metric != previous_metric
+        ):
+            self._clustermap_lock_cb.setChecked(False)
+            lock_cleared = True
+        if result is None or not hasattr(result, "clustermap_contrast_statistics"):
+            self._clustermap_contrast = None
+            self._clustermap_min_edit.setText("")
+            self._clustermap_max_edit.setText("")
+            self._clustermap_contrast_label.setText(
+                "Run clustering to set color limits."
+            )
+        else:
+            self._clustermap_contrast = (
+                ClustermapContrast(previous.minimum, previous.maximum)
+                if previous is not None and self._clustermap_lock_cb.isChecked()
+                else result.clustermap_contrast_statistics.resolve()
+            )
+            self._show_clustermap_contrast_limits()
+            if lock_cleared:
+                self._clustermap_contrast_label.setText(
+                    "Limit lock cleared because the distance metric changed or is unavailable. "
+                    + self._clustermap_contrast_label.text()
+                )
+        if self._clustermap_rendered:
+            self._show_clustermap_message("Click Build Dendrogram to view this result.")
+
+    def _show_clustermap_contrast_limits(self) -> None:
+        contrast = self._clustermap_contrast
+        if contrast is None:
+            return
+        self._clustermap_min_edit.setText(contrast.format_value(contrast.minimum))
+        self._clustermap_max_edit.setText(contrast.format_value(contrast.maximum))
+        statistics = self._last_cluster_result.clustermap_contrast_statistics
+        self._clustermap_contrast_label.setText(
+            f"{contrast.label}: {contrast.format_value(contrast.minimum)} "
+            f"to {contrast.format_value(contrast.maximum)}. "
+            + statistics.explanation(contrast)
+        )
+
+    def _apply_manual_clustermap_contrast(self) -> None:
+        previous = self._clustermap_contrast
+        if previous is None:
+            return
+        texts = (self._clustermap_min_edit.text(), self._clustermap_max_edit.text())
+        if texts == (
+            previous.format_value(previous.minimum),
+            previous.format_value(previous.maximum),
+        ):
+            self._show_clustermap_contrast_limits()
+            return
+        try:
+            contrast = ClustermapContrast(*(float(text) for text in texts))
+        except ValueError:
+            self._clustermap_contrast_label.setText(
+                "Enter finite color limits with minimum below maximum. The previous valid scale is still in use."
+            )
+            return
+        self._clustermap_contrast = contrast
+        self._show_clustermap_contrast_limits()
+        if self._clustermap_rendered:
+            self._draw_clustermap(self._last_cluster_result)
+
+    def _reset_clustermap_contrast(self, mode: str) -> None:
+        if self._clustermap_contrast is None:
+            return
+        self._clustermap_contrast = (
+            self._last_cluster_result.clustermap_contrast_statistics.resolve(mode)
+        )
+        self._show_clustermap_contrast_limits()
+        if self._clustermap_rendered:
+            self._draw_clustermap(self._last_cluster_result)
+
     def _render_clustermap_requested(self) -> None:
         """Render the latest clustermap only when explicitly requested."""
         if self._last_cluster_result is None:
@@ -3320,6 +3457,7 @@ class AnalysisTabWidget(QWidget):
                 self._cluster_color_map,
                 figsize=figsize,
                 dpi=int(round(dpi)),
+                contrast=getattr(self, "_clustermap_contrast", None),
             )
             logger.debug(
                 "_draw_clustermap populate_clustermap_figure complete: elapsed=%.3fs",
@@ -3617,6 +3755,7 @@ class AnalysisTabWidget(QWidget):
                 x_label=self._export_x_label(),
                 y_label="",
                 dpi=dpi,
+                contrast=self._clustermap_contrast,
             )
         except Exception as error:
             self._on_error(str(error))

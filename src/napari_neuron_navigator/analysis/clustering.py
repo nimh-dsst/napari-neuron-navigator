@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from functools import cached_property
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,8 @@ from scipy.stats import spearmanr
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+    from .clustermap_contrast import ClustermapContrastStatistics
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +427,13 @@ class ClusterResult:
     )
     metadata: ClusterRunMetadata | None = None
     unassigned_neuron_ids: list[str] = field(default_factory=list)
+
+    @cached_property
+    def clustermap_contrast_statistics(self) -> ClustermapContrastStatistics:
+        """Cache display statistics once for this completed, fixed matrix."""
+        from .clustermap_contrast import compute_clustermap_contrast_statistics
+
+        return compute_clustermap_contrast_statistics(self.distance_matrix)
 
     def neuron_ids_in_leaf_order(self) -> list[str]:
         """Return neuron IDs in dendrogram leaf order."""
