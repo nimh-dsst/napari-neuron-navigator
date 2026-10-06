@@ -2758,7 +2758,8 @@ path as the existing simple Atlas, Custom, and Mask queries.
     mode.
     **Expected:** Existing selectors, the raw **Node types** control, mask
     behavior, scope behavior, previews, and Data-table results retain their
-    prior semantics.
+    prior semantics. In a new widget session, **Node types** defaults to
+    **Soma**; other node types and **All node types** remain selectable.
 
 **Manual verification**
 
