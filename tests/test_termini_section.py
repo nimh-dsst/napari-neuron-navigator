@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 class _BoundSignal:
@@ -373,9 +374,14 @@ def _import_termini_section_module():
     previous = {name: sys.modules.get(name) for name in replacements}
     module_name = "napari_neuron_navigator.widgets.termini_section"
     previous_module = sys.modules.get(module_name)
+    selector_module_name = "napari_neuron_navigator.widgets.node_type_selector"
+    previous[selector_module_name] = sys.modules.get(selector_module_name)
 
     try:
         sys.modules.update(replacements)
+        # Bind the shared selector to this test's QComboBox stub, regardless of
+        # whether earlier tests imported it with real Qt or different stubs.
+        sys.modules.pop(selector_module_name, None)
         sys.modules.pop(module_name, None)
 
         module_path = widgets_root / "termini_section.py"
@@ -442,6 +448,31 @@ def _frame(file_ids, node_ids=None):
 
 
 # --- Section shape ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("selector_cached", [False, True])
+def test_termini_import_isolates_node_type_selector(monkeypatch, selector_cached):
+    """Termini tests must neither reuse nor leak another test's Qt bindings."""
+    module_name = "napari_neuron_navigator.widgets.node_type_selector"
+    cached_module = types.ModuleType(module_name)
+    cached_module.NodeTypeSelectorComboBox = MagicMock(
+        side_effect=AssertionError("Reused a selector from a different Qt context")
+    )
+    if selector_cached:
+        monkeypatch.setitem(sys.modules, module_name, cached_module)
+    else:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    module = _import_termini_section_module()
+    widget = module.TerminiSectionWidget(_DummyViewer())
+
+    assert isinstance(widget._termini_node_type_combo, _DummyCombo)
+    assert widget._termini_node_type_combo.selected_node_types() == (2,)
+    if selector_cached:
+        assert sys.modules[module_name] is cached_module
+        cached_module.NodeTypeSelectorComboBox.assert_not_called()
+    else:
+        assert module_name not in sys.modules
 
 
 def test_section_is_titled_termini_and_starts_collapsed() -> None:
