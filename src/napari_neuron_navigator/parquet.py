@@ -7,11 +7,12 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Callable, Iterable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyarrow as pa
@@ -60,6 +61,7 @@ class BatchParquetConversionSummary:
     already_target_files: int = 0
     midline_files: int = 0
     rows_written: int = 0
+    region_profile_path: str | None = None
     failures: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -945,10 +947,18 @@ def batch_convert_swc_to_parquet(
     region_lookup: dict[int, dict] | None = None,
     source_mode: str | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    build_regional_profile: bool = False,
+    regional_profile_atlas: object | None = None,
+    regional_profile_output_path: Path | str | None = None,
 ) -> BatchParquetConversionSummary:
-    """Convert SWC files into one Parquet file with optional alignment."""
+    """Convert SWCs and optionally build the annotated output's profile sidecar."""
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
+    if build_regional_profile and not annotate_regions:
+        raise ValueError(
+            "build_regional_profile requires annotate_regions=True so node "
+            "direct-region assignments are available"
+        )
 
     batch_start = perf_counter()
     output_path = Path(output_path)
@@ -1049,6 +1059,7 @@ def batch_convert_swc_to_parquet(
             midline,
         )
 
+    loaded_atlas = None
     if annotate_regions:
         if (annotation_volume is None) != (region_lookup is None):
             raise ValueError(
@@ -1083,7 +1094,9 @@ def batch_convert_swc_to_parquet(
                 resolution,
                 cache_dir,
             )
-            _, annotation_volume, structure_tree = setup_allen_sdk(resolution, cache_dir)
+            loaded_atlas, annotation_volume, structure_tree = setup_allen_sdk(
+                resolution, cache_dir
+            )
             region_lookup = build_region_lookup(structure_tree)
             logger.debug(
                 (
@@ -1138,38 +1151,73 @@ def batch_convert_swc_to_parquet(
             summary.failed_files,
             summary.rows_written,
         )
-        return summary
+    else:
+        logger.debug(
+            "swc_conversion_path_selected source_mode=%s path=parallel",
+            resolved_source_mode,
+        )
+        summary = _run_parallel_batch_conversion(
+            swc_files,
+            output_path,
+            worker_count=worker_count,
+            target_hemisphere=target_hemisphere,
+            atlas_name=atlas_name,
+            coord_axis=coord_axis,
+            midline=midline,
+            annotate_regions=annotate_regions,
+            resolution=resolution,
+            annotation_volume=annotation_volume,
+            region_lookup=region_lookup,
+            batch_size=batch_size,
+            temp_dir=temp_dir,
+            source_mode=resolved_source_mode,
+            progress_callback=progress_callback,
+        )
+        logger.debug(
+            (
+                "swc_conversion_batch_finished source_mode=%s path=parallel "
+                "elapsed_s=%.6f discovered=%d processed=%d failed=%d rows=%d"
+            ),
+            resolved_source_mode,
+            perf_counter() - batch_start,
+            summary.discovered_files,
+            summary.processed_files,
+            summary.failed_files,
+            summary.rows_written,
+        )
 
-    logger.debug("swc_conversion_path_selected source_mode=%s path=parallel", resolved_source_mode)
-    summary = _run_parallel_batch_conversion(
-        swc_files,
-        output_path,
-        worker_count=worker_count,
-        target_hemisphere=target_hemisphere,
-        atlas_name=atlas_name,
-        coord_axis=coord_axis,
-        midline=midline,
-        annotate_regions=annotate_regions,
-        resolution=resolution,
-        annotation_volume=annotation_volume,
-        region_lookup=region_lookup,
-        batch_size=batch_size,
-        temp_dir=temp_dir,
-        source_mode=resolved_source_mode,
-        progress_callback=progress_callback,
-    )
-    logger.debug(
-        (
-            "swc_conversion_batch_finished source_mode=%s path=parallel "
-            "elapsed_s=%.6f discovered=%d processed=%d failed=%d rows=%d"
-        ),
-        resolved_source_mode,
-        perf_counter() - batch_start,
-        summary.discovered_files,
-        summary.processed_files,
-        summary.failed_files,
-        summary.rows_written,
-    )
+    if build_regional_profile and summary.processed_files:
+        from .analysis.region_profile import (
+            RegionalProfileAtlas,
+            build_region_profile,
+            default_region_profile_path,
+        )
+
+        profile_atlas = regional_profile_atlas or loaded_atlas
+        if profile_atlas is None:
+            raise ValueError(
+                "regional_profile_atlas is required when cached annotation "
+                "inputs are used"
+            )
+        normalized_atlas = (
+            profile_atlas
+            if isinstance(profile_atlas, RegionalProfileAtlas)
+            else RegionalProfileAtlas.from_atlas(
+                profile_atlas, left_right_axis=coord_axis
+            )
+        )
+        profile_output = (
+            default_region_profile_path(output_path)
+            if regional_profile_output_path is None
+            else Path(regional_profile_output_path)
+        )
+        build_region_profile(
+            output_path,
+            normalized_atlas,
+            output_path=profile_output,
+            progress_callback=progress_callback,
+        )
+        summary.region_profile_path = str(profile_output)
     return summary
 
 

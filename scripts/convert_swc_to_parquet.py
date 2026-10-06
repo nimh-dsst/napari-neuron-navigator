@@ -95,6 +95,14 @@ Examples:
         help="Populate Allen region columns using the annotation volume",
     )
     parser.add_argument(
+        "--build-regional-profile",
+        action="store_true",
+        help=(
+            "Also build a validated .region_profile.parquet sidecar; enables "
+            "region annotation"
+        ),
+    )
+    parser.add_argument(
         "--resolution",
         type=_positive_int,
         default=25,
@@ -137,6 +145,8 @@ def _print_summary(summary: BatchParquetConversionSummary, output_path: Path) ->
     print(f"Failed/skipped: {summary.failed_files}")
     print(f"Total node rows written: {summary.rows_written}")
     print(f"Output path: {output_path}")
+    if summary.region_profile_path:
+        print(f"Regional profile: {summary.region_profile_path}")
 
 
 def main(args: list[str] | None = None) -> int:
@@ -156,12 +166,15 @@ def main(args: list[str] | None = None) -> int:
             atlas_name=parsed.atlas,
             coord_axis=parsed.coord_axis,
             midline=parsed.midline,
-            annotate_regions=parsed.annotate_regions,
+            annotate_regions=(
+                parsed.annotate_regions or parsed.build_regional_profile
+            ),
             resolution=parsed.resolution,
             cache_dir=parsed.cache_dir,
             batch_size=parsed.batch_size,
             n_workers=parsed.workers,
             temp_dir=parsed.temp_dir,
+            build_regional_profile=parsed.build_regional_profile,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

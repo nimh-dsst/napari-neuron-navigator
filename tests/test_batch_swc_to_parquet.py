@@ -11,6 +11,10 @@ import numpy as np
 import pyarrow.parquet as pq
 
 import napari_neuron_navigator.parquet as parquet_module
+from napari_neuron_navigator.analysis.region_profile import (
+    RegionalProfileAtlas,
+    inspect_region_profile,
+)
 from napari_neuron_navigator.db import NeuronDatabase
 from napari_neuron_navigator.parquet import (
     NEURON_SCHEMA,
@@ -298,6 +302,63 @@ def test_batch_convert_requires_complete_cached_annotation_inputs(tmp_path):
             tmp_path / "cached.parquet",
             annotate_regions=True,
             annotation_volume=np.zeros((8, 8, 8), dtype=np.int32),
+        )
+
+
+def test_batch_convert_can_build_optional_regional_profile(tmp_path):
+    """The conversion default stays off, while an explicit request builds a sidecar."""
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    _write_two_node_swc(input_dir / "cell.swc", soma_z=10.0, child_z=20.0)
+    annotation = np.zeros((8, 8, 8), dtype=np.int32)
+    annotation[0, 0, 0] = 5
+    structures = {
+        1: {"id": 1, "name": "root", "acronym": "root", "structure_id_path": [1]},
+        5: {
+            "id": 5,
+            "name": "Fixture region",
+            "acronym": "FIX",
+            "structure_id_path": [1, 5],
+        },
+    }
+    atlas = RegionalProfileAtlas(
+        atlas_name="fixture",
+        atlas_version="1",
+        annotation=annotation,
+        resolution_um=(25.0, 25.0, 25.0),
+        structures=structures,
+        left_right_axis=2,
+        midline_um=100.0,
+    )
+    output = tmp_path / "converted.parquet"
+
+    summary = batch_convert_swc_to_parquet(
+        input_dir,
+        output,
+        annotate_regions=True,
+        annotation_volume=annotation,
+        region_lookup=structures,
+        build_regional_profile=True,
+        regional_profile_atlas=atlas,
+    )
+
+    expected_sidecar = tmp_path / "converted.region_profile.parquet"
+    assert summary.region_profile_path == str(expected_sidecar)
+    assert expected_sidecar.exists()
+    assert inspect_region_profile(
+        expected_sidecar,
+        source_path=output,
+        atlas=atlas,
+        validate_contents=True,
+    ).compatible
+
+
+def test_batch_convert_rejects_profile_without_region_annotations(tmp_path):
+    with np.testing.assert_raises_regex(ValueError, "requires annotate_regions"):
+        batch_convert_swc_to_parquet(
+            tmp_path,
+            tmp_path / "out.parquet",
+            build_regional_profile=True,
         )
 
 
@@ -778,6 +839,12 @@ def test_cli_parses_worker_and_temp_dir_options(tmp_path):
 
     assert parsed_default.batch_size == 25
     assert parsed_default.workers is None
+    assert parsed_default.build_regional_profile is False
     assert parsed_auto.workers is None
     assert parsed_explicit.workers == 4
     assert parsed_explicit.temp_dir == tmp_path / "scratch"
+
+    parsed_profile = script.parse_args(
+        ["input.swc", "out.parquet", "--build-regional-profile"]
+    )
+    assert parsed_profile.build_regional_profile is True

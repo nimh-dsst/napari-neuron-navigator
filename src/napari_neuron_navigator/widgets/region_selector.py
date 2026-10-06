@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
-    QHeaderView,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -401,6 +401,12 @@ class RegionSelectorWidget(QWidget):
             return True
         return self._include_children_cb.isChecked()
 
+    def set_include_children_enabled(self, enabled: bool) -> None:
+        """Set whether queries include descendants and emit one update."""
+        if getattr(self, "_force_include_children", False):
+            enabled = True
+        self._include_children_cb.setChecked(bool(enabled))
+
     def get_query_acronyms(self) -> list[str]:
         """Return selected acronyms using the current include-children toggle."""
         return self.get_selected_acronyms(
@@ -513,14 +519,20 @@ class RegionSelectorWidget(QWidget):
 
     def select_region_by_id(self, struct_id: int | None) -> None:
         """Programmatically select one region by structure ID."""
+        self.set_selected_ids(() if struct_id is None else (struct_id,))
+
+    def set_selected_ids(self, struct_ids: list[int] | tuple[int, ...]) -> None:
+        """Replace the directly checked selection with atlas structure IDs.
+
+        Unknown IDs are ignored.  This is intentionally a direct-selection
+        API: descendant expansion remains controlled by the separate
+        include-children option.
+        """
+        selected_ids = {int(struct_id) for struct_id in struct_ids}
         self._tree.blockSignals(True)
         try:
             for current_id, item in self._items_by_id.items():
-                state = (
-                    Qt.Checked
-                    if struct_id is not None and current_id == struct_id
-                    else Qt.Unchecked
-                )
+                state = Qt.Checked if current_id in selected_ids else Qt.Unchecked
                 item.setCheckState(0, state)
         finally:
             self._tree.blockSignals(False)

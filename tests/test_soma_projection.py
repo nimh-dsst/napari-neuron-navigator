@@ -5918,3 +5918,116 @@ def test_load_flatmap_transform_status_warns_for_legacy_mirror_fallback(
     assert "Regenerate the augmented Parquet" in (
         widget._flatmap_transform_status_label.text
     )
+
+
+def test_compound_region_source_dispatches_without_reading_node_type_control() -> None:
+    widget = types.SimpleNamespace(
+        _region_query_source="Compound Region Query",
+        _run_compound_region_query=MagicMock(),
+    )
+
+    NeuronViewerWidget._query_neurons_for_active_region_source(widget)
+
+    widget._run_compound_region_query.assert_called_once_with()
+
+
+def test_compound_region_source_shows_builder_and_hides_raw_node_types() -> None:
+    widget = types.SimpleNamespace(
+        _region_query_source="Atlas Regions",
+        _region_query_stack=_DummyStack(),
+        _region_query_scope_combo=_DummyComboBox("Whole Parquet", data="whole"),
+        _region_query_find_btn=_DummyButton(),
+        _region_node_type_controls=_DummyButton(),
+        _regions_status_label=_DummyLabel(),
+        _sync_region_query_scope_selector=MagicMock(),
+        _sync_active_region_reference_layers=MagicMock(),
+    )
+
+    NeuronViewerWidget._on_region_query_source_changed(
+        widget,
+        "Compound Region Query",
+    )
+
+    assert widget._region_query_stack.index == 3
+    assert widget._region_node_type_controls.visible is False
+    assert widget._region_query_find_btn.text == "Run Compound Region Query"
+    widget._sync_active_region_reference_layers.assert_called_once_with()
+
+
+def test_compound_query_result_uses_file_id_table_path_and_snapshot_scope() -> None:
+    atlas = object()
+    editor = types.SimpleNamespace(set_profile_status=MagicMock())
+    widget = types.SimpleNamespace(
+        _db=types.SimpleNamespace(parquet_path=Path("source.parquet")),
+        _atlas=atlas,
+        _regional_query_snapshot={
+            "source_path": "source.parquet",
+            "atlas_object": atlas,
+            "preserve_existing": True,
+            "scope_label": "current table",
+            "input_count": 3,
+            "canonical": "SOMA IN MOp5",
+        },
+        _compound_region_query=editor,
+        _regions_status_label=_DummyLabel(),
+        _populate_neuron_table=MagicMock(),
+        _set_regional_query_busy=MagicMock(),
+        _query_scope_status_suffix=NeuronViewerWidget._query_scope_status_suffix,
+    )
+    rows = pd.DataFrame(
+        {"file_id": ["a"], "neuron_id": ["n"], "subject": ["s"]}
+    )
+    metadata = types.SimpleNamespace(
+        matched_count=1,
+        missing_catalog_file_ids=(),
+        runtime_seconds=0.012,
+        canonical_query="ignored-json",
+        sidecar_identity="1234567890abcdef",
+        atlas_identity=types.SimpleNamespace(atlas_name="fixture"),
+    )
+
+    NeuronViewerWidget._on_regional_query_finished(
+        widget,
+        types.SimpleNamespace(rows=rows, metadata=metadata),
+    )
+
+    widget._populate_neuron_table.assert_called_once()
+    call = widget._populate_neuron_table.call_args
+    pd.testing.assert_frame_equal(call.args[0], rows)
+    assert call.kwargs == {"preserve_existing": True}
+    assert "within current table (from 3 input neurons)" in (
+        widget._regions_status_label.text
+    )
+    assert "SOMA IN MOp5" in widget._regions_status_label.text
+    editor.set_profile_status.assert_called_once_with(
+        "Validated regional profile 1234567890ab for fixture."
+    )
+
+
+def test_compound_query_cancellation_preserves_table_and_disables_repeat() -> None:
+    worker = types.SimpleNamespace(cancel=MagicMock())
+    cancel_button = _DummyButton()
+    widget = types.SimpleNamespace(
+        _regional_query_worker=worker,
+        _region_query_cancel_btn=cancel_button,
+        _regions_status_label=_DummyLabel(),
+        _set_regional_query_busy=MagicMock(),
+        _populate_neuron_table=MagicMock(),
+    )
+
+    NeuronViewerWidget._cancel_regional_query(widget)
+
+    worker.cancel.assert_called_once_with()
+    assert cancel_button.enabled is False
+    assert widget._regions_status_label.text == (
+        "Cancelling the compound regional query..."
+    )
+
+    NeuronViewerWidget._on_regional_query_cancelled(
+        widget,
+        "Compound regional query was cancelled.",
+    )
+
+    widget._populate_neuron_table.assert_not_called()
+    widget._set_regional_query_busy.assert_called_once_with(False)
+    assert "Data table was not changed" in widget._regions_status_label.text

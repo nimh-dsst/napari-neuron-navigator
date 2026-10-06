@@ -106,6 +106,24 @@ remain visible but cannot be added. Lower distance means a more similar spatial
 count pattern. `file_id` is always the neuron identity; `neuron_id` and
 `subject` are display fields only.
 
+## Compound Regional-Profile Queries
+
+The **Regions** tab includes **Compound Region Query** alongside the existing
+Atlas Regions, Custom Regions, and Mask Layer modes. Its structured editor can
+combine soma location with non-soma neurite intersection, cable length, node
+count, termini, and soma-relative ipsilateral or contralateral conditions using
+nested AND, OR, and NOT groups. Queries can use the **Whole Parquet** or
+**Current Table** scope and always identify neurons by `file_id`.
+
+Compound queries read a compact `source.region_profile.parquet` sidecar. Use
+**Build Regional Profile** in the editor when a compatible sidecar is missing;
+construction is cancellable and runs in the background. The sidecar is
+validated against both the loaded source Parquet and atlas before each query.
+Queries also run in the background and expose **Cancel Query** without changing
+the current Data table.
+See [UC-021](USE_CASES.md#uc-021-build-and-run-a-compound-regional-profile-query)
+for the repeatable workflow and expected behavior.
+
 ### Running Tests
 
 To run the test suite:
@@ -119,6 +137,26 @@ To run tests with coverage:
 ```bash
 pixi run test-cov
 ```
+
+To run the regional-profile sidecar tests without launching napari or loading
+its pytest plugins:
+
+```bash
+pixi run test-region-profile
+```
+
+These tests generate small synthetic neuron Parquets and an in-memory atlas;
+no local datasets or atlas downloads are needed. They cover sidecar creation,
+validation and queries, rebuilding an existing sidecar, single and staged
+batches, paths with spaces/apostrophes/Unicode, and cleanup after failed writes.
+The file-flush regression also checks Windows' writable-handle requirement on
+macOS and Linux.
+
+GitHub Actions runs this suite in the dedicated **Regional-profile sidecar
+(Windows, Python 3.11)** job on pull requests to `main`, pushes to `main`, and
+manual runs of the **Test** workflow. It uses `pixi run -e ci test-region-profile`
+and uploads a `region-profile-windows-results` JUnit report, including on test
+failure. The same tests also remain part of the full cross-platform suite.
 
 ### Test Data Attribution
 
