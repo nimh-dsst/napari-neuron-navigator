@@ -2459,7 +2459,8 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    candidate count, and click **Run Search**.
    **Expected:** Search runs in the background and returns at most the requested
    number of non-reference neurons. Rows are ordered by ascending **Pearson
-   distance (1 - r)**, with `file_id` breaking ties. The status reports scanned,
+   distance (1 - r)**, with `file_id` breaking ties. The results table defaults
+   to ascending **Rank**, placing rank 1 at the top. The status reports scanned,
    usable, omitted, and returned neuron counts, names the resolved Whole
    Parquet scope and counts, and explains that lower is more similar.
 4. **Action:** Repeat with **Current Table** and **Selected Rows**. Include a

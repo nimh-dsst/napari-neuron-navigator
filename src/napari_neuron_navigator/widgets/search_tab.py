@@ -493,6 +493,7 @@ class SearchTabWidget(QWidget):
         self._results_table.setSortingEnabled(True)
         self._results_table.verticalHeader().setVisible(False)
         header = self._results_table.horizontalHeader()
+        header.setSortIndicator(0, Qt.AscendingOrder)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
