@@ -2114,8 +2114,9 @@ is always evaluated from CCFv3 node coordinates.
    including per-rule dilation, node types, and thresholds. **Region Filters**
    remains visible in both coordinate spaces.
 5. **Action:** Choose **CCFv3 Coordinates** and **Voxel Correlation**, configure
-   overlapping Include and Exclude rules, leave **Use corrected Pearson
-   correlation** checked, and run clustering.
+   overlapping Include and Exclude rules, leave **Nonoverlapping neurons use
+   zero cross-product; zero-variance neurons excluded** checked, and run
+   clustering.
    **Expected:** Included masks are unioned after their independent dilations.
    Every node in any excluded mask is removed even if it is also included and
    regardless of the Exclude row's node-type and threshold values. The
@@ -2185,9 +2186,10 @@ is always evaluated from CCFv3 node coordinates.
     descendants. Exclusion changes the nodes used to calculate similarity;
     it does not guarantee that cortical and brainstem projection populations
     receive separate cluster labels.
-12. **Action:** Repeat steps 5, 6, and 11 with **Use corrected Pearson
-    correlation** unchecked. Switch to Soma Location and Flat map + Depth,
-    then return to CCFv3 Voxel Correlation. Inspect the independent Search
+12. **Action:** Repeat steps 5, 6, and 11 with **Nonoverlapping neurons use zero
+    cross-product; zero-variance neurons excluded** unchecked. Switch to Soma
+    Location and Flat map + Depth, then return to CCFv3 Voxel Correlation.
+    Inspect the independent Search
     checkbox. Change the Analysis checkbox after completing a run and export
     its workbooks without rerunning.
     **Expected:** Unchecked restores the full legacy policy: disjoint or
@@ -2472,8 +2474,9 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    cohort restriction and asks for a new scan.
 5. **Action:** Populate the Data table with the same candidate cohort, run
    Analysis voxel-correlation clustering with **Current Table** and matching
-   filters and **Use corrected Pearson correlation** checked in both tabs,
-   and compare the reference neuron's exported distance row with Search.
+   filters and **Nonoverlapping neurons use zero cross-product; zero-variance
+   neurons excluded** checked in both tabs, and compare the reference neuron's
+   exported distance row with Search.
    **Expected:** Every single-reference Search distance matches the
    corresponding Analysis distance. In CCFv3, pairs with no shared voxel use a
    zero cross-product in the Pearson formula rather than a fixed correlation.
@@ -2507,9 +2510,10 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    user to add the cohort to Data, click **Apply Search Colors to Data**, and
    inspect it in **Flatmap**. The color action remains enabled. Switching back
    to **CCFv3 Coordinates** restores the original CCFv3 heatmap controls and
-   behavior. **Use corrected Pearson correlation** is visible only for CCFv3
-   Search, defaults to checked in a new widget session, retains its choice
-   across space changes, and is independent of Analysis. Changing this option
+   behavior. **Nonoverlapping neurons use zero cross-product; zero-variance
+   neurons excluded** is visible only for CCFv3 Search, defaults to checked in
+   a new widget session, retains its choice across space changes, and is
+   independent of Analysis. Changing this option
    has no effect on flatmap calculations. It is disabled during preflight and
    Search execution and becomes available again after completion, error, or
    cancellation of the large-run prompt.
@@ -2615,9 +2619,10 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     matching run-context JSON. Reference order, scope, filters, rank, and
     availability round trip. Loading does not alter Data until an explicit Add
     action is clicked, and reopened version-2 results can reproduce annotation
-    and heatmap actions. Change **Use corrected Pearson correlation** after
-    completing a run, then save and reopen its CSV: the results and status
-    retain their recorded policy regardless of the current checkbox. Repeat
+    and heatmap actions. Change **Nonoverlapping neurons use zero cross-product;
+    zero-variance neurons excluded** after completing a run, then save and reopen
+    its CSV: the results and status retain their recorded policy regardless of
+    the current checkbox. Repeat
     with a historical CSV lacking policy metadata; its results remain
     unchanged and no policy is inferred or displayed.
 16. **Action:** Reopen the version-2 CSV with a different Parquet loaded,

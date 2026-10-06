@@ -86,7 +86,10 @@ def test_real_checkboxes_default_visibility_independence_and_busy_states(tmp_pat
         analysis._clustering_method_combo.setCurrentText("Voxel Correlation")
         for widget in (analysis, search):
             checkbox = widget._corrected_pearson_cb
-            assert checkbox.text() == "Use corrected Pearson correlation"
+            assert checkbox.text() == (
+                "Nonoverlapping neurons use zero cross-product; "
+                "zero-variance neurons excluded"
+            )
             assert checkbox.isChecked()
             assert not checkbox.isHidden()
             assert "zero-variance" in checkbox.toolTip()

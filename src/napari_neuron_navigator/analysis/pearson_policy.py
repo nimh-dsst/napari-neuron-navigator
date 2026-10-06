@@ -2,7 +2,9 @@
 
 from collections.abc import Mapping
 
-CORRECTED_PEARSON_LABEL = "Use corrected Pearson correlation"
+CORRECTED_PEARSON_LABEL = (
+    "Nonoverlapping neurons use zero cross-product; zero-variance neurons excluded"
+)
 CORRECTED_PEARSON_TOOLTIP = (
     "Checked: calculate Pearson correlation for nonoverlapping neurons using "
     "a zero cross-product; omit zero-variance vectors because their correlation "
