@@ -6,6 +6,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from napari_neuron_navigator.analysis.clustering import ClusterResult
 from napari_neuron_navigator.cluster_assignments import ClusterAssignmentStore
@@ -40,6 +41,128 @@ def _import_neuron_table_module():
         sys.modules.pop("napari_neuron_navigator.widgets.neuron_table", None)
         if original_package is None:
             sys.modules.pop(package_name, None)
+
+
+@pytest.fixture
+def real_table_widget(monkeypatch):
+    """Exercise Qt's real comparisons without importing the napari widget package."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from qtpy.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    module = _import_neuron_table_module()
+    widget = module.NeuronTableWidget()
+    yield module, widget
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+@pytest.mark.parametrize("descending", [False, True])
+def test_label_sort_after_annotation_preserves_neuron_metadata(
+    real_table_widget, descending
+) -> None:
+    module, widget = real_table_widget
+    ranks = [100, 2, 11, 1, 99, 10, 9]
+    ranked_ids = {rank: f"subject-{rank}/shared" for rank in ranks}
+    widget.populate(["reference", *ranked_ids.values()])
+    widget.apply_state(
+        {
+            "entries": [
+                {"file_id": file_id, "notes": f"Notes for {file_id}", "tags": ["keep"]}
+                for file_id in widget.file_ids()
+            ]
+        }
+    )
+    before = {row["file_id"]: row for row in widget.export_state()["entries"]}
+    order = module.Qt.DescendingOrder if descending else module.Qt.AscendingOrder
+    widget._table.sortByColumn(module.COL_LABEL, order)
+    updates = {
+        "reference": module.NeuronMetadataUpdate(group="reference"),
+        **{
+            file_id: module.NeuronMetadataUpdate(
+                label=f"Rank {rank}",
+                group="search result",
+                tags=("Search filters: none",),
+                replace_tag_prefix="Search ",
+            )
+            for rank, file_id in ranked_ids.items()
+        },
+    }
+
+    # Repeating annotation must keep the selected sort and row identities.
+    for _ in range(2):
+        widget.apply_metadata_updates(updates)
+        expected = ["reference", *(ranked_ids[rank] for rank in sorted(ranks))]
+        assert widget.file_ids() == (expected[::-1] if descending else expected)
+        header = widget._table.horizontalHeader()
+        assert header.sortIndicatorSection() == module.COL_LABEL
+        assert header.sortIndicatorOrder() == order
+        for row, file_id in widget._iter_rows_with_file_ids():
+            entry = widget._entries[file_id]
+            assert widget._table.item(row, module.COL_LABEL).text() == entry.label
+            assert widget._table.item(row, module.COL_NOTES).text() == entry.notes
+            expected_state = dict(before[file_id])
+            expected_state["group"] = updates[file_id].group
+            if file_id != "reference":
+                expected_state["label"] = updates[file_id].label
+                expected_state["tags"] = ["keep", "Search filters: none"]
+            assert entry.to_state() == expected_state
+
+
+def test_label_sort_tracks_edits_restore_and_rebuild(real_table_widget) -> None:
+    module, widget = real_table_widget
+    widget.import_state(
+        {
+            "version": 1,
+            "entries": [
+                {"file_id": "subject-a/shared", "label": "Rank 10", "notes": "A"},
+                {"file_id": "subject-b/shared", "label": "Rank 2", "notes": "B"},
+                {"file_id": "reference", "label": "Reference", "group": "reference"},
+            ],
+        }
+    )
+    widget._table.sortByColumn(module.COL_LABEL, module.Qt.AscendingOrder)
+    assert widget.file_ids() == ["subject-b/shared", "subject-a/shared", "reference"]
+
+    # Edit through Qt, as the cell editor does, while Label sorting is active.
+    row = widget._file_id_to_row("subject-a/shared")
+    item = widget._table.item(row, module.COL_LABEL)
+    assert item.flags() & module.Qt.ItemIsEditable
+    item.setText("Rank 1")
+    assert widget.file_ids() == ["subject-a/shared", "subject-b/shared", "reference"]
+    assert widget._entries["subject-a/shared"].label == "Rank 1"
+    assert widget._entries["subject-b/shared"].label == "Rank 2"
+
+    restored_entry = widget._entries["subject-a/shared"].to_state()
+    restored_entry["label"] = "Rank 100"
+    widget.apply_state({"entries": [restored_entry]})
+    expected = ["subject-b/shared", "subject-a/shared", "reference"]
+    assert widget.file_ids() == expected
+    widget.select_file_ids(["subject-a/shared"])
+    saved = widget.export_state()
+    widget.import_state(saved)
+    widget.refresh_cluster_assignments()
+    assert widget.file_ids() == expected
+    assert widget.export_state() == saved
+    assert widget._entries["subject-a/shared"].notes == "A"
+    assert widget._entries["subject-b/shared"].notes == "B"
+
+
+def test_label_sort_does_not_change_other_columns(real_table_widget) -> None:
+    module, widget = real_table_widget
+    widget.populate(["n2", "n10"])
+    updates = {
+        file_id: module.NeuronMetadataUpdate(label=label, group=label)
+        for file_id, label in [("n2", "Sample 2"), ("n10", "Sample 10")]
+    }
+    widget.apply_metadata_updates(updates)
+    widget._table.sortByColumn(module.COL_LABEL, module.Qt.AscendingOrder)
+    assert widget.file_ids() == ["n2", "n10"]
+    widget._table.sortByColumn(module.COL_GROUP, module.Qt.AscendingOrder)
+    widget.apply_metadata_updates(updates)
+    assert widget.file_ids() == ["n10", "n2"]
+    assert widget._table.horizontalHeader().sortIndicatorSection() == module.COL_GROUP
 
 
 class _DummySignal:

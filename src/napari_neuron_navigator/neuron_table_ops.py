@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 
 from .neuron_palette import neuron_palette
 
@@ -48,6 +49,20 @@ class NeuronTableSummary:
 def cluster_sort_value(cluster_id: int | None) -> int:
     """Return a stable numeric sort key for cluster values."""
     return int(cluster_id) if cluster_id is not None else 10**9
+
+
+def label_sort_key(label: str) -> tuple[tuple[tuple[int, str | int], ...], str]:
+    """Sort label digit sequences numerically and text case-insensitively.
+
+    Token tags keep comparisons well-defined for mixed labels. The original
+    text breaks ties between equivalent numbers or case-folded text without
+    changing the displayed label.
+    """
+    tokens = tuple(
+        (1, int(part)) if index % 2 else (0, part.casefold())
+        for index, part in enumerate(re.split(r"([0-9]+)", label))
+    )
+    return tokens, label
 
 
 def cluster_ids_available(cluster_by_file: Mapping[str, int | None]) -> list[int]:

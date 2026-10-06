@@ -45,7 +45,7 @@ Unless a use case says otherwise:
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
 | [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
-| [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Not run |
+| [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Partially run |
 | [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Build a regional profile and combine soma, neurite, laterality, and measurement conditions in the Regions tab | Partially run |
 
 ### UC-001: Download an Allen Mouse Atlas
@@ -2329,6 +2329,8 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   square flatmap columns, shared depth columns, and canonical grid metadata.
 - Include at least five neurons with overlapping and non-overlapping occupied
   voxels, plus one neuron that will have no usable nodes under a test filter.
+- For the Label-sorting check, include at least 12 usable non-reference
+  candidates so the Search results contain both single- and double-digit ranks.
 - Include two neurons that share the same display `neuron_id` across different
   subjects so identity handling can be verified by `file_id`.
 - Include at least one neuron with no valid soma for the soma-distance check.
@@ -2428,8 +2430,12 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    their colors, visibility, labels, notes, cluster assignments, scene state,
    and heatmap state remain intact. The status distinguishes added from
    already-present neurons.
-12. **Action:** Click **Add & Annotate Search in Data**, inspect **Data** in the
-    Label view, edit one non-Search tag or note, and click the action again.
+12. **Action:** Run a search with **Top results** set to at least 12 and confirm
+    at least 12 hits were returned. Click **Add & Annotate Search in Data**,
+    inspect **Data** in the **Label** table view, edit one non-Search tag or
+    note, and click the action again. Click the **Label** column header to
+    sort ascending, then descending; repeat annotation with that sort active.
+    Then edit two hit labels to `Sample 2` and `Sample 10` and sort again.
     **Expected:** Available references are appended first and have Group
     `reference` while preserving any existing Label. Hits follow in rank order,
     have Group `search result`, and Labels `Rank 1`, `Rank 2`, and so on. Every
@@ -2437,7 +2443,14 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     node-type, dendrite-label, and soma-distance term; an unfiltered run receives
     `Search filters: none`. Repeating the action replaces older `Search ` tags
     without duplicates and preserves all other tags, notes, colors, visibility,
-    cluster assignments, scene state, and heatmap state.
+    cluster assignments, scene state, and heatmap state. An active table sort
+    controls display order: ascending **Label** order is `Rank 1`, `Rank 2`,
+    through `Rank 9`, `Rank 10`, `Rank 11`, `Rank 12`; descending reverses it.
+    Re-annotation preserves the selected sort column and direction. Reference
+    rows sort by their existing labels; blank labels appear first ascending
+    and last descending. The custom labels `Sample 2` and `Sample 10` also
+    sort numerically without changing their displayed text, and
+    metadata remains attached to the same **Neuron Name** (`file_id`).
 13. **Action:** With a CCFv3 result active, select several Search result rows
     and choose **Add Search
     Heatmaps** > **Scored Voxels** > **Selected Results + Reference**. Then
@@ -2497,8 +2510,9 @@ of dendritic projections mislabeled as type `2` has not been quantified.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
+- Status: Partially run — numeric ordering of similarity-search rank labels
+  in step 12 confirmed by the user.
+- Last verified: 2026-10-06 (rank-label sorting only)
 - Notes: Releases 1, 2, and 3 implemented on 2026-09-22. Automated coverage includes
   single-reference parity with Analysis, aggregate vectors and heatmaps,
   `file_id` identity and scoped candidates, filtered-out references and
@@ -2506,7 +2520,9 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   table metadata updates, annotation handoff, explicit CCFv3/flatmap
   Search-distance color transfer, distance-color/layer metadata, append
   semantics, flatmap rectangular-grid/depth-mode parity, and background
-  workers. Manual napari verification is still required.
+  workers. The remaining manual checks have not been confirmed.
+- On 2026-10-06, the user confirmed manually that the similarity-search rank
+  labels sort correctly in the Data table after the numeric-aware sorting fix.
 
 ### UC-021: Build and Run a Compound Regional-Profile Query
 

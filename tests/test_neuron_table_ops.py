@@ -1,9 +1,11 @@
 """Tests for pure neuron-table helper logic."""
 
+import pytest
+
 from napari_neuron_navigator.neuron_palette import neuron_palette
 from napari_neuron_navigator.neuron_table_ops import (
-    ClusterFilterSelection,
     GRAY_RGBA,
+    ClusterFilterSelection,
     NeuronTableSummary,
     added_flags,
     cluster_filter_matches,
@@ -11,6 +13,7 @@ from napari_neuron_navigator.neuron_table_ops import (
     cluster_sort_value,
     distinct_colors_for_file_ids,
     has_unclustered_entries,
+    label_sort_key,
     recolor_cluster_distinct,
     summarize_neuron_table,
     visibility_for_selected_cluster,
@@ -45,6 +48,32 @@ def test_cluster_sort_is_numeric() -> None:
     values = [10, -1, 2, None]
     sorted_values = sorted(values, key=cluster_sort_value)
     assert sorted_values == [-1, 2, 10, None]
+
+
+@pytest.mark.parametrize(
+    ("labels", "expected"),
+    [
+        (
+            ["Rank 100", "Rank 2", "Rank 11", "Rank 1", "Rank 99", "Rank 10", "Rank 9"],
+            ["Rank 1", "Rank 2", "Rank 9", "Rank 10", "Rank 11", "Rank 99", "Rank 100"],
+        ),
+        (
+            ["Sample 10", "", "Sample 2", "reference", "2", "10", "Alpha"],
+            ["", "2", "10", "Alpha", "reference", "Sample 2", "Sample 10"],
+        ),
+        (
+            ["sample 2", "Sample 2", "Sample 02", "sample 10", "Sample 002"],
+            ["Sample 002", "Sample 02", "Sample 2", "sample 2", "sample 10"],
+        ),
+        (
+            ["Sample 10 part 1", "Sample 2 part 10", "Sample 2 part 2"],
+            ["Sample 2 part 2", "Sample 2 part 10", "Sample 10 part 1"],
+        ),
+    ],
+)
+def test_label_sort_uses_numbers_and_preserves_text(labels, expected) -> None:
+    assert sorted(labels, key=label_sort_key) == expected
+    assert sorted(labels, key=label_sort_key, reverse=True) == expected[::-1]
 
 
 def test_cluster_filter_matches() -> None:
