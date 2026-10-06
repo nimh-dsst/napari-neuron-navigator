@@ -44,6 +44,7 @@ from ..neuron_table_ops import (
     cluster_ids_available,
     cluster_sort_value,
     has_unclustered_entries,
+    label_sort_key,
     recolor_cluster_distinct,
     summarize_neuron_table,
     visibility_for_selected_cluster,
@@ -142,6 +143,13 @@ class _NumericSortItem(QTableWidgetItem):
         if left is not None and right is not None:
             return float(left) < float(right)
         return super().__lt__(other)
+
+
+class _LabelSortItem(QTableWidgetItem):
+    """Sort embedded label numbers using the current, editable display text."""
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        return label_sort_key(self.text()) < label_sort_key(other.text())
 
 
 @dataclass
@@ -640,10 +648,11 @@ class NeuronTableWidget(QWidget):
         *,
         editable: bool,
     ) -> None:
-        """Set a plain-text cell and its case-insensitive sort key."""
+        """Set a text cell, using numeric-aware comparison for labels."""
         item = self._table.item(row, column)
-        if item is None:
-            item = QTableWidgetItem()
+        item_type = _LabelSortItem if column == COL_LABEL else QTableWidgetItem
+        if item is None or not isinstance(item, item_type):
+            item = item_type() if item is None else item_type(item)
             flags = item.flags()
             if not editable:
                 flags &= ~Qt.ItemIsEditable
