@@ -311,6 +311,38 @@ def test_populate_tree_logs_startup_counts(caplog):
     assert "created_items=3" in messages[0]
 
 
+def test_direct_selection_keeps_checked_children_of_checked_parents():
+    """Parent and child rules may carry different dilation and exclusion settings."""
+    module = _import_region_selector_module()
+    widget = module.RegionSelectorWidget.__new__(module.RegionSelectorWidget)
+    widget._tree = _DummyTree()
+    widget._items_by_id = {}
+    widget._structure_map = {}
+    widget._allowed_structure_ids = None
+    widget._update_selection_label = lambda: None
+    widget._atlas = types.SimpleNamespace(
+        structures={
+            184: {"acronym": "FRP", "structure_id_path": [184]},
+            68: {"acronym": "FRP1", "structure_id_path": [184, 68]},
+            667: {"acronym": "FRP2/3", "structure_id_path": [184, 667]},
+        }
+    )
+    widget._populate_tree()
+    widget._items_by_id[184].setCheckState(0, module.Qt.Checked)
+    widget._items_by_id[68].setCheckState(0, module.Qt.Checked)
+
+    assert widget.get_selected_ids(include_children=False) == [68, 184]
+    assert widget.get_selected_acronyms(include_children=False) == ["FRP", "FRP1"]
+    assert widget.get_selected_ids(include_children=True) == [68, 184, 667]
+    assert widget.get_selected_acronyms(include_children=True) == [
+        "FRP",
+        "FRP1",
+        "FRP2/3",
+    ]
+    widget._items_by_id[184].setCheckState(0, module.Qt.Unchecked)
+    assert widget.get_selected_ids(include_children=False) == [68]
+
+
 def test_force_include_children_hides_checkbox_and_overrides_toggle():
     """Analysis-mode selectors should always include descendants and hide the toggle."""
     module = _import_region_selector_module()

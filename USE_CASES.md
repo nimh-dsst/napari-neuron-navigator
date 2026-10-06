@@ -2095,6 +2095,10 @@ is always evaluated from CCFv3 node coordinates.
    **Expected:** The first rule starts at `20%`, the second starts at `40%`, and
    changing either the default or one row does not modify the other existing
    row. Selected atlas parents represent their dataset descendants.
+   Check a parent and one of its children explicitly, and give the child a
+   different dilation. Both rows must remain present with their own settings;
+   unchecking the parent must preserve the child's rule. Repeat on Exclude
+   with different node types and thresholds as well.
 3. **Action:** On **Exclude**, check a region that overlaps an included mask.
    Inspect its node-type choices and then switch **Method** between **Soma
    Location** and **Voxel Correlation**.
@@ -2131,6 +2135,8 @@ is always evaluated from CCFv3 node coordinates.
    an overlapping node may contribute once to each rule, but a source row is
    counted only once within a rule. Neurons sharing `neuron_id` or `node_id`
    values remain independent because counting uses `file_id`.
+   Nodes in the upper half of an outermost excluded voxel must still count.
+   At zero dilation, an immediately adjacent unmasked voxel must not count.
 8. **Action:** For **Current Table** and **Selected Rows**, clear Include rules,
    keep at least one Exclude rule, and run both clustering methods. Then try the
    same exclusion-only setup with **Whole Parquet**.
@@ -2150,6 +2156,20 @@ is always evaluated from CCFv3 node coordinates.
     numeric node types and labels, thresholds, and the `exclude_wins` policy.
     Legacy selected/represented fields summarize Include rules. The legacy
     dilation value is `null` when Include rules use different dilations.
+11. **Action:** Reproduce the MOs challenge using
+    `isocortex_total_right_brainglobe_flatmap.parquet`, the cached
+    `allen_mouse_25um` v1.2 atlas, and the 1,898 distinct `file_id` values whose
+    soma (`type = 1`) has `region_id` in MOs or its descendants
+    (`993, 656, 962, 767, 1021, 1085`). Populate **Current Table** with that cohort.
+    Select **Voxel Correlation**, **CCFv3 Coordinates**, Ward linkage, and five
+    clusters. Leave Include empty, exclude **MOs** at `0%`, and leave additional
+    voxel node filters disabled.
+    **Expected:** Exclusion removes 24,872,435 of the cohort's 106,576,190 node
+    rows and retains 81,703,755. All 1,898 neurons remain clusterable. An
+    independent annotation lookup must find no retained node inside MOs or its
+    descendants. Exclusion changes the nodes used to calculate similarity;
+    it does not guarantee that cortical and brainstem projection populations
+    receive separate cluster labels.
 
 **Manual verification**
 
@@ -2165,10 +2185,26 @@ is always evaluated from CCFv3 node coordinates.
   Location, scope, Flat map + Depth, and export checks in steps 1-4 and 6-10
   remain to be exercised manually.
 
+  The nested-rule and voxel-boundary additions and step 11 are **Not run** in
+  napari. A backend audit on 2026-10-06 reproduced step 11's cohort and counts,
+  checked every retained node against an independent atlas annotation lookup,
+  and matched retained counts for every `file_id`. Ward at k=5 clustered all
+  1,898 neurons into groups of 469, 497, 443, 278, and 211. Of 1,800,253 neuron
+  pairs, 981,643 (54.53%) shared no remaining 25 µm voxel. The existing CCF
+  matrix assigns such pairs `r = -1`, so they all have distance 2; this is a
+  limitation of the similarity calculation, not evidence of MOs nodes leaking
+  through the filter. These backend checks do not verify anatomical cluster
+  quality or the manual rendering workflow.
+
   Automated tests cover rule validation and metadata, mask unions and
   precedence, exclusion-only out-of-atlas behavior, per-rule soma thresholds
   keyed by `file_id`, CCFv3 and flatmap voxel filtering, flatmap soma exclusion,
   exact preflight counts, unclustered neurons, and legacy inclusion adapters.
+  Regression coverage also checks nested direct selections, complete boundary
+  voxels on all three axes with unequal resolutions, and a synthetic bilateral
+  MOs challenge through preflight and the correlation worker. The latter
+  compares exclusion with a separately filtered projection-only Parquet under
+  Ward and average linkage, both with and without a root Include rule.
 
 ### UC-019: Filter Voxel Correlation by Node Type, Dendrite-Label Coverage, or Soma Distance
 
