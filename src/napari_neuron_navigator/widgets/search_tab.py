@@ -51,6 +51,7 @@ from ..flatmap_heatmap import (
     FLATMAP_Y_BINS_TOOLTIP,
     MAX_FLATMAP_Y_BINS,
 )
+from ..region import get_dataset_region_structure_ids
 from .collapsible_section import CollapsibleSection
 from .node_type_selector import NodeTypeSelectorComboBox, node_type_options
 from .region_filter_editor import RegionFilterEditorWidget
@@ -835,11 +836,13 @@ class SearchTabWidget(QWidget):
         self._update_button_states()
 
     def _refresh_region_editor(self) -> None:
-        if self._atlas is None:
+        """Show represented regions and their ancestors, matching Analysis."""
+        if self._atlas is None or not self._dataset_region_ids:
+            self._region_filter_editor.clear()
             return
         self._region_filter_editor.set_atlas_and_allowed_ids(
             self._atlas,
-            self._dataset_region_ids,
+            get_dataset_region_structure_ids(self._atlas, self._dataset_region_ids),
         )
 
     def _represented_region_entries(self, region_ids: list[int]):

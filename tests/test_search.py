@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import types
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -33,6 +34,83 @@ from napari_neuron_navigator.analysis.search import (
     pearson_distance_to_hot_rgba,
 )
 from napari_neuron_navigator.analysis.voxel_filter import VoxelNodeFilter
+
+
+@pytest.fixture
+def search_region_atlas():
+    return types.SimpleNamespace(
+        structures={
+            region_id: {"acronym": acronym, "structure_id_path": path}
+            for region_id, acronym, path in (
+                (997, "root", [997]),
+                (315, "Isocortex", [997, 315]),
+                (184, "FRP", [997, 315, 184]),
+                (68, "FRP1", [997, 315, 184, 68]),
+                (667, "FRP2/3", [997, 315, 184, 667]),
+                (526, "FRP5", [997, 315, 184, 526]),
+                (672, "CP", [997, 672]),
+            )
+        }
+    )
+
+
+def test_search_region_filters_show_dataset_leaves_and_ancestors(search_region_atlas):
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+
+    editor = MagicMock()
+    widget = types.SimpleNamespace(
+        _atlas=search_region_atlas,
+        _dataset_region_ids={68, 667, 999999},
+        _region_filter_editor=editor,
+    )
+
+    SearchTabWidget._refresh_region_editor(widget)
+
+    editor.set_atlas_and_allowed_ids.assert_called_once_with(
+        search_region_atlas, {997, 315, 184, 68, 667}
+    )
+    editor.clear.assert_not_called()
+    # Ancestors belong to the display tree, not the represented dataset IDs.
+    assert widget._dataset_region_ids == {68, 667, 999999}
+
+
+@pytest.mark.parametrize("missing", ["atlas", "regions"])
+def test_search_region_filters_clear_when_inputs_are_missing(search_region_atlas, missing):
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+
+    editor = MagicMock()
+    widget = types.SimpleNamespace(
+        _atlas=None if missing == "atlas" else search_region_atlas,
+        _dataset_region_ids=set() if missing == "regions" else {68},
+        _region_filter_editor=editor,
+    )
+
+    SearchTabWidget._refresh_region_editor(widget)
+
+    editor.clear.assert_called_once_with()
+    editor.set_atlas_and_allowed_ids.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("selected_ids", "expected"),
+    [
+        ([184], [(68, "FRP1"), (667, "FRP2/3")]),
+        ([315, 184, 68], [(68, "FRP1"), (667, "FRP2/3")]),
+        ([68], [(68, "FRP1")]),
+        ([672], []),
+    ],
+)
+def test_search_parent_regions_resolve_only_represented_descendants(
+    search_region_atlas, selected_ids, expected
+):
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+
+    widget = types.SimpleNamespace(
+        _atlas=search_region_atlas,
+        _dataset_region_ids={68, 667, 999999},
+    )
+
+    assert SearchTabWidget._represented_region_entries(widget, selected_ids) == expected
 
 
 def _write_search_parquet(path) -> None:

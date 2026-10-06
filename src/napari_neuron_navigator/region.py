@@ -9,6 +9,7 @@ This module provides functionality to:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,33 @@ ATLAS_NAMES = {
     50: "allen_mouse_50um",
     100: "allen_mouse_100um",
 }
+
+
+def get_dataset_region_structure_ids(
+    atlas: BrainGlobeAtlas | None,
+    region_ids: Iterable[int],
+) -> set[int]:
+    """Return represented atlas regions and their ancestors for a selector tree.
+
+    Parquet region IDs may contain only leaves. Include their hierarchy paths
+    so parent regions remain visible and selectable, without adding unrelated
+    atlas branches. Unknown dataset IDs and invalid path entries are ignored.
+    """
+    if atlas is None:
+        return set()
+
+    allowed_ids: set[int] = set()
+    for region_id in region_ids:
+        struct = atlas.structures.get(int(region_id))
+        if struct is None:
+            continue
+        allowed_ids.add(int(region_id))
+        for path_id in struct.get("structure_id_path", []) or []:
+            try:
+                allowed_ids.add(int(path_id))
+            except (TypeError, ValueError):
+                continue
+    return allowed_ids
 
 
 def setup_allen_sdk(

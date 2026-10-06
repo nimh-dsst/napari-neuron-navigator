@@ -2329,6 +2329,10 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   square flatmap columns, shared depth columns, and canonical grid metadata.
 - Include at least five neurons with overlapping and non-overlapping occupied
   voxels, plus one neuron that will have no usable nodes under a test filter.
+- For the region hierarchy check, use a Parquet whose `region_id` values
+  include at least two descendants of a parent that is not directly represented
+  (for example, `FRP1`/`68` and `FRP2/3`/`667` under `FRP`/`184`). Record the
+  parent and descendant IDs used if choosing a different branch.
 - For the Label-sorting check, include at least 12 usable non-reference
   candidates so the Search results contain both single- and double-digit ranks.
 - Include two neurons that share the same display `neuron_id` across different
@@ -2398,13 +2402,22 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    inspect it in **Flatmap**. The color action remains enabled. Switching back
    to **CCFv3 Coordinates** restores the original CCFv3 heatmap controls and
    behavior.
-7. **Action:** Add independent Include and Exclude rules under **Region
-   Filters**, including overlapping masks and different dilation percentages,
-   and rerun.
-   **Expected:** Included masks are unioned, exclusions win in overlaps, and
-   the same filtered node rows contribute to both the reference and every
-   candidate vector. A candidate with no surviving node is omitted and counted
-   in the status rather than appearing with a fabricated score.
+7. **Action:** Expand **Search Filters** and inspect both **Include** and
+   **Exclude** trees. Compare the available hierarchy with **Analysis** >
+   **Clustering** > **Region Filters** for the same atlas and Parquet. Search
+   by the chosen parent's name and acronym, clear the search, then select that
+   parent on **Include** and one represented child on **Exclude**. Set different
+   dilation percentages and rerun. Clear the selections and verify that both
+   rule tables empty.
+   **Expected:** Both Search trees show represented regions and their ancestors,
+   matching Analysis; unrelated branches are absent. Parents remain selectable
+   even when their own IDs do not appear in the Parquet. A parent rule covers
+   its represented descendants automatically. Include and Exclude selections
+   and dilation values are independent. Included masks are unioned, exclusions
+   win in overlaps, and the same filtered node rows contribute to both the
+   reference and every candidate vector. A candidate with no surviving node is
+   omitted and counted in the status rather than appearing with a fabricated
+   score.
 8. **Action:** Under **Voxel Node Filters**, test **Include selected** and
    **Exclude selected**, the dendrite-label cohort restriction, and **Exclude
    nodes within soma distance** both separately and together.
@@ -2523,6 +2536,9 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   workers. The remaining manual checks have not been confirmed.
 - On 2026-10-06, the user confirmed manually that the similarity-search rank
   labels sort correctly in the Data table after the numeric-aware sorting fix.
+- Region hierarchy checks in step 7: **Not run** (added 2026-10-06). Automated
+  regression coverage checks ancestor visibility, parent-to-descendant
+  resolution, and retention of independent rules and dilation on refresh.
 
 ### UC-021: Build and Run a Compound Regional-Profile Query
 

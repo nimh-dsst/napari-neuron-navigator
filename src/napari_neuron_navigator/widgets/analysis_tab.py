@@ -51,6 +51,7 @@ from ..flatmap_heatmap import (
     FLATMAP_Y_BINS_TOOLTIP,
     MAX_FLATMAP_Y_BINS,
 )
+from ..region import get_dataset_region_structure_ids
 from .collapsible_section import CollapsibleSection
 from .node_type_selector import NodeTypeSelectorComboBox, node_type_options
 from .region_filter_editor import RegionFilterEditorWidget
@@ -1227,21 +1228,7 @@ class AnalysisTabWidget(QWidget):
 
     def _analysis_allowed_structure_ids(self) -> set[int]:
         """Return dataset-backed visible structure IDs for Analysis selectors."""
-        if self._atlas is None or not self._dataset_region_ids:
-            return set()
-
-        allowed_ids: set[int] = set()
-        for region_id in self._dataset_region_ids:
-            struct = self._atlas.structures.get(int(region_id))
-            if struct is None:
-                continue
-            allowed_ids.add(int(region_id))
-            for path_id in struct.get("structure_id_path", []) or []:
-                try:
-                    allowed_ids.add(int(path_id))
-                except (TypeError, ValueError):
-                    continue
-        return allowed_ids
+        return get_dataset_region_structure_ids(self._atlas, self._dataset_region_ids)
 
     def _refresh_analysis_region_selectors(self) -> None:
         """Rebuild Analysis region selectors from atlas hierarchy and dataset IDs."""

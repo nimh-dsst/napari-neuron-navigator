@@ -693,9 +693,20 @@ def _import_analysis_tab_module():
     previous = {name: sys.modules.get(name) for name in replacements}
     module_name = "napari_neuron_navigator.widgets.analysis_tab"
     previous_module = sys.modules.get(module_name)
+    # These widgets must bind to this import's Qt stubs even if another test
+    # already imported their real Qt classes. Restore them afterwards as well.
+    editor_modules = {
+        name: sys.modules.get(name)
+        for name in (
+            "napari_neuron_navigator.widgets.region_filter_editor",
+            "napari_neuron_navigator.widgets.node_type_selector",
+        )
+    }
 
     try:
         sys.modules.update(replacements)
+        for name in editor_modules:
+            sys.modules.pop(name, None)
         sys.modules.pop(module_name, None)
 
         module_path = widgets_root / "analysis_tab.py"
@@ -713,7 +724,7 @@ def _import_analysis_tab_module():
         else:
             sys.modules[module_name] = previous_module
 
-        for name, original in previous.items():
+        for name, original in {**previous, **editor_modules}.items():
             if original is None:
                 sys.modules.pop(name, None)
             else:
@@ -1280,6 +1291,47 @@ def test_region_filter_state_is_independent_for_each_input_scope() -> None:
     assert widget._active_region_filter_editor() is selected
     assert set(selected._include_settings) == {500}
     assert not selected._exclude_settings
+
+
+def test_region_filter_refresh_retains_parent_rules_and_independent_dilation() -> None:
+    """The shared editor must retain parent rules absent from the dataset IDs."""
+    from napari_neuron_navigator.region import get_dataset_region_structure_ids
+
+    AnalysisTabWidget = _import_analysis_tab_module().AnalysisTabWidget
+    widget = AnalysisTabWidget(_DummyViewer())
+    editor = widget._whole_parquet_region_filter_editor
+    atlas = _FakeAtlas(
+        {
+            997: {"acronym": "root", "structure_id_path": [997]},
+            184: {"acronym": "FRP", "structure_id_path": [997, 184]},
+            68: {"acronym": "FRP1", "structure_id_path": [997, 184, 68]},
+            667: {"acronym": "FRP2/3", "structure_id_path": [997, 184, 667]},
+        }
+    )
+    allowed_ids = get_dataset_region_structure_ids(atlas, {68, 667})
+    editor.set_atlas_and_allowed_ids(atlas, allowed_ids)
+    editor.include_selector.selected_ids = [184]
+    editor._on_selection_changed(False)
+    editor._set_dilation(False, 184, 20)
+    editor.exclude_selector.selected_ids = [68]
+    editor._on_selection_changed(True)
+    editor._set_dilation(True, 68, 10)
+
+    editor.set_atlas_and_allowed_ids(atlas, allowed_ids)
+
+    assert editor.include_selector.get_selected_ids(False) == [184]
+    assert editor.exclude_selector.get_selected_ids(False) == [68]
+    widget._atlas = atlas
+    widget._dataset_region_ids = {68, 667}
+    region_filter = editor.region_filter(widget._represented_region_entries_for_selections)
+    assert region_filter is not None
+    assert len(region_filter.include_rules) == len(region_filter.exclude_rules) == 1
+    include = region_filter.include_rules[0]
+    exclude = region_filter.exclude_rules[0]
+    assert (include.region_id, include.represented_region_ids) == (184, (68, 667))
+    assert (exclude.region_id, exclude.represented_region_ids) == (68, (68,))
+    assert include.dilation_fraction == 0.2
+    assert exclude.dilation_fraction == 0.1
 
 
 def test_represented_region_ids_for_selection_expands_parent_to_dataset_descendants():
