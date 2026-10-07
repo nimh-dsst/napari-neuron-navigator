@@ -191,6 +191,10 @@ def excluded_soma_file_ids(
             bounds = mask_to_swc_xyz_bounds(
                 mask,
                 prepared_filter.resolution_um,
+                # Membership uses floor(coord / resolution), so the last
+                # masked voxel extends to (index + 1) * resolution. The
+                # default half-voxel padding would miss its upper half.
+                padding_voxels=1.0,
             )
             if bounds is None:
                 continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import types
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,7 @@ from napari_neuron_navigator.analysis.search import (
     SEARCH_HEATMAP_MODE_WHOLE,
     SEARCH_REFERENCE_HEATMAP_RGBA,
     SEARCH_SCOPE_CURRENT,
+    SEARCH_SPACE_CCF,
     SEARCH_SPACE_FLATMAP,
     SearchResultsDocument,
     VoxelSearchRequest,
@@ -33,6 +35,83 @@ from napari_neuron_navigator.analysis.search import (
     pearson_distance_to_hot_rgba,
 )
 from napari_neuron_navigator.analysis.voxel_filter import VoxelNodeFilter
+
+
+@pytest.fixture
+def search_region_atlas():
+    return types.SimpleNamespace(
+        structures={
+            region_id: {"acronym": acronym, "structure_id_path": path}
+            for region_id, acronym, path in (
+                (997, "root", [997]),
+                (315, "Isocortex", [997, 315]),
+                (184, "FRP", [997, 315, 184]),
+                (68, "FRP1", [997, 315, 184, 68]),
+                (667, "FRP2/3", [997, 315, 184, 667]),
+                (526, "FRP5", [997, 315, 184, 526]),
+                (672, "CP", [997, 672]),
+            )
+        }
+    )
+
+
+def test_search_region_filters_show_dataset_leaves_and_ancestors(search_region_atlas):
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+
+    editor = MagicMock()
+    widget = types.SimpleNamespace(
+        _atlas=search_region_atlas,
+        _dataset_region_ids={68, 667, 999999},
+        _region_filter_editor=editor,
+    )
+
+    SearchTabWidget._refresh_region_editor(widget)
+
+    editor.set_atlas_and_allowed_ids.assert_called_once_with(
+        search_region_atlas, {997, 315, 184, 68, 667}
+    )
+    editor.clear.assert_not_called()
+    # Ancestors belong to the display tree, not the represented dataset IDs.
+    assert widget._dataset_region_ids == {68, 667, 999999}
+
+
+@pytest.mark.parametrize("missing", ["atlas", "regions"])
+def test_search_region_filters_clear_when_inputs_are_missing(search_region_atlas, missing):
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+
+    editor = MagicMock()
+    widget = types.SimpleNamespace(
+        _atlas=None if missing == "atlas" else search_region_atlas,
+        _dataset_region_ids=set() if missing == "regions" else {68},
+        _region_filter_editor=editor,
+    )
+
+    SearchTabWidget._refresh_region_editor(widget)
+
+    editor.clear.assert_called_once_with()
+    editor.set_atlas_and_allowed_ids.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("selected_ids", "expected"),
+    [
+        ([184], [(68, "FRP1"), (667, "FRP2/3")]),
+        ([315, 184, 68], [(68, "FRP1"), (667, "FRP2/3")]),
+        ([68], [(68, "FRP1")]),
+        ([672], []),
+    ],
+)
+def test_search_parent_regions_resolve_only_represented_descendants(
+    search_region_atlas, selected_ids, expected
+):
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+
+    widget = types.SimpleNamespace(
+        _atlas=search_region_atlas,
+        _dataset_region_ids={68, 667, 999999},
+    )
+
+    assert SearchTabWidget._represented_region_entries(widget, selected_ids) == expected
 
 
 def _write_search_parquet(path) -> None:
@@ -100,7 +179,10 @@ def _write_flatmap_search_parquet(
     pd.DataFrame(rows).to_parquet(path, index=False)
 
 
-def test_single_reference_search_matches_analysis_distance_row(tmp_path) -> None:
+@pytest.mark.parametrize("corrected", [True, False])
+def test_single_reference_search_matches_analysis_distance_row(
+    tmp_path, corrected
+) -> None:
     import duckdb
 
     path = tmp_path / "search.parquet"
@@ -112,6 +194,7 @@ def test_single_reference_search_matches_analysis_distance_row(tmp_path) -> None
             str(path),
             voxel_id_map=None,
             resolution=1.0,
+            use_corrected_pearson=corrected,
         )
         matrix_frame, matrix = correlation_long_to_matrix(correlations)
         result = compute_voxel_search(
@@ -121,6 +204,7 @@ def test_single_reference_search_matches_analysis_distance_row(tmp_path) -> None
                 reference_file_ids=("ref",),
                 resolution_um=1.0,
                 top_n=10,
+                use_corrected_pearson=corrected,
             ),
         )
     finally:
@@ -134,14 +218,20 @@ def test_single_reference_search_matches_analysis_distance_row(tmp_path) -> None
     }
     actual = result.hits.set_index("file_id")["pearson_distance"].to_dict()
     assert actual == pytest.approx(expected)
-    assert actual["disjoint"] == pytest.approx(2.0)
+    expected_disjoint = 1.0 - np.corrcoef([2, 1, 0, 0], [0, 0, 0, 3])[0, 1]
+    if not corrected:
+        expected_disjoint = 2.0
+    assert actual["disjoint"] == pytest.approx(expected_disjoint)
     assert next(iter(result.hits["file_id"])) == "similar"
     assert result.input_candidate_count == 3
     assert result.usable_candidate_count == 3
     assert result.reference_rows["file_id"].tolist() == ["ref"]
 
 
-def test_flatmap_search_ranks_sparse_binned_vectors_and_records_grid(tmp_path) -> None:
+@pytest.mark.parametrize("corrected", [True, False])
+def test_flatmap_search_ranks_sparse_binned_vectors_and_records_grid(
+    tmp_path, corrected
+) -> None:
     import duckdb
 
     path = tmp_path / "flatmap-search.parquet"
@@ -165,6 +255,7 @@ def test_flatmap_search_ranks_sparse_binned_vectors_and_records_grid(tmp_path) -
                 flatmap_style="both_square",
                 flatmap_y_bins=2,
                 flatmap_collapse_depth=True,
+                use_corrected_pearson=corrected,
             ),
         )
     finally:
@@ -198,6 +289,11 @@ def test_flatmap_search_ranks_sparse_binned_vectors_and_records_grid(tmp_path) -
     assert result.metadata["flatmap_volume_shape"] == [2, 4]
     assert list(provenance.volume_shape) == result.metadata["flatmap_volume_shape"]
     assert result.metadata["flatmap_collapse_depth"] is True
+    assert "use_corrected_pearson" not in result.metadata
+    assert (
+        result.metadata["missing_correlation_policy"]
+        == "flatmap_dense_zero_filled_r_zero_if_undefined"
+    )
     assert "Search space: Flat map + Depth" in result.metadata["filter_tags"]
 
     output = tmp_path / "flatmap-search.csv"
@@ -359,7 +455,8 @@ def test_search_reports_candidates_omitted_by_filter(tmp_path) -> None:
             "node_id": [1, 2, 1, 1],
             "parent_id": [-1, 1, -1, -1],
             "type": [2, 2, 2, 3],
-            "x": [0.0, 1.0, 0.0, 2.0],
+            # Disjoint, nonconstant reference/candidate vectors after filtering.
+            "x": [0.0, 0.0, 1.0, 2.0],
             "y": [0.0] * 4,
             "z": [0.0] * 4,
         }
@@ -385,6 +482,92 @@ def test_search_reports_candidates_omitted_by_filter(tmp_path) -> None:
     assert result.input_candidate_count == 2
     assert result.usable_candidate_count == 1
     assert result.hits["file_id"].tolist() == ["kept"]
+
+
+@pytest.mark.parametrize("corrected", [True, False])
+def test_ccf_search_reports_zero_variance_candidates(tmp_path, corrected):
+    import duckdb
+
+    from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
+    from tests.test_correlation import _write_count_vectors
+
+    path = tmp_path / "constant_candidate.parquet"
+    _write_count_vectors(path, [[2, 1, 0], [0, 0, 3], [1, 1, 1]])
+    with duckdb.connect() as conn:
+        result = compute_voxel_search(
+            conn,
+            path,
+            VoxelSearchRequest(
+                reference_file_ids=("file-0",), use_corrected_pearson=corrected
+            ),
+        )
+    assert result.hits["file_id"].tolist() == (
+        ["file-1"] if corrected else ["file-1", "file-2"]
+    )
+    assert result.omitted_candidate_file_ids == (("file-2",) if corrected else ())
+    assert result.input_candidate_count == 2
+    assert result.usable_candidate_count == (1 if corrected else 2)
+    assert result.metadata["zero_variance_candidate_count"] == int(corrected)
+    assert result.metadata["missing_correlation_policy"] == (
+        "zero_cross_product_omit_zero_variance" if corrected else "pearson_r_minus_one"
+    )
+
+    messages = []
+    widget = types.SimpleNamespace(
+        _set_result_frame=lambda frame: None,
+        _status_label=types.SimpleNamespace(setText=messages.append),
+        _corrected_pearson_cb=types.SimpleNamespace(isChecked=lambda: not corrected),
+    )
+    SearchTabWidget._on_search_finished(widget, result)
+    assert ("1 candidate(s) were omitted" in messages[0]) == corrected
+    assert ("Pearson correlation is undefined" in messages[0]) == corrected
+    assert f"CCF Pearson: {'corrected' if corrected else 'legacy'}." in messages[0]
+    output = tmp_path / "constant_candidate.csv"
+    export_search_results_csv(output, result)
+    restored = load_search_results_csv(output)
+    assert (
+        restored.metadata["missing_correlation_policy"]
+        == result.metadata["missing_correlation_policy"]
+    )
+    assert restored.metadata["zero_variance_candidate_count"] == int(corrected)
+    assert restored.metadata["use_corrected_pearson"] is corrected
+    assert restored.metadata["implementation"] == result.metadata["implementation"]
+
+
+@pytest.mark.parametrize(
+    "counts, references, message",
+    [
+        ([[1, 1], [3, 0]], ("file-0",), "aggregate reference has zero variance"),
+        (
+            [[1, 0], [0, 1], [3, 0]],
+            ("file-0", "file-1"),
+            "aggregate reference has zero variance",
+        ),
+        ([[3, 0], [1, 1]], ("file-0",), "No candidate neurons have nonzero variance"),
+    ],
+)
+@pytest.mark.parametrize("corrected", [True, False])
+def test_ccf_search_rejects_undefined_correlations(
+    tmp_path, counts, references, message, corrected
+):
+    import duckdb
+
+    from tests.test_correlation import _write_count_vectors
+
+    path = tmp_path / "undefined.parquet"
+    _write_count_vectors(path, counts)
+    with duckdb.connect() as conn:
+        request = VoxelSearchRequest(
+            reference_file_ids=references, use_corrected_pearson=corrected
+        )
+        if corrected:
+            with pytest.raises(ValueError, match=message):
+                compute_voxel_search(conn, path, request)
+        else:
+            result = compute_voxel_search(conn, path, request)
+            assert not result.hits.empty
+            assert (result.hits["pearson_distance"] == 2.0).all()
+            assert result.omitted_candidate_file_ids == ()
 
 
 def test_search_csv_round_trip_and_availability(tmp_path) -> None:
@@ -826,37 +1009,39 @@ def test_flatmap_results_enable_data_colors_while_heatmaps_stay_disabled() -> No
         def setToolTip(self, tooltip) -> None:
             self.tooltip = str(tooltip)
 
-    controls = {name: Control() for name in (
-        "_run_btn",
-        "_dendrite_scan_btn",
-        "_add_all_btn",
-        "_add_selected_btn",
-        "_annotate_btn",
-        "_apply_colors_btn",
-        "_heatmap_btn",
-        "_heatmap_scored_all_action",
-        "_heatmap_whole_all_action",
-        "_heatmap_scored_selected_action",
-        "_heatmap_whole_selected_action",
-        "_save_csv_btn",
-        "_load_csv_btn",
-        "_reference_section",
-        "_filter_section",
-        "_scope_combo",
-        "_coordinate_space_combo",
-        "_flatmap_style_combo",
-        "_flatmap_y_bins_spin",
-        "_flatmap_depth_bin_spin",
-        "_flatmap_include_depth_minus_one_cb",
-        "_top_n_spin",
-    )}
+    controls = {
+        name: Control()
+        for name in (
+            "_run_btn",
+            "_dendrite_scan_btn",
+            "_add_all_btn",
+            "_add_selected_btn",
+            "_annotate_btn",
+            "_apply_colors_btn",
+            "_heatmap_btn",
+            "_heatmap_scored_all_action",
+            "_heatmap_whole_all_action",
+            "_heatmap_scored_selected_action",
+            "_heatmap_whole_selected_action",
+            "_save_csv_btn",
+            "_load_csv_btn",
+            "_reference_section",
+            "_filter_section",
+            "_scope_combo",
+            "_coordinate_space_combo",
+            "_corrected_pearson_cb",
+            "_flatmap_style_combo",
+            "_flatmap_y_bins_spin",
+            "_flatmap_depth_bin_spin",
+            "_flatmap_include_depth_minus_one_cb",
+            "_top_n_spin",
+        )
+    }
     controls["_reference_mode_combo"] = Control(data="single")
     controls["_flatmap_ignore_depth_cb"] = Control(checked=False)
     document = SearchResultsDocument(
         references=pd.DataFrame({"file_id": ["ref"]}),
-        hits=pd.DataFrame(
-            {"file_id": ["hit"], "rank": [1], "pearson_distance": [0.2]}
-        ),
+        hits=pd.DataFrame({"file_id": ["hit"], "rank": [1], "pearson_distance": [0.2]}),
         metadata={"coordinate_space": SEARCH_SPACE_FLATMAP},
     )
     widget = types.SimpleNamespace(
@@ -867,6 +1052,7 @@ def test_flatmap_results_enable_data_colors_while_heatmaps_stay_disabled() -> No
         _result_frame=document.hits,
         _heatmap_busy=False,
         _is_busy=lambda: False,
+        _pending_request=None,
         _reference_file_ids=lambda: ("ref",),
         _available_dendrite_node_types=lambda: (),
         _selected_result_rows=list,
@@ -879,7 +1065,11 @@ def test_flatmap_results_enable_data_colors_while_heatmaps_stay_disabled() -> No
     assert "Apply Search Colors to Data" in widget._heatmap_btn.tooltip
 
 
-def test_search_widget_snapshots_flatmap_controls_into_request() -> None:
+@pytest.mark.parametrize("coordinate_space", [SEARCH_SPACE_FLATMAP, SEARCH_SPACE_CCF])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_search_widget_snapshots_controls_into_request(
+    coordinate_space, corrected
+) -> None:
     from napari_neuron_navigator.widgets.search_tab import SearchTabWidget
 
     def control(value):
@@ -897,7 +1087,8 @@ def test_search_widget_snapshots_flatmap_controls_into_request() -> None:
         ),
         _represented_region_entries=lambda _ids: [],
         _selected_voxel_node_filter=lambda: None,
-        _selected_coordinate_space=lambda: SEARCH_SPACE_FLATMAP,
+        _selected_coordinate_space=lambda: coordinate_space,
+        _corrected_pearson_cb=checked(corrected),
         _selected_flatmap_style=lambda: "both_shaped",
         _atlas=types.SimpleNamespace(resolution=(25.0, 25.0, 25.0)),
         _top_n_spin=control(17),
@@ -912,13 +1103,112 @@ def test_search_widget_snapshots_flatmap_controls_into_request() -> None:
 
     assert request.reference_file_ids == ("ref",)
     assert request.candidate_file_ids == ("candidate",)
-    assert request.coordinate_space == SEARCH_SPACE_FLATMAP
-    assert request.flatmap_style == "both_shaped"
+    assert request.coordinate_space == coordinate_space
+    assert request.flatmap_style == (
+        "both_shaped" if coordinate_space == "flatmap" else None
+    )
+    assert request.use_corrected_pearson is (
+        corrected if coordinate_space == SEARCH_SPACE_CCF else True
+    )
+    widget._corrected_pearson_cb = checked(not corrected)
+    assert request.use_corrected_pearson is (
+        corrected if coordinate_space == SEARCH_SPACE_CCF else True
+    )
     assert request.flatmap_y_bins == 64
     assert request.flatmap_x_bins is None
     assert request.flatmap_depth_bin_um == 50.0
     assert request.flatmap_include_depth_minus_one is False
     assert request.flatmap_collapse_depth is True
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+@pytest.mark.parametrize("corrected", [True, False])
+def test_search_preflight_retains_policy_or_unlocks_on_cancel(
+    monkeypatch, cancel, corrected
+):
+    from napari_neuron_navigator.widgets import search_tab
+
+    request = VoxelSearchRequest(
+        reference_file_ids=("ref",), use_corrected_pearson=corrected
+    )
+    preflight = types.SimpleNamespace(
+        node_count=search_tab._LARGE_SEARCH_NODE_THRESHOLD + 1
+    )
+    continue_button, cancel_button = object(), object()
+    prompt = MagicMock()
+    prompt.addButton.side_effect = [continue_button, cancel_button]
+    prompt.clickedButton.return_value = cancel_button if cancel else continue_button
+    monkeypatch.setattr(search_tab, "QMessageBox", MagicMock(return_value=prompt))
+    widget = types.SimpleNamespace(
+        _pending_request=request,
+        _pending_preflight=preflight,
+        _release_thread=MagicMock(),
+        _update_button_states=MagicMock(),
+        _launch_search=MagicMock(),
+        _status_label=MagicMock(),
+        _corrected_pearson_cb=types.SimpleNamespace(isChecked=lambda: not corrected),
+    )
+    search_tab.SearchTabWidget._on_preflight_thread_finished(widget)
+    if cancel:
+        assert widget._pending_request is None
+        assert widget._pending_preflight is None
+        widget._launch_search.assert_not_called()
+        widget._update_button_states.assert_called_once()
+    else:
+        widget._launch_search.assert_called_once_with(request, preflight)
+        assert request.use_corrected_pearson is corrected
+
+
+@pytest.mark.parametrize("corrected", [True, False, None])
+def test_imported_search_policy_uses_recorded_metadata(
+    tmp_path, monkeypatch, corrected
+):
+    from napari_neuron_navigator.analysis.pearson_policy import (
+        ccf_pearson_policy_metadata,
+    )
+    from napari_neuron_navigator.widgets import search_tab
+
+    policy = {} if corrected is None else ccf_pearson_policy_metadata(corrected)
+    document = SearchResultsDocument(
+        references=pd.DataFrame(
+            {"file_id": ["ref"], "neuron_id": ["r"], "subject": ["s"]}
+        ),
+        hits=pd.DataFrame(
+            {
+                "file_id": ["hit"],
+                "neuron_id": ["h"],
+                "subject": ["s"],
+                "rank": [1],
+                "pearson_distance": [0.2],
+            }
+        ),
+        metadata={"coordinate_space": SEARCH_SPACE_CCF, **policy},
+    )
+    output = tmp_path / "recorded.csv"
+    export_search_results_csv(output, document)
+    monkeypatch.setattr(
+        search_tab,
+        "QFileDialog",
+        types.SimpleNamespace(
+            getOpenFileName=lambda *args: (str(output), ""),
+        ),
+    )
+    messages = []
+    widget = types.SimpleNamespace(
+        _db=object(),
+        _available_file_ids={"ref", "hit"},
+        _set_result_frame=MagicMock(),
+        _status_label=types.SimpleNamespace(setText=messages.append),
+        _corrected_pearson_cb=types.SimpleNamespace(isChecked=lambda: not corrected),
+    )
+    search_tab.SearchTabWidget._load_results_csv(widget)
+    if corrected is None:
+        assert "CCF Pearson:" not in messages[-1]
+        assert "use_corrected_pearson" not in widget._result_document.metadata
+    else:
+        assert f"CCF Pearson: {'corrected' if corrected else 'legacy'}." in messages[-1]
+        assert widget._result_document.metadata["use_corrected_pearson"] is corrected
+    assert widget._result_document.hits["pearson_distance"].tolist() == [0.2]
 
 
 def test_filtered_search_heatmap_combines_requested_reference_files(tmp_path) -> None:

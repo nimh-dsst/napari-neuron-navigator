@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import duckdb
 import numpy as np
 import pandas as pd
+import pytest
 
 from napari_neuron_navigator.analysis.clustering import (
     ClusterExclusionRule,
@@ -18,9 +20,157 @@ from napari_neuron_navigator.analysis.region_filter import (
     PreparedClusterRegionFilter,
     cleanup_filtered_source_view,
     excluded_soma_file_ids,
+    filter_voxel_frame,
+    points_in_mask,
     prepare_cluster_region_filter,
     register_filtered_source_view,
 )
+
+
+@pytest.fixture
+def mos_projection_challenge(tmp_path):
+    """Known projection counts outside a synthetic bilateral MOs parent mask."""
+    annotation = np.zeros((7, 5, 9), dtype=np.int32)
+    mos_voxels = ((1, 1, 1), (1, 1, 7))
+    target_voxels = ((2, 1, 7), (2, 2, 7), (5, 1, 1), (5, 2, 1))
+    for region_id, voxel in zip((11, 12), mos_voxels):
+        annotation[voxel] = region_id
+    for region_id, voxel in enumerate(target_voxels, start=20):
+        annotation[voxel] = region_id
+    masks = {"MOs": np.isin(annotation, [11, 12]), "root": annotation > 0}
+    atlas = SimpleNamespace(
+        annotation=annotation,
+        resolution=(25.0, 25.0, 25.0),
+        atlas_name="synthetic_projection_challenge",
+        get_structure_mask=lambda acronym: masks[acronym],
+    )
+    vectors = {
+        "cortex-a": [3, 1, 0, 0],
+        "cortex-b": [6, 2, 0, 0],
+        "brainstem-a": [0, 0, 1, 3],
+        "brainstem-b": [0, 0, 2, 6],
+        "mos-only": [0, 0, 0, 0],
+    }
+    rows = []
+    for file_id, counts in vectors.items():
+        node_id = 7
+        # Same display ID and repeated noncontiguous node IDs in every file.
+        # Shared local arbor dominates the raw vectors and must be excluded.
+        for voxel, count in zip((*mos_voxels, *target_voxels), (30, 20, *counts)):
+            for _ in range(count):
+                rows.append(
+                    {
+                        "file_id": file_id,
+                        "neuron_id": "shared",
+                        "subject": file_id,
+                        "node_id": node_id,
+                        "type": 2,
+                        "x": (voxel[0] + 0.75) * 25.0,
+                        "y": (voxel[1] + 0.75) * 25.0,
+                        "z": (voxel[2] + 0.75) * 25.0,
+                        "region_id": int(annotation[voxel]),
+                    }
+                )
+                node_id += 11
+    frame = pd.DataFrame(rows)
+    path = tmp_path / "mos_challenge.parquet"
+    frame.to_parquet(path, index=False)
+    # Independent oracle: manually retain only the known projection regions.
+    oracle_path = tmp_path / "known_projection_nodes.parquet"
+    frame.loc[frame["region_id"].isin(range(20, 24))].to_parquet(
+        oracle_path, index=False
+    )
+    return atlas, path, oracle_path, vectors
+
+
+@pytest.mark.parametrize("linkage", ["ward", "average"])
+@pytest.mark.parametrize(
+    "include_root", [False, True], ids=["exclusion-only", "include-root"]
+)
+def test_ccf_mos_exclusion_preserves_distinct_projection_populations(
+    mos_projection_challenge, linkage, include_root
+):
+    """At 0% dilation, preflight and the real worker use only projection nodes."""
+    from napari_neuron_navigator.analysis.correlation import (
+        compute_pearson_correlation_matrix,
+        correlation_long_to_matrix,
+    )
+    from tests.test_workers import _import_workers_module
+
+    atlas, path, oracle_path, vectors = mos_projection_challenge
+    region_filter = ClusterRegionFilter(
+        include_rules=(ClusterRegionRule(region_id=1, acronym="root"),)
+        if include_root
+        else (),
+        exclude_rules=(
+            ClusterExclusionRule(
+                region_id=10,
+                acronym="MOs",
+                represented_region_ids=(11, 12),
+                # These settings are Soma Location only and must not weaken voxel exclusion.
+                node_types=(99,),
+                minimum_node_count=1000,
+                dilation_fraction=0.0,
+            ),
+        ),
+    )
+    workers = _import_workers_module()
+    preflight = workers.ClusteringPreflightWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        coordinate_space="ccf",
+        clustering_method="voxel",
+        file_ids=list(vectors),
+        region_filter=region_filter,
+    )
+    counted, errors = [], []
+    preflight.finished.connect(counted.append)
+    preflight.error.connect(errors.append)
+    preflight.run()
+    assert errors == []
+    assert len(counted) == 1
+    assert counted[0].node_count == 24
+    worker = workers.CorrelationWorker(
+        parquet_path=str(path),
+        atlas=atlas,
+        region_selection=None,
+        region_filter=region_filter,
+        prepared_region_filter=counted[0].prepared_region_filter,
+        file_ids=list(vectors),
+        linkage_method=linkage,
+        n_clusters=2,
+    )
+    finished = []
+    worker.finished.connect(finished.append)
+    worker.error.connect(errors.append)
+    worker.run()
+    assert errors == []
+    assert len(finished) == 1
+    result = finished[0]
+
+    with duckdb.connect() as conn:
+        oracle = compute_pearson_correlation_matrix(
+            conn,
+            str(oracle_path),
+            None,
+            resolution=25.0,
+        )
+    oracle_frame, oracle_matrix = correlation_long_to_matrix(oracle)
+    assert result.neuron_ids == oracle_frame.columns.tolist()
+    np.testing.assert_allclose(result.correlation_matrix, oracle_matrix)
+    assert result.unassigned_neuron_ids == ["mos-only"]
+    assert result.metadata.region_filter == region_filter
+    labels = dict(zip(result.neuron_ids, result.labels))
+    assert labels["cortex-a"] == labels["cortex-b"]
+    assert labels["brainstem-a"] == labels["brainstem-b"]
+    assert labels["cortex-a"] != labels["brainstem-a"]
+    # Independent dense Pearson oracle includes zero cross-products for
+    # disjoint populations; their r is -2/3, not perfect anticorrelation.
+    np.testing.assert_allclose(
+        result.correlation_matrix,
+        np.corrcoef([vectors[file_id] for file_id in result.neuron_ids]),
+        atol=1e-7,
+    )
 
 
 class _Atlas:
@@ -265,6 +415,66 @@ def test_soma_exclusion_thresholds_are_per_rule_and_file_id(tmp_path) -> None:
     excluded = excluded_soma_file_ids(path, prepared)
 
     assert excluded == {"a", "b"}
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2], ids=["x", "y", "z"])
+def test_soma_exclusion_covers_the_entire_boundary_voxel(tmp_path, axis) -> None:
+    """The bounding query must not discard the upper half of a masked voxel."""
+    resolution = np.array([10.0, 20.0, 40.0])
+    mask = np.zeros((3, 4, 5), dtype=bool)
+    mask[1, 2, 4] = True
+    lower = np.array([1, 2, 4]) * resolution
+    upper = lower + resolution
+    coords = np.tile(lower + 0.25 * resolution, (5, 1))
+    coords[1, axis] = lower[axis] + 0.75 * resolution[axis]
+    coords[2, axis] = np.nextafter(upper[axis], -np.inf)
+    coords[3, axis] = upper[axis]
+    coords[4, axis] = np.nextafter(lower[axis], -np.inf)
+    frame = pd.DataFrame(coords, columns=["x", "y", "z"])
+    frame["file_id"] = [
+        "lower",
+        "upper",
+        "upper_edge",
+        "outside_upper",
+        "outside_lower",
+    ]
+    frame["type"] = 1
+    path = tmp_path / "boundary.parquet"
+    frame.to_parquet(path, index=False)
+    prepared = PreparedClusterRegionFilter(
+        region_filter=ClusterRegionFilter(exclude_rules=(_exclude_rule(),)),
+        resolution_um=tuple(resolution),
+        atlas_shape=mask.shape,
+        include_mask=None,
+        exclude_masks=(mask,),
+        exclude_mask=mask,
+    )
+
+    assert points_in_mask(coords, mask, resolution).tolist() == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert set(filter_voxel_frame(frame, prepared)["file_id"]) == {
+        "outside_upper",
+        "outside_lower",
+    }
+    assert excluded_soma_file_ids(path, prepared) == {"lower", "upper", "upper_edge"}
+
+    with duckdb.connect() as conn:
+        source, relations = register_filtered_source_view(
+            conn, f"read_parquet('{path}')", prepared
+        )
+        try:
+            retained_ids = {
+                row[0]
+                for row in conn.execute(f"SELECT file_id FROM {source}").fetchall()
+            }
+        finally:
+            cleanup_filtered_source_view(conn, source, relations)
+    assert retained_ids == {"outside_upper", "outside_lower"}
 
 
 def test_region_filter_metadata_keeps_legacy_includes_and_canonical_rules() -> None:

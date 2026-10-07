@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from .pearson_policy import ccf_pearson_policy_metadata
+
 if TYPE_CHECKING:
     import duckdb
     from numpy.typing import NDArray
@@ -281,6 +283,8 @@ def compute_pearson_correlation_matrix(
     prepared_region_filter: PreparedClusterRegionFilter | None = None,
     voxel_node_filter: VoxelNodeFilter | None = None,
     prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
+    *,
+    use_corrected_pearson: bool = True,
 ) -> pd.DataFrame:
     """Compute pairwise Pearson correlation of neuron node counts per voxel.
 
@@ -302,12 +306,18 @@ def compute_pearson_correlation_matrix(
         Restrict the computation to this working set of neuron ``file_id`` values.
     progress_callback : callable, optional
         Called with (step_name: str, step_number: int, total_steps: int).
+    use_corrected_pearson : bool, optional
+        If False, reproduce legacy CCF correlations: disjoint and undefined
+        pairs have r=-1, and constant vectors are retained with diagonal r=1.
 
     Returns
     -------
     pd.DataFrame
         Long-form correlation table with columns: swc_id_1, swc_id_2, r.
-        Includes both triangles plus the diagonal (r=1).
+        Includes every retained pair and the diagonal (r=1).
+        The voxel universe is the occupied union after filtering. Constant
+        vectors are omitted in corrected mode; their IDs and provenance are
+        recorded in ``attrs["correlation_metadata"]``.
     """
 
     def _progress(name: str, step: int, total: int = 7) -> None:
@@ -359,21 +369,42 @@ def compute_pearson_correlation_matrix(
     _progress("Computing per-neuron statistics", 4)
     conn.execute("""
         CREATE OR REPLACE TEMP TABLE per_neuron AS
+        WITH stats AS (
+            SELECT
+                swc_id,
+                SUM(c)::DOUBLE AS Sx,
+                SUM(c * c)::DOUBLE AS Sxx
+            FROM counts_by_voxel
+            GROUP BY swc_id
+        )
         SELECT
-            swc_id,
-            SUM(c)::DOUBLE AS Sx,
-            SUM(c * c)::DOUBLE AS Sxx
-        FROM counts_by_voxel
-        GROUP BY swc_id
+            stats.*,
+            V * Sxx - Sx * Sx AS variance_term
+        FROM stats CROSS JOIN voxel_universe
     """)
+    zero_variance_ids = [
+        str(row[0])
+        for row in conn.execute("""
+            SELECT swc_id FROM per_neuron
+            WHERE variance_term <= 0 ORDER BY swc_id
+        """).fetchall()
+    ]
+    voxel_count = int(conn.execute("SELECT V FROM voxel_universe").fetchone()[0])
+    if zero_variance_ids and use_corrected_pearson:
+        logger.warning(
+            "%d neuron(s) have zero variance in their voxel counts; "
+            "Pearson correlation is undefined and they will remain unclustered.",
+            len(zero_variance_ids),
+        )
 
     # Assign numeric IDs for ordering (to compute only upper triangle)
-    conn.execute("""
+    eligibility = "WHERE variance_term > 0" if use_corrected_pearson else ""
+    conn.execute(f"""
         CREATE OR REPLACE TEMP TABLE swc_numeric AS
         SELECT
             swc_id,
             ROW_NUMBER() OVER (ORDER BY swc_id) AS swc_num
-        FROM (SELECT DISTINCT swc_id FROM counts_by_voxel)
+        FROM per_neuron {eligibility}
     """)
 
     # Pairwise cross-products via voxel join (upper triangle only)
@@ -393,37 +424,52 @@ def compute_pearson_correlation_matrix(
         GROUP BY a.swc_id, b.swc_id
     """)
 
-    # Pearson correlation: r = (V*Sxy - Sx*Sy) / sqrt((V*Sxx - Sx^2)(V*Syy - Sy^2))
+    # Both policies return complete tables. Legacy fallback is explicit here,
+    # so the matrix converter can still reject accidentally missing values.
+    if use_corrected_pearson:
+        correlation_sql = (
+            "(vu.V * COALESCE(p.Sxy, 0.0) - x.Sx * y.Sx) "
+            "/ SQRT(x.variance_term * y.variance_term)"
+        )
+        pair_eligibility = "WHERE x.variance_term > 0 AND y.variance_term > 0"
+    else:
+        correlation_sql = (
+            "COALESCE((vu.V * p.Sxy - x.Sx * y.Sx) / NULLIF("
+            "SQRT(GREATEST(x.variance_term, 0.0) * "
+            "GREATEST(y.variance_term, 0.0)), 0.0), -1.0)"
+        )
+        pair_eligibility = ""
     _progress("Computing Pearson correlations", 6)
-    conn.execute("""
+    conn.execute(f"""
         CREATE OR REPLACE TEMP TABLE corr_pairs AS
-        WITH VU AS (SELECT V FROM voxel_universe)
         SELECT
-            p.i,
-            p.j,
-            (VU.V * p.Sxy - x.Sx * y.Sx)
-            / NULLIF(
-                SQRT(
-                    (VU.V * x.Sxx - x.Sx * x.Sx)
-                    * (VU.V * y.Sxx - y.Sx * y.Sx)
-                ),
-                0
-            ) AS r
-        FROM pairwise_xy p
-        JOIN per_neuron x ON p.i = x.swc_id
-        JOIN per_neuron y ON p.j = y.swc_id
-        CROSS JOIN VU
+            x.swc_id AS i,
+            y.swc_id AS j,
+            {correlation_sql} AS r
+        FROM per_neuron x
+        JOIN per_neuron y ON x.swc_id < y.swc_id
+        CROSS JOIN voxel_universe vu
+        LEFT JOIN pairwise_xy p ON p.i = x.swc_id AND p.j = y.swc_id
+        {pair_eligibility}
     """)
 
     # Build symmetric matrix (both triangles + diagonal)
     _progress("Building symmetric correlation table", 7)
-    result_df = conn.execute("""
+    result_df = conn.execute(f"""
         SELECT i AS swc_id_1, j AS swc_id_2, r FROM corr_pairs
         UNION ALL
         SELECT j AS swc_id_1, i AS swc_id_2, r FROM corr_pairs
         UNION ALL
-        SELECT swc_id AS swc_id_1, swc_id AS swc_id_2, 1.0 AS r FROM per_neuron
+        SELECT swc_id AS swc_id_1, swc_id AS swc_id_2, 1.0 AS r
+        FROM per_neuron {eligibility}
     """).fetchdf()
+    result_df.attrs["correlation_metadata"] = {
+        **ccf_pearson_policy_metadata(use_corrected_pearson),
+        "voxel_universe": "occupied_union_after_filtering",
+        "voxel_count": voxel_count,
+        "zero_variance_neuron_count": len(zero_variance_ids),
+        "zero_variance_file_ids": zero_variance_ids,
+    }
 
     # Clean up temp tables
     for table in [
@@ -481,13 +527,16 @@ def correlation_long_to_matrix(
         index=ids, columns=ids
     )
 
-    # Fill any missing pairs with -1 (uncorrelated/missing)
-    mat_df.fillna(-1.0, inplace=True)
-
     mat = mat_df.to_numpy(dtype=np.float32)
     if mat.size == 0:
         logger.info("Correlation matrix: 0x0")
         return mat_df, mat
+
+    if not np.isfinite(mat).all():
+        raise ValueError(
+            "Correlation table must be complete and finite. Recompute all "
+            "pairs and omit neurons with zero-variance voxel counts."
+        )
 
     # Sanity checks
     if not np.allclose(mat, mat.T, equal_nan=True):

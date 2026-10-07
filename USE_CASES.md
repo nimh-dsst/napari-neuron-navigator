@@ -47,6 +47,7 @@ Unless a use case says otherwise:
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
 | [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Partially run |
 | [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Build a regional profile and combine soma, neurite, laterality, and measurement conditions in the Regions tab | Partially run |
+| [UC-022](#uc-022-adjust-clustermap-contrast-and-compare-color-scales) | Reveal small distance differences and lock clustermap color limits across comparable runs | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2095,6 +2096,10 @@ is always evaluated from CCFv3 node coordinates.
    **Expected:** The first rule starts at `20%`, the second starts at `40%`, and
    changing either the default or one row does not modify the other existing
    row. Selected atlas parents represent their dataset descendants.
+   Check a parent and one of its children explicitly, and give the child a
+   different dilation. Both rows must remain present with their own settings;
+   unchecking the parent must preserve the child's rule. Repeat on Exclude
+   with different node types and thresholds as well.
 3. **Action:** On **Exclude**, check a region that overlaps an included mask.
    Inspect its node-type choices and then switch **Method** between **Soma
    Location** and **Voxel Correlation**.
@@ -2110,11 +2115,15 @@ is always evaluated from CCFv3 node coordinates.
    including per-rule dilation, node types, and thresholds. **Region Filters**
    remains visible in both coordinate spaces.
 5. **Action:** Choose **CCFv3 Coordinates** and **Voxel Correlation**, configure
-   overlapping Include and Exclude rules, and run clustering.
+   overlapping Include and Exclude rules, leave **Nonoverlapping neurons use
+   zero cross-product; zero-variance neurons excluded** checked, and run
+   clustering.
    **Expected:** Included masks are unioned after their independent dilations.
    Every node in any excluded mask is removed even if it is also included and
    regardless of the Exclude row's node-type and threshold values. The
    large-run warning, if shown, reports the final surviving node count.
+   The checkbox defaults to checked in a new widget session and is disabled
+   during preflight and clustering. Its tooltip explains both policies.
 6. **Action:** Inspect the assignment when one neuron has no usable nodes after
    voxel filtering. Repeat with filters that leave fewer than two clusterable
    neurons.
@@ -2122,6 +2131,10 @@ is always evaluated from CCFv3 node coordinates.
    **Unclustered**, while the other neurons cluster normally. With fewer than
    two clusterable neurons, the run stops with a corrective message and creates
    no assignment.
+   For corrected CCFv3, also test a neuron with identical counts in every voxel
+   of the cohort's occupied union. Its Pearson correlation is undefined; it remains
+   **Unclustered**, and the completion message reports the zero-variance count.
+   If fewer than two nonconstant vectors remain, the error explains this reason.
 7. **Action:** Choose **Soma Location**. Confirm that each retained neuron's
    averaged soma lies in an Include mask. Configure two Exclude rules with
    different node types and thresholds, testing counts immediately below and
@@ -2131,6 +2144,8 @@ is always evaluated from CCFv3 node coordinates.
    an overlapping node may contribute once to each rule, but a source row is
    counted only once within a rule. Neurons sharing `neuron_id` or `node_id`
    values remain independent because counting uses `file_id`.
+   Nodes in the upper half of an outermost excluded voxel must still count.
+   At zero dilation, an immediately adjacent unmasked voxel must not count.
 8. **Action:** For **Current Table** and **Selected Rows**, clear Include rules,
    keep at least one Exclude rule, and run both clustering methods. Then try the
    same exclusion-only setup with **Whole Parquet**.
@@ -2150,6 +2165,47 @@ is always evaluated from CCFv3 node coordinates.
     numeric node types and labels, thresholds, and the `exclude_wins` policy.
     Legacy selected/represented fields summarize Include rules. The legacy
     dilation value is `null` when Include rules use different dilations.
+    New CCFv3 voxel runs record `extra_metadata.correlation.implementation` as
+    `ccf_pearson_complete_pairs_v2` when checked or `ccf_pearson_legacy_v1` when
+    unchecked, together with `use_corrected_pearson`, the effective policies,
+    occupied voxel count, and zero-variance neuron count and `file_id` list.
+    Cluster and distance workbooks preserve these fields. Previously saved
+    assignments keep their original results; missing policy metadata remains
+    unspecified. Selecting a saved assignment displays its recorded policy
+    independently of the checkbox's current value.
+11. **Action:** Reproduce the MOs challenge using
+    `isocortex_total_right_brainglobe_flatmap.parquet`, the cached
+    `allen_mouse_25um` v1.2 atlas, and the 1,898 distinct `file_id` values whose
+    soma (`type = 1`) has `region_id` in MOs or its descendants
+    (`993, 656, 962, 767, 1021, 1085`). Populate **Current Table** with that cohort.
+    Select **Voxel Correlation**, **CCFv3 Coordinates**, Ward linkage, and five
+    clusters. Leave Include empty, exclude **MOs** at `0%`, and leave additional
+    voxel node filters disabled.
+    **Expected:** Exclusion removes 24,872,435 of the cohort's 106,576,190 node
+    rows and retains 81,703,755. All 1,898 neurons remain clusterable. An
+    independent annotation lookup must find no retained node inside MOs or its
+    descendants. Exclusion changes the nodes used to calculate similarity;
+    it does not guarantee that cortical and brainstem projection populations
+    receive separate cluster labels.
+12. **Action:** Repeat steps 5, 6, and 11 with **Nonoverlapping neurons use zero
+    cross-product; zero-variance neurons excluded** unchecked. Switch to Soma
+    Location and Flat map + Depth, then return to CCFv3 Voxel Correlation.
+    Inspect the independent Search
+    checkbox. Change the Analysis checkbox after completing a run and export
+    its workbooks without rerunning.
+    **Expected:** Unchecked restores the full legacy policy: disjoint or
+    undefined pair correlations are `-1`, zero-variance neurons remain eligible,
+    and every retained neuron's diagonal is `1`. A run with fewer than two
+    usable neurons still stops. Legacy completion messages do not describe
+    constant vectors as excluded. Checked uses zero cross-products for disjoint
+    pairs and excludes undefined vectors. The occupied voxel universe, filters,
+    and preflight counts are identical in both modes. The checkbox is hidden
+    for Soma Location and flatmap, retains its choice on returning to CCFv3,
+    and does not change Search's choice. Completed-result messages and exports
+    retain the run's recorded policy after later checkbox changes.
+    For step 11's 1,898-neuron Ward k=5 run, corrected cluster sizes are
+    206, 2, 511, 301, and 878; legacy sizes are 469, 497, 443, 278, and 211.
+    Cluster labels are arbitrary; compare assignments after label matching.
 
 **Manual verification**
 
@@ -2165,10 +2221,50 @@ is always evaluated from CCFv3 node coordinates.
   Location, scope, Flat map + Depth, and export checks in steps 1-4 and 6-10
   remain to be exercised manually.
 
+  The nested-rule and voxel-boundary additions and step 11 are **Not run** in
+  napari. A backend audit on 2026-10-06 reproduced step 11's cohort and counts,
+  checked every retained node against an independent atlas annotation lookup,
+  and matched retained counts for every `file_id`. Ward at k=5 clustered all
+  1,898 neurons into groups of 469, 497, 443, 278, and 211 with the original
+  correlation calculation. Of 1,800,253 neuron pairs, 981,643 (54.53%) shared no
+  remaining 25 µm voxel. The original CCF matrix incorrectly assigned these
+  pairs `r = -1`, giving them all distance 2.
+
+  A second backend audit on 2026-10-06 used complete Pearson correlations with
+  zero cross-products for disjoint pairs. The same 1,898-neuron cohort, MOs
+  exclusion, 25 µm grid, Ward linkage, k=5, and `1 - r` distance produced cluster
+  sizes 206, 2, 511, 301, and 878. After optimal cluster-label matching,
+  545/1,898 neurons (28.71%) changed assignment; adjusted Rand index was 0.5576.
+  All previously computed correlations for overlapping pairs were unchanged
+  at float32 precision. Corrected disjoint-pair correlations ranged from
+  -0.00301638 to -0.00000238 over 5,041,328 occupied voxels. No neuron had zero
+  variance. These backend checks do not verify anatomical cluster quality or
+  the manual rendering workflow; the new zero-variance UI checks are **Not run**
+  in napari.
+
+  The selectable-policy workflows in steps 5, 6, 10, and 12 are **Not run**
+  manually (added 2026-10-06). A backend rerun on that date reproduced both
+  saved MOs baselines with the same 1,898 neurons, 25 µm atlas, MOs exclusion
+  at 0%, Ward linkage, and k=5: both matrices were bit-identical at float32
+  precision, and each mode's assignments matched its own baseline completely
+  after label alignment (adjusted Rand index 1.0). Automated tests cover real
+  Qt checkbox defaults, visibility and disabled state, request snapshots,
+  policy-specific numerical behavior, and metadata persistence through
+  assignment/project and workbook exports. These do not establish a manual
+  napari pass or verify anatomical cluster quality.
+
   Automated tests cover rule validation and metadata, mask unions and
   precedence, exclusion-only out-of-atlas behavior, per-rule soma thresholds
   keyed by `file_id`, CCFv3 and flatmap voxel filtering, flatmap soma exclusion,
   exact preflight counts, unclustered neurons, and legacy inclusion adapters.
+  Regression coverage also checks nested direct selections, complete boundary
+  voxels on all three axes with unequal resolutions, and a synthetic bilateral
+  MOs challenge through preflight and the correlation worker. The latter
+  compares exclusion with a separately filtered projection-only Parquet under
+  Ward and average linkage, both with and without a root Include rule.
+  Pearson regression tests compare every pair against NumPy, check file scope
+  and unused mask voxels, reject incomplete/nonfinite matrices, and verify
+  zero-variance omissions, worker errors, user messages, and export provenance.
 
 ### UC-019: Filter Voxel Correlation by Node Type, Dendrite-Label Coverage, or Soma Distance
 
@@ -2329,6 +2425,10 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   square flatmap columns, shared depth columns, and canonical grid metadata.
 - Include at least five neurons with overlapping and non-overlapping occupied
   voxels, plus one neuron that will have no usable nodes under a test filter.
+- For the region hierarchy check, use a Parquet whose `region_id` values
+  include at least two descendants of a parent that is not directly represented
+  (for example, `FRP1`/`68` and `FRP2/3`/`667` under `FRP`/`184`). Record the
+  parent and descendant IDs used if choosing a different branch.
 - For the Label-sorting check, include at least 12 usable non-reference
   candidates so the Search results contain both single- and double-digit ranks.
 - Include two neurons that share the same display `neuron_id` across different
@@ -2360,7 +2460,8 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    candidate count, and click **Run Search**.
    **Expected:** Search runs in the background and returns at most the requested
    number of non-reference neurons. Rows are ordered by ascending **Pearson
-   distance (1 - r)**, with `file_id` breaking ties. The status reports scanned,
+   distance (1 - r)**, with `file_id` breaking ties. The results table defaults
+   to ascending **Rank**, placing rank 1 at the top. The status reports scanned,
    usable, omitted, and returned neuron counts, names the resolved Whole
    Parquet scope and counts, and explains that lower is more similar.
 4. **Action:** Repeat with **Current Table** and **Selected Rows**. Include a
@@ -2375,11 +2476,25 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    cohort restriction and asks for a new scan.
 5. **Action:** Populate the Data table with the same candidate cohort, run
    Analysis voxel-correlation clustering with **Current Table** and matching
-   filters, and compare the reference neuron's exported distance row with
-   Search.
+   filters and **Nonoverlapping neurons use zero cross-product; zero-variance
+   neurons excluded** checked in both tabs, and compare the reference neuron's
+   exported distance row with Search.
    **Expected:** Every single-reference Search distance matches the
-   corresponding Analysis distance, including the established behavior for
-   neurons with no shared occupied voxel.
+   corresponding Analysis distance. In CCFv3, pairs with no shared voxel use a
+   zero cross-product in the Pearson formula rather than a fixed correlation.
+   Candidates whose count vector has zero variance are omitted and counted in
+   the status message. A constant aggregate reference stops the search with an
+   explanation. Search CSV context records
+   `missing_correlation_policy = zero_cross_product_omit_zero_variance` and the
+   zero-variance candidate count. These updated CCFv3 checks are **Not run**
+   manually; automated tests cover the distances, omissions, errors, and CSV
+   provenance round trip. Repeat with the checkbox unchecked in both tabs:
+   distances must still agree, but disjoint or undefined correlations become
+   `-1` (distance `2`), constant candidates remain eligible, and a constant
+   reference returns legacy distances. Legacy status must not report those
+   constant candidates as omitted. CSV context records
+   `use_corrected_pearson`, the implementation identifier, and both effective
+   policies; legacy `missing_correlation_policy` is `pearson_r_minus_one`.
 6. **Action:** With the version-3 Parquet loaded, change **Coordinate space**
    to **Flat map + Depth**, choose each available **Flatmap style**, set **Y
    bins**, **Depth bin (μm)**, and **Include depth -1 plane**, then run Search.
@@ -2397,14 +2512,29 @@ of dendritic projections mislabeled as type `2` has not been quantified.
    user to add the cohort to Data, click **Apply Search Colors to Data**, and
    inspect it in **Flatmap**. The color action remains enabled. Switching back
    to **CCFv3 Coordinates** restores the original CCFv3 heatmap controls and
-   behavior.
-7. **Action:** Add independent Include and Exclude rules under **Region
-   Filters**, including overlapping masks and different dilation percentages,
-   and rerun.
-   **Expected:** Included masks are unioned, exclusions win in overlaps, and
-   the same filtered node rows contribute to both the reference and every
-   candidate vector. A candidate with no surviving node is omitted and counted
-   in the status rather than appearing with a fabricated score.
+   behavior. **Nonoverlapping neurons use zero cross-product; zero-variance
+   neurons excluded** is visible only for CCFv3 Search, defaults to checked in
+   a new widget session, retains its choice across space changes, and is
+   independent of Analysis. Changing this option
+   has no effect on flatmap calculations. It is disabled during preflight and
+   Search execution and becomes available again after completion, error, or
+   cancellation of the large-run prompt.
+7. **Action:** Expand **Search Filters** and inspect both **Include** and
+   **Exclude** trees. Compare the available hierarchy with **Analysis** >
+   **Clustering** > **Region Filters** for the same atlas and Parquet. Search
+   by the chosen parent's name and acronym, clear the search, then select that
+   parent on **Include** and one represented child on **Exclude**. Set different
+   dilation percentages and rerun. Clear the selections and verify that both
+   rule tables empty.
+   **Expected:** Both Search trees show represented regions and their ancestors,
+   matching Analysis; unrelated branches are absent. Parents remain selectable
+   even when their own IDs do not appear in the Parquet. A parent rule covers
+   its represented descendants automatically. Include and Exclude selections
+   and dilation values are independent. Included masks are unioned, exclusions
+   win in overlaps, and the same filtered node rows contribute to both the
+   reference and every candidate vector. A candidate with no surviving node is
+   omitted and counted in the status rather than appearing with a fabricated
+   score.
 8. **Action:** Under **Voxel Node Filters**, test **Include selected** and
    **Exclude selected**, the dendrite-label cohort restriction, and **Exclude
    nodes within soma distance** both separately and together.
@@ -2491,7 +2621,12 @@ of dendritic projections mislabeled as type `2` has not been quantified.
     matching run-context JSON. Reference order, scope, filters, rank, and
     availability round trip. Loading does not alter Data until an explicit Add
     action is clicked, and reopened version-2 results can reproduce annotation
-    and heatmap actions.
+    and heatmap actions. Change **Nonoverlapping neurons use zero cross-product;
+    zero-variance neurons excluded** after completing a run, then save and reopen
+    its CSV: the results and status retain their recorded policy regardless of
+    the current checkbox. Repeat
+    with a historical CSV lacking policy metadata; its results remain
+    unchanged and no policy is inferred or displayed.
 16. **Action:** Reopen the version-2 CSV with a different Parquet loaded,
     including some but not all exported reference and result `file_id` values.
     Also open a release-1 Search CSV.
@@ -2523,6 +2658,13 @@ of dendritic projections mislabeled as type `2` has not been quantified.
   workers. The remaining manual checks have not been confirmed.
 - On 2026-10-06, the user confirmed manually that the similarity-search rank
   labels sort correctly in the Data table after the numeric-aware sorting fix.
+- Region hierarchy checks in step 7: **Not run** (added 2026-10-06). Automated
+  regression coverage checks ancestor visibility, parent-to-descendant
+  resolution, and retention of independent rules and dilation on refresh.
+- Both Pearson checkbox workflows in steps 5, 6, and 15: **Not run** manually
+  (added 2026-10-06). Automated regressions cover both calculation policies,
+  constant references/candidates, agreement with Analysis, immutable requests,
+  real Qt controls, cancellation, CSV provenance, and recorded-result messages.
 
 ### UC-021: Build and Run a Compound Regional-Profile Query
 
@@ -2616,7 +2758,8 @@ path as the existing simple Atlas, Custom, and Mask queries.
     mode.
     **Expected:** Existing selectors, the raw **Node types** control, mask
     behavior, scope behavior, previews, and Data-table results retain their
-    prior semantics.
+    prior semantics. In a new widget session, **Node types** defaults to
+    **Soma**; other node types and **All node types** remain selectable.
 
 **Manual verification**
 
@@ -2628,6 +2771,91 @@ path as the existing simple Atlas, Custom, and Mask queries.
   handling, and regression checks for every existing query mode, was not run.
   Stage 3 also has headless model, worker, scope, table-handoff, and
   existing-mode regression coverage.
+
+### UC-022: Adjust Clustermap Contrast and Compare Color Scales
+
+**Capability**
+
+Analysis can stretch clustermap colors over a narrow range of distances while
+preserving the numerical analysis. Automatic contrast uses the 1st and 99th
+percentiles of finite distances between different neurons. Manual limits and
+an optional lock allow comparisons between runs on the same color scale.
+Preview and PNG export share the same resolved limits; clustering, dendrogram
+order, assignments, and workbook/Parquet numerical exports remain unchanged.
+
+**Prerequisites**
+
+- Complete a clustering run with its distance matrix still available in the
+  current session. Restored assignments without runtime matrices require a
+  rerun before building or exporting a clustermap.
+- For the MOs contrast example, use UC-018 step 11: the 1,898-neuron cohort in
+  `isocortex_total_right_brainglobe_flatmap.parquet`, `allen_mouse_25um` v1.2,
+  CCFv3 Voxel Correlation, no Include rules, MOs exclusion at 0%, Ward, k=5,
+  no additional voxel node filters, and corrected Pearson enabled.
+- Have a second clustering result using Pearson distance, and a CCFv3 Soma
+  Location result using distance in micrometres, for the lock checks.
+
+**Steps and expected results**
+
+1. **Action:** Open **Analysis** > **Clustermap** after the MOs clustering run
+   and click **Build Dendrogram**.
+   **Expected:** **Auto contrast** is the default, and **Lock limits across
+   runs** is unchecked. **Color minimum** and **Color maximum** show about
+   `0.9916492772` and `1.001549363`. Within-cluster variation is visible instead
+   of nearly uniform red. The colorbar shows actual distances and **Auto**;
+   endpoint triangles indicate values outside the displayed range. Self-distance
+   zeros do not influence automatic limits. Resizing retains the same limits.
+2. **Action:** Click **Full range**, then **Auto contrast**.
+   **Expected:** Full range includes the entire finite matrix, including its
+   diagonal: approximately `0` to `1.003016353` for this MOs run. The plot
+   returns to nearly uniform red. Auto contrast restores the percentile limits
+   and stronger contrast. Neither action reruns clustering or changes labels.
+3. **Action:** Enter `0.995` in **Color minimum** and `1.001` in **Color maximum**,
+   pressing Enter or leaving each field to apply. Also try scientific notation.
+   Then try blank text, `nan`, `inf`, equal bounds, and reversed bounds.
+   **Expected:** Valid limits update an already built plot and identify the
+   scale as **Manual contrast**. Invalid entries show an explanatory message
+   while retaining the previous valid scale. Auto contrast and Full range also
+   restore valid values in the fields. Focus changes without edits do not
+   change the active scale or mode.
+4. **Action:** With manual limits applied, check **Lock limits across runs**
+   and run another Pearson clustering. Build its dendrogram, then switch to
+   CCFv3 Soma Location and run clustering again.
+   **Expected:** The second Pearson result retains exactly the locked limits
+   and uses a manual scale. The metric change clears the lock, explains why,
+   and computes fresh automatic limits. When unlocked, each new result starts
+   in automatic mode. Selecting another live assignment follows these same
+   rules, and the previous result's plot is cleared until rebuilt.
+5. **Action:** Set manual limits, choose an export DPI, click **Save Dendrogram**,
+   and compare the PNG with the preview. Repeat at another DPI and in automatic
+   mode. Export a distance workbook as well.
+   **Expected:** PNG colors, limits, mode, and endpoint extensions match the
+   preview even when the number of rendered cells differs. Colorbar ticks
+   distinguish small differences without rounding them all to `1`. The
+   workbook retains the full original distances. Contrast choices are session
+   display settings; reopening a project does not restore them.
+6. **Action:** Test a result with identical finite off-diagonal distances, for
+   example clustering exactly two usable neurons. Also test a result where
+   percentiles coincide but some pairs have different distances.
+   **Expected:** Identical pair distances receive one uniform color and an
+   explanation that there is no contrast to stretch. Coincident percentiles
+   with remaining variation fall back to the full off-diagonal range. Finite
+   off-diagonal values alone determine automatic statistics.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-06
+- Notes: Automated regressions cover numerical edge cases, unchanged analysis
+  arrays, real Qt controls, invalid edits, cached statistics, lock/reset behavior,
+  metric changes, and preview/export agreement. On 2026-10-06, full-range and
+  automatic PNGs were generated and visually inspected from the saved corrected
+  1,898-neuron MOs matrix with Ward k=5. Automatic limits were
+  `0.9916492772102355–1.0015493631362915`, full limits were
+  `0–1.0030163526535034`, and distances remained bit-identical. The automatic
+  image revealed visible block structure and variation. This is an exported
+  image check, not a manual napari workflow pass or biological validation.
 
 ## Use-Case Template
 

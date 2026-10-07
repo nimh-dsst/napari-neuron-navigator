@@ -15,9 +15,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from matplotlib.gridspec import GridSpec
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from scipy.cluster.hierarchy import dendrogram
 
 from .clustering import ClusterResult
+from .clustermap_contrast import ClustermapContrast
 
 PARQUET_EXPORT_VERSION = "1"
 PARQUET_METADATA_PREFIX = "napari_neuron_navigator.analysis_export."
@@ -181,8 +183,9 @@ def build_clustermap_figure(
     figsize: tuple[float, float] = (6.0, 6.0),
     max_render_size: int | None = None,
     dpi: int | None = None,
+    contrast: ClustermapContrast | None = None,
 ):
-    """Build the clustermap figure used in the widget and image export."""
+    """Build a clustermap; omitted contrast uses cached automatic limits."""
     figure = plt.Figure(figsize=figsize)
     populate_clustermap_figure(
         figure,
@@ -194,6 +197,7 @@ def build_clustermap_figure(
         figsize=figsize,
         max_render_size=max_render_size,
         dpi=dpi,
+        contrast=contrast,
     )
     return figure
 
@@ -209,8 +213,11 @@ def populate_clustermap_figure(
     figsize: tuple[float, float] = (6.0, 6.0),
     max_render_size: int | None = None,
     dpi: int | None = None,
+    contrast: ClustermapContrast | None = None,
 ):
     """Populate one existing figure with the clustermap layout."""
+    statistics = result.clustermap_contrast_statistics
+    contrast = contrast if contrast is not None else statistics.resolve()
     figure.clear()
     grid = GridSpec(
         3,
@@ -268,11 +275,23 @@ def populate_clustermap_figure(
         interpolation="nearest",
         origin="upper",
         aspect="auto",
+        vmin=contrast.minimum,
+        vmax=contrast.maximum,
     )
     ax_heatmap.set_xticks([])
     ax_heatmap.set_yticks([])
-    colorbar = figure.colorbar(image, cax=ax_colorbar)
+    colorbar = figure.colorbar(
+        image,
+        cax=ax_colorbar,
+        extend=statistics.extension(contrast),
+        ticks=MaxNLocator(nbins=5),
+        format=FuncFormatter(lambda value, _pos: contrast.format_value(value)),
+    )
     colorbar.set_label(_distance_colorbar_label(result))
+    ax_colorbar.set_title(contrast.mode.capitalize(), fontsize=8)
+    explanation = statistics.explanation(contrast)
+    if explanation:
+        figure.text(0.5, 0.01, explanation, ha="center", fontsize=8)
 
     if cluster_colors:
         cluster_array = np.asarray(cluster_colors, dtype=np.float32)
@@ -302,11 +321,6 @@ def populate_clustermap_figure(
     if x_label:
         figure.supxlabel(x_label, y=CLUSTERMAP_FIGURE_XLABEL_Y)
 
-    # Keep one shared color scale without adding another axis.
-    lower = float(np.nanmin(heatmap_data))
-    upper = float(np.nanmax(heatmap_data))
-    if np.isfinite(lower) and np.isfinite(upper) and upper > lower:
-        image.set_clim(lower, upper)
     return figure
 
 
@@ -319,6 +333,7 @@ def save_dendrogram_figure(
     x_label: str = "",
     y_label: str = "",
     dpi: int = 300,
+    contrast: ClustermapContrast | None = None,
 ) -> Path:
     """Save the clustermap-style dendrogram figure as a raster image."""
     render_size = max(
@@ -333,6 +348,7 @@ def save_dendrogram_figure(
         y_label=y_label,
         dpi=dpi,
         max_render_size=render_size,
+        contrast=contrast,
     )
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)

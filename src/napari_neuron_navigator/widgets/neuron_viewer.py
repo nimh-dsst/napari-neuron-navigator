@@ -96,6 +96,7 @@ from ..project_io import (
     save_project_bundle,
 )
 from ..region_appearance import RegionAppearanceStore
+from ..swc import NodeType
 from .analysis_tab import AnalysisTabWidget
 from .collapsible_section import CollapsibleSection
 from .custom_region_selector import CustomRegionSelectorWidget
@@ -2279,6 +2280,7 @@ class NeuronViewerWidget(QWidget):
         node_type_row.setContentsMargins(0, 0, 0, 0)
         node_type_row.addWidget(QLabel("Node types:"))
         self._region_node_type_combo = NodeTypeSelectorComboBox()
+        self._region_node_type_combo.set_selected_node_types((NodeType.SOMA,))
         node_type_row.addWidget(self._region_node_type_combo)
         layout.addWidget(self._region_node_type_controls)
 

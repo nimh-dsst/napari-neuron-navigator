@@ -1544,6 +1544,8 @@ class CorrelationWorker(QObject):
         prepared_region_filter: PreparedClusterRegionFilter | None = None,
         voxel_node_filter: VoxelNodeFilter | None = None,
         prepared_voxel_filter: PreparedVoxelNodeFilter | None = None,
+        *,
+        use_corrected_pearson: bool = True,
     ):
         super().__init__()
         self._parquet_path = parquet_path
@@ -1560,6 +1562,7 @@ class CorrelationWorker(QObject):
         self._prepared_region_filter = prepared_region_filter
         self._voxel_node_filter = voxel_node_filter
         self._prepared_voxel_filter = prepared_voxel_filter
+        self._use_corrected_pearson = bool(use_corrected_pearson)
 
     def run(self) -> None:
         """Execute the full pipeline."""
@@ -1606,6 +1609,7 @@ class CorrelationWorker(QObject):
                 correlation_kwargs = {
                     "resolution": resolution,
                     "file_ids": self._file_ids,
+                    "use_corrected_pearson": self._use_corrected_pearson,
                 }
                 if prepared_region_filter is not None:
                     correlation_kwargs["prepared_region_filter"] = (
@@ -1627,12 +1631,25 @@ class CorrelationWorker(QObject):
                 conn.close()
 
             self.progress.emit("Building correlation matrix...", 3, total)
+            correlation_metadata = dict(corr_df.attrs.get("correlation_metadata", {}))
+            zero_variance_ids = correlation_metadata.get("zero_variance_file_ids", [])
+            excluded_zero_variance_ids = (
+                zero_variance_ids if self._use_corrected_pearson else []
+            )
             mat_df, mat = correlation_long_to_matrix(corr_df)
             if len(mat_df.columns) < 2:
-                self.error.emit(
-                    "Voxel correlation requires at least 2 neurons with usable "
-                    "nodes after applying region and coordinate filters."
+                message = (
+                    "Voxel correlation requires at least 2 neurons with usable nodes"
                 )
+                if self._use_corrected_pearson:
+                    message += (
+                        " and nonzero variance in their voxel counts after filtering. "
+                        f"{len(zero_variance_ids)} neuron(s) have zero variance "
+                        "and undefined Pearson correlation."
+                    )
+                else:
+                    message += " after filtering (legacy CCF Pearson)."
+                self.error.emit(message)
                 return
 
             self.progress.emit("Clustering...", 4, total)
@@ -1649,21 +1666,19 @@ class CorrelationWorker(QObject):
                     or self._region_filter is not None
                     or self._voxel_node_filter is not None
                 )
-                else list(result.neuron_ids)
+                else [*result.neuron_ids, *excluded_zero_variance_ids]
             )
             clustered_ids = set(result.neuron_ids)
             result.unassigned_neuron_ids = [
                 file_id for file_id in input_ids if file_id not in clustered_ids
             ]
-            extra_metadata = None
+            extra_metadata = {"correlation": correlation_metadata}
             if self._voxel_node_filter is not None:
-                extra_metadata = {
-                    "voxel_node_filter": (
-                        self._prepared_voxel_filter.metadata()
-                        if self._prepared_voxel_filter is not None
-                        else self._voxel_node_filter.to_dict()
-                    )
-                }
+                extra_metadata["voxel_node_filter"] = (
+                    self._prepared_voxel_filter.metadata()
+                    if self._prepared_voxel_filter is not None
+                    else self._voxel_node_filter.to_dict()
+                )
             _attach_cluster_run_metadata(
                 result,
                 atlas=self._atlas,

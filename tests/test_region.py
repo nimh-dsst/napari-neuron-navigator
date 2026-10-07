@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 
-from napari_neuron_navigator.region import get_region_at_coords, get_region_ids_vectorized
+from napari_neuron_navigator.region import (
+    get_dataset_region_structure_ids,
+    get_region_at_coords,
+    get_region_ids_vectorized,
+)
+
+
+def test_dataset_region_structure_ids_handles_unknown_ids_and_invalid_paths():
+    atlas = SimpleNamespace(
+        structures={
+            997: {"structure_id_path": [997]},
+            184: {"structure_id_path": [997, 184]},
+            68: {"structure_id_path": [997, "184", None, "invalid", 68]},
+            667: {"structure_id_path": [997, 184, 667]},
+            500: {"structure_id_path": None},
+        }
+    )
+
+    assert get_dataset_region_structure_ids(atlas, {68, 500, 999999}) == {
+        997,
+        184,
+        68,
+        500,
+    }
+    assert get_dataset_region_structure_ids(atlas, set()) == set()
+    assert get_dataset_region_structure_ids(None, {68}) == set()
 
 
 class _DummyStructureTree:

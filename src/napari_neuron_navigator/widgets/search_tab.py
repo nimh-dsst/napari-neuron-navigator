@@ -32,6 +32,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from ..analysis.pearson_policy import (
+    CORRECTED_PEARSON_LABEL,
+    CORRECTED_PEARSON_TOOLTIP,
+    ccf_pearson_mode_text,
+)
 from ..analysis.search import (
     SEARCH_HEATMAP_MODE_SCORED,
     SEARCH_HEATMAP_MODE_WHOLE,
@@ -51,6 +56,7 @@ from ..flatmap_heatmap import (
     FLATMAP_Y_BINS_TOOLTIP,
     MAX_FLATMAP_Y_BINS,
 )
+from ..region import get_dataset_region_structure_ids
 from .collapsible_section import CollapsibleSection
 from .node_type_selector import NodeTypeSelectorComboBox, node_type_options
 from .region_filter_editor import RegionFilterEditorWidget
@@ -388,6 +394,11 @@ class SearchTabWidget(QWidget):
         coordinate_row.addStretch()
         search_layout.addLayout(coordinate_row)
 
+        self._corrected_pearson_cb = QCheckBox(CORRECTED_PEARSON_LABEL)
+        self._corrected_pearson_cb.setChecked(True)
+        self._corrected_pearson_cb.setToolTip(CORRECTED_PEARSON_TOOLTIP)
+        search_layout.addWidget(self._corrected_pearson_cb)
+
         self._flatmap_style_row = QWidget()
         flatmap_style_layout = QHBoxLayout(self._flatmap_style_row)
         flatmap_style_layout.setContentsMargins(0, 0, 0, 0)
@@ -482,6 +493,7 @@ class SearchTabWidget(QWidget):
         self._results_table.setSortingEnabled(True)
         self._results_table.verticalHeader().setVisible(False)
         header = self._results_table.horizontalHeader()
+        header.setSortIndicator(0, Qt.AscendingOrder)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
@@ -654,6 +666,7 @@ class SearchTabWidget(QWidget):
 
     def _update_coordinate_controls(self) -> None:
         is_flatmap = self._selected_coordinate_space() == SEARCH_SPACE_FLATMAP
+        self._corrected_pearson_cb.setVisible(not is_flatmap)
         for widget in (
             self._flatmap_style_row,
             self._flatmap_y_bins_row,
@@ -835,11 +848,13 @@ class SearchTabWidget(QWidget):
         self._update_button_states()
 
     def _refresh_region_editor(self) -> None:
-        if self._atlas is None:
+        """Show represented regions and their ancestors, matching Analysis."""
+        if self._atlas is None or not self._dataset_region_ids:
+            self._region_filter_editor.clear()
             return
         self._region_filter_editor.set_atlas_and_allowed_ids(
             self._atlas,
-            self._dataset_region_ids,
+            get_dataset_region_structure_ids(self._atlas, self._dataset_region_ids),
         )
 
     def _represented_region_entries(self, region_ids: list[int]):
@@ -1064,6 +1079,11 @@ class SearchTabWidget(QWidget):
                 self._flatmap_include_depth_minus_one_cb.isChecked()
             ),
             flatmap_collapse_depth=self._flatmap_ignore_depth_cb.isChecked(),
+            use_corrected_pearson=(
+                self._corrected_pearson_cb.isChecked()
+                if coordinate_space == SEARCH_SPACE_CCF
+                else True
+            ),
         )
 
     def _run_search(self) -> None:
@@ -1134,6 +1154,7 @@ class SearchTabWidget(QWidget):
             if prompt.clickedButton() is not continue_button:
                 self._pending_request = None
                 self._pending_preflight = None
+                self._update_button_states()
                 self._status_label.setText(
                     f"Search cancelled; {preflight.node_count:,} nodes would "
                     "have been processed."
@@ -1175,6 +1196,15 @@ class SearchTabWidget(QWidget):
         )
         self._set_result_frame(frame)
         omitted = len(result.omitted_candidate_file_ids)
+        zero_variance_count = result.metadata.get("zero_variance_candidate_count", 0)
+        policy_text = ccf_pearson_mode_text(result.metadata)
+        variance_message = (
+            f" {int(zero_variance_count):,} candidate(s) were omitted because "
+            "their voxel counts have zero variance and Pearson correlation "
+            "is undefined."
+            if zero_variance_count
+            else ""
+        )
         self._status_label.setText(
             f"Reference neurons: {len(result.reference_file_ids):,}; scanned "
             f"{result.input_candidate_count:,} candidates; "
@@ -1184,6 +1214,8 @@ class SearchTabWidget(QWidget):
             f"{SEARCH_SPACE_LABELS.get(result.metadata.get('coordinate_space'), 'the selected space')} from "
             f"{result.metadata.get('candidate_scope_label', 'the selected scope')}. "
             "Lower distance is more similar."
+            + variance_message
+            + (f" {policy_text}" if policy_text else "")
         )
 
     def _on_search_thread_finished(self) -> None:
@@ -1657,10 +1689,12 @@ class SearchTabWidget(QWidget):
             for frame in (document.references, document.hits)
             if "available" in frame
         )
+        policy_text = ccf_pearson_mode_text(document.metadata)
         self._status_label.setText(
             f"Loaded {len(document.references):,} reference(s) and "
             f"{len(document.hits):,} result(s) from {Path(input_path).name}; "
             f"{unavailable:,} unavailable in the loaded Parquet."
+            + (f" {policy_text}" if policy_text else "")
         )
 
     def _update_button_states(self) -> None:
@@ -1727,6 +1761,11 @@ class SearchTabWidget(QWidget):
         self._filter_section.setEnabled(not busy)
         self._scope_combo.setEnabled(not busy)
         self._coordinate_space_combo.setEnabled(not busy)
+        self._corrected_pearson_cb.setEnabled(
+            not busy
+            and getattr(self, "_worker_thread", None) is None
+            and self._pending_request is None
+        )
         self._flatmap_style_combo.setEnabled(not busy)
         self._flatmap_y_bins_spin.setEnabled(not busy)
         self._flatmap_ignore_depth_cb.setEnabled(not busy)

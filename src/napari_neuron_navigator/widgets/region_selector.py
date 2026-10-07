@@ -426,24 +426,7 @@ class RegionSelectorWidget(QWidget):
         list[str]
             List of selected region acronyms.
         """
-        selected_ids = set()
-
-        def collect_checked(item: QTreeWidgetItem) -> None:
-            if item.checkState(0) == Qt.Checked:
-                struct_id = item.data(0, Qt.UserRole)
-                if struct_id is not None:
-                    selected_ids.add(struct_id)
-
-                    if include_children:
-                        # Add all descendants
-                        self._collect_descendant_ids(struct_id, selected_ids)
-            else:
-                # Check children even if parent is unchecked
-                for i in range(item.childCount()):
-                    collect_checked(item.child(i))
-
-        for i in range(self._tree.topLevelItemCount()):
-            collect_checked(self._tree.topLevelItem(i))
+        selected_ids = self.get_selected_ids(include_children=include_children)
 
         # Convert IDs to acronyms
         acronyms = []
@@ -492,9 +475,12 @@ class RegionSelectorWidget(QWidget):
 
                     if include_children:
                         self._collect_descendant_ids(struct_id, selected_ids)
-            else:
-                for i in range(item.childCount()):
-                    collect_checked(item.child(i))
+                        return
+
+            # Directly checked descendants are independent rules even when
+            # their parent is checked (dilation, types and thresholds may differ).
+            for i in range(item.childCount()):
+                collect_checked(item.child(i))
 
         for i in range(self._tree.topLevelItemCount()):
             collect_checked(self._tree.topLevelItem(i))
