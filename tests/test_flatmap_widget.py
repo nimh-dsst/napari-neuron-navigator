@@ -49,7 +49,7 @@ class _DummySignal:
             callback(*args, **kwargs)
 
 
-def _load_flatmap_widget_module(monkeypatch):
+def _load_flatmap_widget_module(monkeypatch, *, real_surfaces=False):
     fake_qtwidgets = types.ModuleType("qtpy.QtWidgets")
     for name in (
         "QAbstractItemView",
@@ -113,6 +113,12 @@ def _load_flatmap_widget_module(monkeypatch):
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if not real_surfaces:
+        # Most widget tests use dummy layers; real surface slicing has its
+        # own integration coverage below and in test_surface_compat.py.
+        module.add_surface_with_axis_order = (
+            lambda viewer, data, **kwargs: viewer.add_surface(data, **kwargs)
+        )
     return module
 
 
@@ -5271,6 +5277,57 @@ def test_cached_region_geometry_uses_only_materialized_cache_arrays(
         assert layer.metadata["selected_region_acronyms"] == ["VISp", "MOp"]
     assert widget._viewer.layers[0].metadata["region_name"] == "Primary visual area"
     assert widget._viewer.layers[1].metadata["region_acronym"] == "MOp"
+
+
+@pytest.mark.parametrize("style", ["both_shaped", "both_square"])
+def test_cached_region_surfaces_follow_real_viewer_axis_order(monkeypatch, style):
+    from napari.components import ViewerModel
+
+    from napari_neuron_navigator import flatmap_region_cache as cache_module
+
+    # Keep the UI lightweight, then restore real napari modules before making
+    # layers. This exercises the widget's actual surface-creation route.
+    with monkeypatch.context() as imports:
+        module = _load_flatmap_widget_module(imports, real_surfaces=True)
+    widget = _widget(module)
+    viewer = ViewerModel(ndisplay=3)
+    widget._viewer = viewer
+    widget._active_cache_profile = types.SimpleNamespace(profile_id="profile-1")
+    widget._region_cache_dir = Path("cache")
+    widget._style_combo = types.SimpleNamespace(currentData=lambda: style)
+    widget._selected_geometry_region_ids_provider = lambda: [10]
+    widget._region_surfaces_layers = []
+    widget._atlas_provider = lambda: types.SimpleNamespace(
+        structures={
+            10: {"id": 10, "acronym": "VISp", "rgb_triplet": [12, 34, 56]}
+        }
+    )
+    vertices = np.asarray([[2, 3, 5], [2, 7, 5], [4, 3, 9]], dtype=np.float32)
+    surface = types.SimpleNamespace(
+        vertices=vertices,
+        faces=np.asarray([[0, 1, 2]], dtype=np.int32),
+        component_count=1,
+    )
+    monkeypatch.setattr(
+        cache_module, "materialize_region_surface", lambda *_args, **_kwargs: surface
+    )
+    try:
+        with viewer._layer_slicer.force_sync():
+            viewer.add_image(np.zeros((9, 11, 17), dtype=np.uint8))
+            viewer.dims.transpose()
+            widget._create_region_surfaces()
+            assert len(widget._region_surfaces_layers) == 1
+            layer = widget._region_surfaces_layers[0]
+            assert viewer.dims.order == (0, 2, 1)
+            np.testing.assert_array_equal(layer._view_vertices, vertices[:, (0, 2, 1)])
+            viewer.dims.roll()
+            np.testing.assert_array_equal(
+                layer._view_vertices, vertices[:, viewer.dims.displayed]
+            )
+            np.testing.assert_array_equal(layer.vertices, vertices)
+            assert layer.metadata["flatmap_style"] == style
+    finally:
+        viewer._layer_slicer.shutdown()
 
 
 def test_apply_region_appearance_restyles_layers_without_materializing_cache(

@@ -48,6 +48,7 @@ Unless a use case says otherwise:
 | [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Partially run |
 | [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Build a regional profile and combine soma, neurite, laterality, and measurement conditions in the Regions tab | Partially run |
 | [UC-022](#uc-022-adjust-clustermap-contrast-and-compare-color-scales) | Reveal small distance differences and lock clustermap color limits across comparable runs | Not run |
+| [UC-023](#uc-023-keep-region-surfaces-aligned-when-transposing-axes) | Keep region meshes and cached flatmap surfaces aligned when changing display axes | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2856,6 +2857,73 @@ order, assignments, and workbook/Parquet numerical exports remain unchanged.
   `0–1.0030163526535034`, and distances remained bit-identical. The automatic
   image revealed visible block structure and variation. This is an exported
   image check, not a manual napari workflow pass or biological validation.
+
+### UC-023: Keep Region Surfaces Aligned When Transposing Axes
+
+**Capability**
+
+Region meshes follow the reference image's displayed axis order, including
+meshes added after a transpose. Individual atlas regions, grouped Custom
+Regions, the brain outline, and cached flatmap region surfaces use the same
+compatibility fix for napari 0.9's surface slicing. Source coordinates, region
+colors, and atlas resolution scaling remain unchanged.
+
+**Prerequisites**
+
+- Launch with `pixi run napari` and open **Neuron Navigator**.
+- Load the cached `allen_mouse_25um` v1.2 atlas as in UC-001. No neuron Parquet
+  is required for the CCF reference-layer checks.
+- For the optional flatmap check, complete UC-003 and UC-004 and load the
+  matching version-3 Parquet and region cache.
+- Use ordinary clicks on napari's transpose button. Option/Alt-click applies
+  a different operation to existing layer transforms and is outside this case.
+
+**Steps and expected results**
+
+1. **Action:** In **Regions**, choose **Atlas Regions** as **Query source** and
+   select `MOs`. In **Reference**, enable **Show template** and **Show selected
+   region segmentation**. Start in 2D and click napari's transpose-axes button.
+   **Expected:** The reference image and region segmentation transpose together.
+2. **Action:** Enable **Show selected region meshes**.
+   **Expected:** The viewer switches to 3D while retaining the chosen axis order.
+   The MOs mesh lies over MOs in the template and segmentation. It does not
+   retain the orientation from before the transpose.
+3. **Action:** In 3D, use transpose and roll-axes to inspect all six axis orders.
+   Enable **Show brain outline** while the view is transposed.
+   **Expected:** The template, segmentation, MOs mesh, and whole-brain outline
+   remain anatomically registered in every order. Atlas meshes are smoothed
+   surfaces, so exact voxel-boundary coincidence is not required.
+4. **Action:** Hide the MOs surface using its eye icon, transpose, and show it
+   again. Turn **Show selected region meshes** off and on to recreate it. Change
+   opacity and a region color through **Region Appearance** and **Apply**.
+   **Expected:** Reappearing and recreated meshes have the current orientation;
+   styling changes preserve registration and do not accumulate axis swaps.
+5. **Action:** Switch to 2D, change the slice and displayed axes, then return
+   to 3D. Repeat with a small **Custom Regions** selection as described in UC-006.
+   **Expected:** Image and segmentation slicing remain normal. Grouped meshes
+   align on return to 3D. A surface can be absent on a 2D slice that contains
+   none of its triangles; this is native napari surface-slicing behavior.
+6. **Action:** For a loaded flatmap cache, click **Show Region Labels** and
+   **Show Region Surfaces** in the depth view. Transpose before creating surfaces, then
+   transpose/roll with surfaces present. Repeat for shaped and square styles.
+   **Expected:** Cached surfaces stay registered with the matching cached region
+   labels and neuron layers. No cache rebuild or coordinate change is needed.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-07
+- Notes: Automated coverage uses real napari layer models, synthetic atlas
+  meshes, and materialized flatmap geometry. It includes every 3D permutation,
+  2D/3D transitions, asynchronous response handling, unequal axis scales,
+  visibility, and a simulated corrected upstream implementation. Automated
+  checks do not establish completion of this interactive use case.
+  On 2026-10-07, a separate scripted Qt/VisPy check passed all six axis orders
+  in synchronous and asynchronous modes; screenshots of `allen_mouse_25um`
+  MOs, a Custom MOs1/MOp1 layer-1 group, and the brain outline were inspected
+  after transpose and roll. The complete button-driven workflow above remains
+  unrun; details are recorded in the poster workflow's Step 8.
 
 ## Use-Case Template
 

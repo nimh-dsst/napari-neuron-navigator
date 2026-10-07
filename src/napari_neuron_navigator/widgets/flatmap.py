@@ -97,6 +97,7 @@ from ..isocortex_layers import (
     layer_map_from_atlas,
 )
 from ..region_appearance import RegionAppearanceStore, structure_catalog
+from ..surface_compat import add_surface_with_axis_order
 from ..swc import NodeType
 
 logger = logging.getLogger(__name__)
@@ -5426,7 +5427,8 @@ class FlatmapProjectionWidget(QWidget):
             viewer = self._display_viewer()
             created = []
             for data, name, rgba, effective, metadata in prepared:
-                layer = viewer.add_surface(
+                layer = add_surface_with_axis_order(
+                    viewer,
                     data,
                     name=name,
                     colormap=Colormap(np.vstack([rgba, rgba])),
