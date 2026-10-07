@@ -14,6 +14,7 @@ import numpy as np
 
 from ..logging_utils import startup_timing
 from ..region_appearance import RegionAppearanceStore, structure_catalog
+from ..surface_compat import add_surface_with_axis_order
 
 if TYPE_CHECKING:
     import napari
@@ -598,7 +599,8 @@ def add_region_mesh(
     logger.info(
         f"Creating surface layer '{name}': {len(vertices)} vertices, {len(faces)} faces"
     )
-    layer = viewer.add_surface(
+    layer = add_surface_with_axis_order(
+        viewer,
         (vertices, faces),
         scale=scale,
         name=name,
@@ -686,7 +688,8 @@ def add_region_mesh_group(
     )
     any_visible = bool(np.any(vertex_colors[:, 3] > 0.0))
     layer_name = name or f"Region: Custom {group.label}"
-    layer = viewer.add_surface(
+    layer = add_surface_with_axis_order(
+        viewer,
         (vertices, faces),
         scale=[1.0 / float(resolution) for resolution in atlas.resolution],
         name=layer_name,
@@ -815,7 +818,8 @@ def add_brain_outline(
         f"Creating brain outline surface: {len(vertices)} vertices, {len(faces)} faces"
     )
 
-    layer = viewer.add_surface(
+    layer = add_surface_with_axis_order(
+        viewer,
         (vertices, faces),
         scale=scale,
         name=name,

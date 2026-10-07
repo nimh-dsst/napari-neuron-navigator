@@ -18,7 +18,7 @@ from napari_neuron_navigator.region_appearance import (
 from napari_neuron_navigator.isocortex_layers import CustomRegionSelectionGroup
 
 
-def _import_reference_layers_module():
+def _import_reference_layers_module(*, real_surfaces=False):
     """Import ``reference_layers.py`` without importing the widgets package."""
     module_path = (
         Path(__file__).resolve().parent.parent
@@ -36,6 +36,12 @@ def _import_reference_layers_module():
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if not real_surfaces:
+        # These tests inspect constructor arguments using fake layers. Real
+        # napari slicing is covered separately in test_surface_compat.py.
+        module.add_surface_with_axis_order = (
+            lambda viewer, data, **kwargs: viewer.add_surface(data, **kwargs)
+        )
     return module
 
 
