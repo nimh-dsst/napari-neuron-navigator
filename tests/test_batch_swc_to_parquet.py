@@ -9,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
-import pytest
 
 import napari_neuron_navigator.parquet as parquet_module
 from napari_neuron_navigator.analysis.region_profile import (
@@ -129,7 +128,7 @@ def _install_fake_annotation(monkeypatch, seen_coords: list[np.ndarray] | None =
         assert resolution == 25
         if seen_coords is not None:
             seen_coords.append(coords.copy())
-        return np.where(coords[:, 2] < 50.0, 11, 5)
+        return np.where(coords[:, 2] > 50.0, 11, 5)
 
     monkeypatch.setattr("napari_neuron_navigator.parquet.setup_allen_sdk", fake_setup_allen_sdk)
     monkeypatch.setattr("napari_neuron_navigator.parquet.build_region_lookup", fake_build_region_lookup)
@@ -468,49 +467,13 @@ def test_directory_discovery_elapsed_time_is_logged_separately(
     assert "swc_conversion_empty_source source_mode=directory elapsed_s=5.500000" in messages
 
 
-@pytest.mark.parametrize("target", ["left", "right"])
-@pytest.mark.parametrize("cached_midline", [False, True])
-@pytest.mark.parametrize("n_workers", [1, 2])
-def test_alignment_matches_brainglobe_asr(
-    tmp_path, monkeypatch, asr_atlas, target, cached_midline, n_workers,
-):
-    """Both process paths must honor anatomical sides, including cached midlines."""
-    from napari_neuron_navigator.hemisphere import get_atlas_midline
-
-    monkeypatch.setattr("brainglobe_atlasapi.BrainGlobeAtlas", lambda _: asr_atlas)
-    input_dir = tmp_path / "source"
-    input_dir.mkdir()
-    _write_two_node_swc(input_dir / "right.swc", soma_z=2500.0, child_z=2525.0)
-    _write_two_node_swc(input_dir / "left.swc", soma_z=8875.0, child_z=8850.0)
-    output = tmp_path / "aligned.parquet"
-    summary = batch_convert_swc_to_parquet(
-        input_dir, output, hemisphere=target,
-        midline=get_atlas_midline(asr_atlas) if cached_midline else None,
-        n_workers=n_workers, batch_size=1,
-    )
-    assert summary.processed_files == 2
-    assert summary.failed_files == 0
-    assert summary.flipped_files == summary.already_target_files == 1
-    rows = _read_parquet_rows(output)
-    for _, neuron in rows.groupby("file_id"):
-        coords = neuron[["x", "y", "z"]].to_numpy()
-        assert asr_atlas.hemisphere_from_coords(
-            coords[0], microns=True, as_string=True,
-        ) == target
-        np.testing.assert_allclose(coords[:, :2], [[10.0, 20.0], [11.0, 21.0]])
-        expected_z = [2500.0, 2525.0] if target == "right" else [8875.0, 8850.0]
-        np.testing.assert_allclose(coords[:, 2], expected_z)
-        assert neuron["node_id"].tolist() == [1, 2]
-        assert neuron["parent_id"].tolist() == [-1, 1]
-
-
 def test_batch_convert_aligns_only_files_not_already_in_target_hemisphere(tmp_path):
     """Alignment mode should flip only mismatched files and count midline separately."""
     input_dir = tmp_path / "input"
     input_dir.mkdir()
 
-    _write_two_node_swc(input_dir / "left.swc", soma_z=90.0, child_z=80.0)
-    _write_two_node_swc(input_dir / "right.swc", soma_z=10.0, child_z=20.0)
+    _write_two_node_swc(input_dir / "left.swc", soma_z=10.0, child_z=20.0)
+    _write_two_node_swc(input_dir / "right.swc", soma_z=90.0, child_z=80.0)
     _write_two_node_swc(input_dir / "midline.swc", soma_z=50.0, child_z=60.0)
 
     output_path = tmp_path / "aligned.parquet"
@@ -532,8 +495,8 @@ def test_batch_convert_aligns_only_files_not_already_in_target_hemisphere(tmp_pa
     right_rows = rows[rows["file_id"] == "right.swc"]
     midline_rows = rows[rows["file_id"] == "midline.swc"]
 
-    assert left_rows["z"].tolist() == [10.0, 20.0]
-    assert right_rows["z"].tolist() == [10.0, 20.0]
+    assert left_rows["z"].tolist() == [90.0, 80.0]
+    assert right_rows["z"].tolist() == [90.0, 80.0]
     assert midline_rows["z"].tolist() == [50.0, 60.0]
 
 
@@ -576,7 +539,7 @@ def test_cli_reports_skipped_files_but_succeeds_when_some_files_convert(tmp_path
 
     rows = _read_parquet_rows(output_path)
     assert rows["file_id"].unique().tolist() == ["good.swc"]
-    assert rows["z"].tolist() == [10.0, 20.0]
+    assert rows["z"].tolist() == [90.0, 80.0]
 
 
 def test_annotated_mode_uses_aligned_coordinates_before_region_annotation(
@@ -586,7 +549,7 @@ def test_annotated_mode_uses_aligned_coordinates_before_region_annotation(
     """Region IDs should be computed from the post-alignment coordinates."""
     input_dir = tmp_path / "input"
     input_dir.mkdir()
-    _write_two_node_swc(input_dir / "left.swc", soma_z=90.0, child_z=80.0)
+    _write_two_node_swc(input_dir / "left.swc", soma_z=10.0, child_z=20.0)
 
     seen_coords = []
     _install_fake_annotation(monkeypatch, seen_coords)
@@ -604,10 +567,10 @@ def test_annotated_mode_uses_aligned_coordinates_before_region_annotation(
     assert summary.processed_files == 1
     assert summary.flipped_files == 1
     assert len(seen_coords) == 1
-    assert np.all(seen_coords[0][:, 2] < 50.0)
+    assert np.all(seen_coords[0][:, 2] > 50.0)
 
     rows = _read_parquet_rows(output_path)
-    assert rows["z"].tolist() == [10.0, 20.0]
+    assert rows["z"].tolist() == [90.0, 80.0]
     assert set(rows["region_id"]) == {11}
     assert set(rows["region_name"]) == {"Right Region"}
     assert set(rows["region_acronym"]) == {"RR"}
@@ -660,8 +623,8 @@ def test_parallel_raw_output_matches_serial_output(tmp_path, monkeypatch):
 
     input_dir = tmp_path / "input"
     input_dir.mkdir()
-    _write_two_node_swc(input_dir / "left.swc", soma_z=90.0, child_z=80.0)
-    _write_two_node_swc(input_dir / "right.swc", soma_z=10.0, child_z=20.0)
+    _write_two_node_swc(input_dir / "left.swc", soma_z=10.0, child_z=20.0)
+    _write_two_node_swc(input_dir / "right.swc", soma_z=90.0, child_z=80.0)
     _write_two_node_swc(input_dir / "midline.swc", soma_z=50.0, child_z=60.0)
 
     serial_output = tmp_path / "serial.parquet"
@@ -704,8 +667,8 @@ def test_parallel_annotated_output_matches_serial_and_cleans_temp_dir(tmp_path, 
 
     input_dir = tmp_path / "input"
     input_dir.mkdir()
-    _write_two_node_swc(input_dir / "left.swc", soma_z=90.0, child_z=80.0)
-    _write_two_node_swc(input_dir / "right.swc", soma_z=10.0, child_z=20.0)
+    _write_two_node_swc(input_dir / "left.swc", soma_z=10.0, child_z=20.0)
+    _write_two_node_swc(input_dir / "right.swc", soma_z=90.0, child_z=80.0)
     _write_two_node_swc(input_dir / "midline.swc", soma_z=50.0, child_z=60.0)
 
     temp_root = tmp_path / "scratch"

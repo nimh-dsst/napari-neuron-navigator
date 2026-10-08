@@ -340,7 +340,7 @@ This plugin includes functionality to detect which brain hemisphere an SWC morph
 The midline (midsagittal plane) is calculated based on the Allen Mouse Brain Common Coordinate Framework v3 (CCFv3) convention:
 
 - **Coordinate system**: The CCFv3 defines a reference image with origin at (0, 0, 0), spacing of 10 µm/voxel, and size (1320, 800, 1140) voxels
-- **Axes**: BrainGlobe ASR (anterior, superior, right origin): rostral-to-caudal, dorsal-to-ventral, and **right-to-left**. SWC/Parquet columns `(x, y, z)` follow this native atlas axis order; `z` is the left-right coordinate.
+- **Axes**: Rostral-to-caudal, dorsal-to-ventral, and left-to-right
 - **Voxel convention**: Following the ITK convention, voxel positions are defined at voxel **centers**, so position (0, 0, 0) is at the center of the first voxel
 
 The midline coordinate is calculated as the midpoint between the first and last voxel centers:
@@ -353,24 +353,6 @@ For the `allen_mouse_10um` atlas (shape=1140 along the left-right axis):
 - First voxel center: 0.0 µm
 - Last voxel center: (1140 - 1) × 10 = 11390.0 µm
 - **Midline: 5695.0 µm**
-
-For `allen_mouse_25um`, the reflection midline is **5687.5 µm**. Below the
-midline is anatomical **right**; above it is anatomical **left**. The alignment
-and soma summary tools classify positions less than 1 µm from this plane as midline.
-BrainGlobe's discrete hemisphere volume places its label transition at the start
-of voxel 228 (5700 µm for the 25 µm atlas); this is distinct from the reflection
-plane halfway between the two central voxel centers.
-
-**Correction (2026-10-08):** Earlier versions reversed the left/right labels
-used by hemisphere alignment, soma summaries, and point metadata validation.
-Files aligned with `right` consequently placed somas on anatomical left, and
-vice versa. Point imports also now check the X column, which their region lookup
-maps to the atlas's left-right axis. Existing data are not rewritten when the plugin is updated. To
-obtain the intended hemisphere, reconvert the original SWCs with the corrected
-alignment, then regenerate flatmap columns, regional profiles, caches, and
-dependent exports from the new output. Renaming a file does not correct its
-coordinates. Screen left/right depends on the camera and is not an anatomical
-hemisphere identifier.
 
 ### Coordinate Flipping
 

@@ -478,8 +478,6 @@ def _convert_swc_file_to_table(
     midline_file = False
 
     if target_hemisphere is not None:
-        # The cached/custom midline follows BrainGlobe ASR: lower coordinates
-        # are anatomical right. No atlas lookup is needed for every neuron.
         detected = detect_soma_hemisphere(
             swc_data,
             atlas_name=atlas_name,
@@ -953,12 +951,7 @@ def batch_convert_swc_to_parquet(
     regional_profile_atlas: object | None = None,
     regional_profile_output_path: Path | str | None = None,
 ) -> BatchParquetConversionSummary:
-    """Convert SWCs and optionally build the annotated output's profile sidecar.
-
-    Hemisphere alignment assumes BrainGlobe ASR coordinates: lower values on
-    ``coord_axis`` are anatomical right, higher values are anatomical left.
-    This convention also applies to a supplied (cached or custom) ``midline``.
-    """
+    """Convert SWCs and optionally build the annotated output's profile sidecar."""
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     if build_regional_profile and not annotate_regions:

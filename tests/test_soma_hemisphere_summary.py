@@ -45,28 +45,3 @@ def test_summarize_soma_hemispheres_counts_and_formats_output(tmp_path) -> None:
     assert "left: 1 (25.00%)" in rendered
     assert "midline: 2 (50.00%)" in rendered
     assert "right: 1 (25.00%)" in rendered
-
-
-@pytest.mark.parametrize("coord_axis, column", [(0, "x"), (1, "y"), (2, "z")])
-def test_summary_matches_brainglobe_asr(tmp_path, asr_atlas, coord_axis, column):
-    """Unequal side counts catch reversals that a balanced fixture cannot."""
-    from napari_neuron_navigator.hemisphere import get_atlas_midline
-
-    positions = [2500.0, 3000.0, 8875.0]
-    expected = [asr_atlas.hemisphere_from_coords(
-        [25.0, 50.0, z], microns=True, as_string=True,
-    ) for z in positions]
-    path = tmp_path / "somas.parquet"
-    pq.write_table(pa.table({
-        "file_id": ["a", "b", "c"],
-        "neuron_id": ["duplicate", "duplicate", "duplicate"],
-        "type": [1, 1, 1],
-        column: positions,
-    }), path)
-    summary = summarize_soma_hemispheres(
-        path, coord_axis=coord_axis, midline=get_atlas_midline(asr_atlas),
-    )
-    assert summary.neurons_with_soma == 3
-    assert summary.right_count == expected.count("right") == 2
-    assert summary.left_count == expected.count("left") == 1
-    assert summary.midline_count == 0

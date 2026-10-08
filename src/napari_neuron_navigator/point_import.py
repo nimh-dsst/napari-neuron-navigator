@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .atlas_utils import world_coords_xyz_to_atlas_voxels
-from .hemisphere import get_atlas_midline, hemisphere_labels_from_midline
+from .hemisphere import get_atlas_midline
 
 REQUIRED_POINT_COLUMNS = ("label", "x", "y", "z")
 OPTIONAL_POINT_COLUMNS = ("region_name", "acronym", "id", "hemisphere")
@@ -1115,9 +1115,9 @@ def validate_point_metadata_against_atlas(
     )
 
     midline = get_atlas_midline(atlas, coord_axis=2)
-    # Point-import XYZ is reversed into atlas ZYX by the region lookup above.
-    # Its X column therefore corresponds to the atlas's left-right axis (2).
-    hemisphere_values = hemisphere_labels_from_midline(coords[:, 0], midline)
+    hemisphere_values = np.full(len(standardized), "midline", dtype=object)
+    hemisphere_values[coords[:, 2] < midline - 1.0] = "left"
+    hemisphere_values[coords[:, 2] > midline + 1.0] = "right"
     derived_hemisphere = pd.Series(hemisphere_values, dtype="string")
 
     compared_fields: list[str] = []

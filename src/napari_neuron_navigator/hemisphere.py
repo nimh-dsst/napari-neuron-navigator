@@ -6,10 +6,6 @@ This module provides functionality to:
 
 All coordinate operations use numpy vectorized operations for efficient
 processing of large SWC files (10,000+ nodes).
-
-BrainGlobe's ASR space has its origin on the anatomical right: lower coordinates
-on the left-right axis are RIGHT, and higher coordinates are LEFT. This also
-applies when callers supply a cached or custom midline instead of an atlas.
 """
 
 from __future__ import annotations
@@ -112,25 +108,6 @@ def get_atlas_midline(atlas: BrainGlobeAtlas, coord_axis: int = 2) -> float:
     return midline_um
 
 
-def hemisphere_labels_from_midline(
-    lr_coords: NDArray[np.float64] | float,
-    midline: float,
-    tolerance: float = 1.0,
-) -> NDArray[np.str_]:
-    """Classify ASR left-right coordinates in microns, independently per point.
-
-    The axis increases from anatomical right to left, regardless of its position
-    in a coordinate array or on screen. Distances strictly below ``tolerance``
-    from the geometric reflection plane are labelled ``midline``.
-    """
-    positions = np.asarray(lr_coords, dtype=float)
-    return np.where(
-        np.abs(positions - midline) < tolerance,
-        Hemisphere.MIDLINE.value,
-        np.where(positions < midline, Hemisphere.RIGHT.value, Hemisphere.LEFT.value),
-    )
-
-
 def detect_hemisphere(
     coords: NDArray[np.float64],
     atlas: BrainGlobeAtlas | None = None,
@@ -154,7 +131,6 @@ def detect_hemisphere(
         When provided, validation against atlas is skipped.
     coord_axis : int, default=2
         Which coordinate axis (0=x, 1=y, 2=z) corresponds to the left-right axis.
-        Coordinates must increase from anatomical right to left (BrainGlobe ASR).
     validate : bool, default=True
         If True, validate the result against atlas.hemisphere_from_coords.
         Validation is skipped when a custom midline is provided.
@@ -188,7 +164,14 @@ def detect_hemisphere(
     mean_coords = np.mean(coords, axis=0)
     mean_lr = mean_coords[coord_axis]
 
-    result = Hemisphere(hemisphere_labels_from_midline(mean_lr, midline).item())
+    # Determine hemisphere with small tolerance for midline
+    tolerance = 1.0  # 1 micron tolerance
+    if abs(mean_lr - midline) < tolerance:
+        result = Hemisphere.MIDLINE
+    elif mean_lr < midline:
+        result = Hemisphere.LEFT
+    else:
+        result = Hemisphere.RIGHT
 
     # Validate against atlas if enabled and no custom midline was provided
     if validate and not custom_midline_provided and atlas is not None:
@@ -270,11 +253,11 @@ def flip_coordinates(
         Coordinates to flip. Shape (N, 3) or (3,).
     atlas : BrainGlobeAtlas, optional
         Pre-loaded atlas instance.
-    atlas_name : str, default="allen_mouse_10um"
+    atlas_name : str, default="allen_mouse_25um"
         Name of the BrainGlobe atlas to use.
     midline : float, optional
         Override the atlas midline with a custom value.
-    coord_axis : int, default=2
+    coord_axis : int, default=0
         Which coordinate axis (0=x, 1=y, 2=z) to flip across.
 
     Returns
@@ -327,11 +310,11 @@ def flip_swc(
         The SWC morphology data to flip.
     atlas : BrainGlobeAtlas, optional
         Pre-loaded atlas instance.
-    atlas_name : str, default="allen_mouse_10um"
+    atlas_name : str, default="allen_mouse_25um"
         Name of the BrainGlobe atlas to use.
     midline : float, optional
         Override the atlas midline with a custom value.
-    coord_axis : int, default=2
+    coord_axis : int, default=0
         Which coordinate axis to flip across.
     in_place : bool, default=False
         If True, modify the input SWCData. If False, return a copy.
@@ -381,11 +364,11 @@ def flip_swc_batch(
         List of SWC morphology data to flip.
     atlas : BrainGlobeAtlas, optional
         Pre-loaded atlas instance.
-    atlas_name : str, default="allen_mouse_10um"
+    atlas_name : str, default="allen_mouse_25um"
         Name of the BrainGlobe atlas to use.
     midline : float, optional
         Override the atlas midline with a custom value.
-    coord_axis : int, default=2
+    coord_axis : int, default=0
         Which coordinate axis to flip across.
 
     Returns
