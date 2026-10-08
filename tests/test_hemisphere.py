@@ -17,6 +17,35 @@ from napari_neuron_navigator.hemisphere import (
 from napari_neuron_navigator.swc import SWCData
 
 
+@pytest.mark.parametrize("cached_midline", [False, True])
+@pytest.mark.parametrize("resolution, width", [(25.0, 456), (10.0, 1140)])
+def test_detection_matches_brainglobe_asr(
+    asr_atlas, cached_midline, resolution, width,
+):
+    """Check both anatomical sides, including the two central voxel centers."""
+    asr_atlas.metadata["shape"][2] = width
+    asr_atlas.metadata["resolution"] = [resolution] * 3
+    assert asr_atlas.space.origin == ("a", "s", "r")
+    midline = get_atlas_midline(asr_atlas)
+    for index, expected in (
+        (0, Hemisphere.RIGHT),
+        (width // 2 - 1, Hemisphere.RIGHT),
+        (width // 2, Hemisphere.LEFT),
+        (width - 1, Hemisphere.LEFT),
+    ):
+        coords = np.array([resolution, resolution, index * resolution])
+        atlas_label = asr_atlas.hemisphere_from_coords(
+            coords, microns=True, as_string=True,
+        )
+        result = detect_hemisphere(
+            coords, atlas=asr_atlas,
+            midline=midline if cached_midline else None,
+        )
+        assert result.value == atlas_label == expected.value
+        reflected = flip_coordinates(coords, midline=midline)
+        assert detect_hemisphere(reflected, atlas=asr_atlas) != result
+
+
 @pytest.fixture
 def mock_atlas():
     """Create a mock BrainGlobeAtlas."""
@@ -26,7 +55,7 @@ def mock_atlas():
     atlas.shape = (401, 401, 401)
     atlas.resolution = (25.0, 25.0, 25.0)  # microns
 
-    # Mock hemisphere_from_coords to return consistent results with midline
+    # BrainGlobe ASR starts on anatomical right (low coordinates).
     # Midline is at 5000um
     # Returns: 0=outside, 1=left, 2=right
     def mock_hemisphere_from_coords(coords, microns=False):
@@ -35,9 +64,9 @@ def mock_atlas():
         else:
             z = coords[2] * 25.0  # Convert voxels to microns
         if z < 5000:
-            return 1  # left
-        else:
             return 2  # right
+        else:
+            return 1  # left
 
     atlas.hemisphere_from_coords = mock_hemisphere_from_coords
     return atlas
@@ -51,7 +80,7 @@ def sample_swc_data():
         types=np.array([1, 3, 3, 3, 2], dtype=np.int32),
         coords=np.array(
             [
-                [1000.0, 2000.0, 3000.0],  # soma - left of midline (midline at 5000)
+                [1000.0, 2000.0, 3000.0],  # soma - anatomical right (midline at 5000)
                 [1100.0, 2100.0, 3100.0],
                 [1200.0, 2200.0, 3200.0],
                 [1300.0, 2300.0, 3300.0],
@@ -101,13 +130,13 @@ class TestDetectHemisphere:
 
     def test_left_hemisphere(self, mock_atlas):
         """Test detection of left hemisphere."""
-        coords = np.array([[1000.0, 2000.0, 3000.0]])  # z < midline (5000)
+        coords = np.array([[1000.0, 2000.0, 8000.0]])  # z > midline (5000)
         result = detect_hemisphere(coords, atlas=mock_atlas)
         assert result == Hemisphere.LEFT
 
     def test_right_hemisphere(self, mock_atlas):
         """Test detection of right hemisphere."""
-        coords = np.array([[1000.0, 2000.0, 8000.0]])  # z > midline (5000)
+        coords = np.array([[1000.0, 2000.0, 3000.0]])  # z < midline (5000)
         result = detect_hemisphere(coords, atlas=mock_atlas)
         assert result == Hemisphere.RIGHT
 
@@ -121,11 +150,11 @@ class TestDetectHemisphere:
         """Test with a single point (1D array)."""
         coords = np.array([1000.0, 2000.0, 3000.0])  # z < midline
         result = detect_hemisphere(coords, atlas=mock_atlas)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT
 
     def test_multiple_points_centroid(self, mock_atlas):
         """Test with multiple points uses centroid."""
-        # Coords with mean z = 4000 (left of midline 5000)
+        # Coords with mean z = 4000 (anatomical right, below midline 5000)
         coords = np.array(
             [
                 [0.0, 0.0, 3000.0],
@@ -133,28 +162,28 @@ class TestDetectHemisphere:
             ]
         )
         result = detect_hemisphere(coords, atlas=mock_atlas)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT
 
     def test_custom_midline(self):
         """Test with custom midline value."""
         coords = np.array([[0.0, 0.0, 100.0]])
         result = detect_hemisphere(coords, midline=50.0)
-        assert result == Hemisphere.RIGHT  # z=100 > 50
+        assert result == Hemisphere.LEFT  # z=100 > 50
 
     def test_custom_coord_axis(self):
         """Test with different coordinate axis."""
         coords = np.array([[0.0, 100.0, 0.0]])
         result = detect_hemisphere(coords, midline=50.0, coord_axis=1)
-        assert result == Hemisphere.RIGHT  # y=100 > 50
+        assert result == Hemisphere.LEFT  # y=100 > 50
 
 
 class TestDetectSomaHemisphere:
     """Tests for detect_soma_hemisphere function."""
 
-    def test_soma_left(self, sample_swc_data, mock_atlas):
+    def test_soma_right(self, sample_swc_data, mock_atlas):
         """Test soma hemisphere detection."""
         result = detect_soma_hemisphere(sample_swc_data, atlas=mock_atlas)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT
 
     def test_no_soma_raises(self, mock_atlas):
         """Test that missing soma raises ValueError."""
@@ -343,10 +372,10 @@ class TestHemisphereValidation:
 
     def test_validation_passes_when_consistent(self, mock_atlas):
         """Test that validation passes when midline and atlas agree."""
-        # z=3000 is left of midline (5000), atlas returns 1 (left)
+        # z=3000 is anatomical right, atlas returns 2 (right).
         coords = np.array([[1000.0, 2000.0, 3000.0]])
         result = detect_hemisphere(coords, atlas=mock_atlas, validate=True)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT
 
     def test_validation_raises_on_mismatch(self):
         """Test that validation raises ValueError on mismatch."""
@@ -354,9 +383,9 @@ class TestHemisphereValidation:
         atlas.shape = (401, 401, 401)
         atlas.resolution = (25.0, 25.0, 25.0)
         # Force atlas to return opposite hemisphere
-        atlas.hemisphere_from_coords = MagicMock(return_value=2)  # right
+        atlas.hemisphere_from_coords = MagicMock(return_value=1)  # left
 
-        # z=3000 is left of midline (5000), but atlas says right
+        # z=3000 is anatomical right, but atlas says left.
         coords = np.array([[1000.0, 2000.0, 3000.0]])
         with pytest.raises(ValueError, match="Hemisphere mismatch"):
             detect_hemisphere(coords, atlas=atlas, validate=True)
@@ -367,13 +396,13 @@ class TestHemisphereValidation:
         atlas.shape = (401, 401, 401)
         atlas.resolution = (25.0, 25.0, 25.0)
         # Force atlas to return opposite hemisphere
-        atlas.hemisphere_from_coords = MagicMock(return_value=2)  # right
+        atlas.hemisphere_from_coords = MagicMock(return_value=1)  # left
 
         # With custom midline, validation should be skipped
         coords = np.array([[1000.0, 2000.0, 3000.0]])
         # Should not raise even though atlas would return different result
         result = detect_hemisphere(coords, atlas=atlas, midline=5000.0, validate=True)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT
         # hemisphere_from_coords should not have been called
         atlas.hemisphere_from_coords.assert_not_called()
 
@@ -383,12 +412,12 @@ class TestHemisphereValidation:
         atlas.shape = (401, 401, 401)
         atlas.resolution = (25.0, 25.0, 25.0)
         # Force atlas to return opposite hemisphere
-        atlas.hemisphere_from_coords = MagicMock(return_value=2)  # right
+        atlas.hemisphere_from_coords = MagicMock(return_value=1)  # left
 
         # With validate=False, should not raise
         coords = np.array([[1000.0, 2000.0, 3000.0]])
         result = detect_hemisphere(coords, atlas=atlas, validate=False)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT
         atlas.hemisphere_from_coords.assert_not_called()
 
     def test_validation_skipped_for_outside_brain(self):
@@ -402,4 +431,4 @@ class TestHemisphereValidation:
         coords = np.array([[1000.0, 2000.0, 3000.0]])
         # Should not raise even though we're "outside" the brain
         result = detect_hemisphere(coords, atlas=atlas, validate=True)
-        assert result == Hemisphere.LEFT
+        assert result == Hemisphere.RIGHT

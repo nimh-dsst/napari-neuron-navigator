@@ -1421,7 +1421,7 @@ def test_validate_point_metadata_against_atlas_uses_world_xyz_order(
             "region_name": ["Region/One"],
             "acronym": ["R1"],
             "id": [101],
-            "hemisphere": ["right"],
+            "hemisphere": ["midline"],
         }
     )
 
@@ -1458,6 +1458,28 @@ def test_validate_point_metadata_against_atlas_reports_field_counts(
         "hemisphere": 1,
     }
     assert "row 1 label=A" in message
+    assert summary.mismatches["atlas_hemisphere"].tolist() == ["midline"]
+
+
+def test_point_hemispheres_follow_atlas_asr_and_world_xyz_order(asr_atlas):
+    """Point X, rather than Z, maps to the atlas's left-right coordinate."""
+    atlas_coords = np.array([
+        [25.0, 50.0, 2500.0],
+        [25.0, 50.0, 8875.0],
+    ])
+    expected = [asr_atlas.hemisphere_from_coords(c, microns=True, as_string=True)
+                for c in atlas_coords]
+    assert expected == ["right", "left"]
+    asr_atlas._annotation = np.zeros(asr_atlas.shape, dtype=np.int32)
+    frame = pd.DataFrame(atlas_coords[:, ::-1], columns=["x", "y", "z"])
+    frame["label"] = ["A", "B"]
+    frame["hemisphere"] = expected
+    assert not validate_point_metadata_against_atlas(frame, asr_atlas).has_mismatches
+    # The report must expose the correct labels when supplied labels are reversed.
+    frame["hemisphere"] = expected[::-1]
+    summary = validate_point_metadata_against_atlas(frame, asr_atlas)
+    assert summary.mismatch_counts["hemisphere"] == 2
+    assert summary.mismatches["atlas_hemisphere"].tolist() == expected
 
 
 def test_build_label_heatmap_volumes_groups_counts_by_label(

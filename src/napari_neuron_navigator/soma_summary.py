@@ -52,7 +52,12 @@ def summarize_soma_hemispheres(
     midline: float = DEFAULT_MIDLINE,
     tolerance: float = DEFAULT_TOLERANCE,
 ) -> SomaHemisphereSummary:
-    """Summarize hemisphere counts for all soma rows in a Parquet file."""
+    """Summarize soma rows in native BrainGlobe ASR SWC/parquet coordinates.
+
+    The selected axis increases from anatomical right to left. The default
+    reflection midline is for the 10 um Allen atlas; pass the appropriate
+    midline when using another resolution or a custom reflection plane.
+    """
     path = Path(parquet_path)
     if not path.exists():
         raise FileNotFoundError(f"Parquet file not found: {path}")
@@ -78,8 +83,8 @@ def summarize_soma_hemispheres(
                 {coord_column} AS coord,
                 CASE
                     WHEN ABS({coord_column} - ?) < ? THEN 'midline'
-                    WHEN {coord_column} < ? THEN 'left'
-                    ELSE 'right'
+                    WHEN {coord_column} < ? THEN 'right'
+                    ELSE 'left'
                 END AS hemisphere
             FROM read_parquet('{parquet_sql_path}')
             WHERE type = 1

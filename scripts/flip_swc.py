@@ -149,7 +149,7 @@ def main(args: list[str] | None = None) -> int:
         midline = parsed.midline
         print(f"Using custom midline: {midline:.2f} um")
     else:
-        midline = get_atlas_midline(atlas)
+        midline = get_atlas_midline(atlas, coord_axis=parsed.coord_axis)
         print(f"Atlas midline: {midline:.2f} um")
 
     # Parse SWC file
