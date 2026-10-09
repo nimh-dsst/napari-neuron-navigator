@@ -247,3 +247,4 @@ anisotropy_fix_data/
 *.xlsx
 *.swc
 *.xml
+**/*.png

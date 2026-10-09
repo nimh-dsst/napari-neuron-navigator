@@ -51,6 +51,19 @@ NAPARI_NEURON_NAVIGATOR_DEBUG=1 NAPARI_NEURON_NAVIGATOR_LOG_FILE=/tmp/napari-neu
 The default file is `~/.napari-neuron-navigator/debug.log`. It rotates at 10 MB and
 keeps three backups. Plugin DEBUG records are written to the file and console.
 
+### 3D presentation flip
+
+In **Visualization → 3D View**, **Match CCFv3 2D orientation in 3D** is enabled
+by default. This corrects the display orientation difference when BrainGlobe
+atlas layers are shown with CCFv3 coordinates: both AP and left/right (ML) are
+flipped in 3D to match the Allen 2D presentation, while DV is unchanged. The
+correction follows AP and ML when the displayed axes are transposed or rolled.
+Images, region surfaces, and neurons flip together through the camera; data
+coordinates, layer transforms, measurements, and data exports are unchanged.
+Screenshots capture the corrected view. Returning to 2D restores the original
+orientation; returning to 3D reapplies the correction. Uncheck the control to
+restore the uncorrected 3D view.
+
 ### Compatibility with napari-swc-viewer data
 
 The distribution and import package are now `napari-neuron-navigator` and

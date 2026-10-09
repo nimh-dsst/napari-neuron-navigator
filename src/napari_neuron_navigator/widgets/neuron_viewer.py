@@ -628,6 +628,8 @@ class NeuronViewerWidget(QWidget):
             self._highlighted_file_ids: set[str] | None = None
             self._last_soma_selection: _SomaSelectionKey | set = set()
             self._auto_center_applied_once = False
+            self._3d_flip_original_orientation: tuple[str, str, str] | None = None
+            self._3d_flip_axis_order: tuple[int, ...] | None = None
             self._region_query_source = _REGION_QUERY_SOURCE_ATLAS
             self._region_query_scope = _REGION_QUERY_SCOPE_WHOLE
             self._mask_bounds_source = "manual"
@@ -757,6 +759,7 @@ class NeuronViewerWidget(QWidget):
                 phase="connect_ndisplay_event",
             ):
                 self.viewer.dims.events.ndisplay.connect(self._on_ndisplay_changed)
+                self.viewer.dims.events.order.connect(self._update_3d_display_flip)
 
             with startup_timing(
                 logger,
@@ -1184,6 +1187,7 @@ class NeuronViewerWidget(QWidget):
 
     def _on_neuron_viewer_destroyed(self, *_args) -> None:
         """Release all plugin-owned flatmap viewers during widget teardown."""
+        self._restore_3d_display_flip()
         cancel_profile = getattr(
             getattr(self, "_regional_profile_worker", None),
             "cancel",
@@ -2717,6 +2721,25 @@ class NeuronViewerWidget(QWidget):
     def _setup_viz_tab(self, parent: QWidget) -> None:
         """Set up the visualization settings tab."""
         layout = QVBoxLayout(parent)
+
+        view_group = QGroupBox("3D View")
+        view_layout = QVBoxLayout(view_group)
+        self._flip_3d_display_cb = QCheckBox("Match CCFv3 2D orientation in 3D")
+        self._flip_3d_display_cb.setChecked(True)
+        orientation_help = (
+            "Corrects the orientation difference when displaying BrainGlobe "
+            "atlas layers with CCFv3 coordinates: flips AP and left/right "
+            "in 3D to match the Allen 2D presentation. "
+            "Display only; 2D slices, coordinates, and analyses stay unchanged."
+        )
+        self._flip_3d_display_cb.setToolTip(orientation_help)
+        self._flip_3d_display_cb.toggled.connect(self._update_3d_display_flip)
+        view_layout.addWidget(self._flip_3d_display_cb)
+        orientation_label = QLabel(orientation_help)
+        orientation_label.setWordWrap(True)
+        view_layout.addWidget(orientation_label)
+        layout.addWidget(view_group)
+        self._update_3d_display_flip()
 
         # Render mode
         mode_group = QGroupBox("Render Mode")
@@ -9970,8 +9993,52 @@ class NeuronViewerWidget(QWidget):
             else:
                 layer.opacity = base_opacity
 
+    def _restore_3d_display_flip(self) -> None:
+        """Restore the camera's original directions without touching layers."""
+        orientation = getattr(self, "_3d_flip_original_orientation", None)
+        if orientation is None:
+            return
+        camera = self.viewer.scene.camera
+        camera.orientation = orientation
+        camera.events.angles()
+        self._3d_flip_original_orientation = None
+        self._3d_flip_axis_order = None
+
+    def _update_3d_display_flip(self, *_args) -> None:
+        """Reverse CCF AP/ML camera directions only in the main 3D viewer."""
+        checkbox = getattr(self, "_flip_3d_display_cb", None)
+        enabled = checkbox is not None and checkbox.isChecked()
+        if not enabled or self.viewer.dims.ndisplay != 3:
+            self._restore_3d_display_flip()
+            return
+        axis_order = tuple(self.viewer.dims.displayed)
+        if getattr(self, "_3d_flip_axis_order", None) == axis_order:
+            return
+        self._restore_3d_display_flip()
+        camera = self.viewer.scene.camera
+        self._3d_flip_original_orientation = camera.orientation
+        self._3d_flip_axis_order = axis_order
+        opposite = {
+            "towards": "away",
+            "away": "towards",
+            "down": "up",
+            "up": "down",
+            "right": "left",
+            "left": "right",
+        }
+        # CCF data axes are AP=0, DV=1, ML=2. Follow these anatomical axes
+        # when the user transposes/rolls the view, rather than flipping DV.
+        camera.orientation = tuple(
+            opposite[direction] if axis in (0, 2) else direction
+            for axis, direction in zip(axis_order, camera.orientation, strict=True)
+        )
+        # Reapply the current angles under the new camera axis directions before
+        # drawing, so napari's 2D/3D camera cache does not accumulate rotations.
+        camera.events.angles()
+
     def _on_ndisplay_changed(self, event) -> None:
         """Auto-hide neuron line/point layers in 2D to keep slice scrubbing fast."""
+        self._update_3d_display_flip()
         if not self._current_neuron_layers:
             return
 
