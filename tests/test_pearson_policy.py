@@ -90,10 +90,12 @@ def test_real_checkboxes_default_visibility_independence_and_busy_states(tmp_pat
                 "Nonoverlapping neurons use zero cross-product; "
                 "zero-variance neurons excluded"
             )
-            assert checkbox.isChecked()
+            assert checkbox.isChecked() == (widget is search)
             assert not checkbox.isHidden()
             assert "zero-variance" in checkbox.toolTip()
 
+        analysis._corrected_pearson_cb.setChecked(True)
+        assert search._corrected_pearson_cb.isChecked()
         analysis._corrected_pearson_cb.setChecked(False)
         assert search._corrected_pearson_cb.isChecked()
         analysis._clustering_method_combo.setCurrentText("Soma Location")

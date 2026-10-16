@@ -6,12 +6,8 @@ CORRECTED_PEARSON_LABEL = (
     "Nonoverlapping neurons use zero cross-product; zero-variance neurons excluded"
 )
 CORRECTED_PEARSON_TOOLTIP = (
-    "Checked: calculate Pearson correlation for nonoverlapping neurons using "
-    "a zero cross-product; omit zero-variance vectors because their correlation "
-    "is undefined. Search stops if the aggregate reference has zero variance. "
-    "Unchecked: reproduce legacy CCF behavior, assigning r = -1 to disjoint "
-    "or undefined pair correlations and retaining zero-variance neurons. "
-    "The clustering diagonal stays 1 in both modes. Applies only to CCFv3."
+    "Checked: zero cross-product for nonoverlapping neurons; exclude zero-variance neurons.\n"
+    "Unchecked: assign r = -1 to nonoverlapping pairs or pairs containing a zero-variance neuron."
 )
 
 

@@ -822,7 +822,7 @@ class AnalysisTabWidget(QWidget):
         corr_layout.addLayout(self._clusters_row)
 
         self._corrected_pearson_cb = QCheckBox(CORRECTED_PEARSON_LABEL)
-        self._corrected_pearson_cb.setChecked(True)
+        self._corrected_pearson_cb.setChecked(False)
         self._corrected_pearson_cb.setToolTip(CORRECTED_PEARSON_TOOLTIP)
         corr_layout.addWidget(self._corrected_pearson_cb)
 
