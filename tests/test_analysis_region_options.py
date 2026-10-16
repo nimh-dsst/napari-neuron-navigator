@@ -1641,7 +1641,7 @@ def _captured_unfiltered_request(widget):
 def test_ccf_pearson_choice_is_snapshotted_before_preflight(monkeypatch, corrected):
     module = _import_analysis_tab_module()
     widget = module.AnalysisTabWidget(_DummyViewer())
-    assert widget._corrected_pearson_cb.isChecked()
+    assert not widget._corrected_pearson_cb.isChecked()
     widget._corrected_pearson_cb.setChecked(corrected)
     request = _captured_unfiltered_request(widget)
     assert request.use_corrected_pearson is corrected

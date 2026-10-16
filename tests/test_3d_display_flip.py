@@ -1,14 +1,97 @@
 """Exercise the AP/ML presentation correction with a real Qt/VisPy canvas.
 
-Run outside the sandbox: pixi run test tests/test_3d_display_flip.py
+Run canvas checks with a working desktop OpenGL context, outside the sandbox:
+pixi run test-rendering
 """
 
+import os
+import subprocess
+import sys
+import textwrap
 from copy import deepcopy
 
 import numpy as np
 import pytest
 
 
+def test_3d_correction_camera_model_without_canvas():
+    """Keep anatomical-axis and restoration coverage independent of OpenGL.
+
+    A fresh process avoids Qt stubs installed by other test modules. Real napari
+    models exercise camera validation and events without constructing a canvas.
+    """
+    script = textwrap.dedent("""
+        from itertools import permutations
+        from types import MethodType, SimpleNamespace
+        from napari.components import Camera, Dims
+        from napari_neuron_navigator.widgets.neuron_viewer import NeuronViewerWidget
+
+        expected_by_order = {
+            (0, 1, 2): ("away", "down", "left"),
+            (0, 2, 1): ("away", "up", "right"),
+            (1, 0, 2): ("towards", "up", "left"),
+            (1, 2, 0): ("towards", "up", "left"),
+            (2, 0, 1): ("away", "up", "right"),
+            (2, 1, 0): ("away", "down", "left"),
+        }
+        for synced in (True, False):
+            camera = Camera(synced=synced, center=(12, 16, 20), zoom=10)
+            dims = Dims(ndim=3, ndisplay=2)
+            enabled = True
+            widget = SimpleNamespace(
+                viewer=SimpleNamespace(scene=SimpleNamespace(camera=camera), dims=dims),
+                _flip_3d_display_cb=SimpleNamespace(isChecked=lambda: enabled),
+                _3d_flip_original_orientation=None,
+                _3d_flip_axis_order=None,
+            )
+            widget._restore_3d_display_flip = MethodType(
+                NeuronViewerWidget._restore_3d_display_flip, widget
+            )
+            update = MethodType(NeuronViewerWidget._update_3d_display_flip, widget)
+            original = camera.orientation
+            update()
+            assert camera.orientation == original
+            for order in permutations(range(3)):
+                dims.order = order
+                dims.ndisplay = 3
+                enabled = True
+                update()
+                assert camera.orientation == expected_by_order[order]
+                update()  # Repeated events must not accumulate reflections.
+                assert camera.orientation == expected_by_order[order]
+                assert camera.center == (12, 16, 20)
+                assert camera.zoom == 10
+                enabled = False
+                update()
+                assert camera.orientation == original
+                enabled = True
+                update()
+                dims.ndisplay = 2
+                update()
+                assert camera.orientation == original
+                assert widget._3d_flip_original_orientation is None
+            dims.ndisplay = 3
+            for order in permutations(range(3)):
+                dims.order = order
+                update()
+                assert camera.orientation == expected_by_order[order]
+            widget._restore_3d_display_flip()
+            assert camera.orientation == original
+    """)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.skipif(
+    os.environ.get("NN_RUN_RENDERING_TESTS") != "1",
+    reason="Requires desktop OpenGL; run pixi run test-rendering",
+)
 @pytest.mark.parametrize("synced", [True, False])
 @pytest.mark.parametrize("initial_ndisplay", [2, 3])
 def test_3d_correction_preserves_layers_and_2d_view(tmp_path, synced, initial_ndisplay):

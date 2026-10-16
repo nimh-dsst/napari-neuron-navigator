@@ -145,6 +145,17 @@ To run the test suite:
 pixi run test
 ```
 
+The default suite checks the 3D orientation correction using camera models
+without creating an OpenGL canvas. Run the screenshot integration checks
+separately on a desktop with working OpenGL:
+
+```sh
+pixi run test-rendering
+```
+
+These checks are opt-in because the suite's offscreen Qt backend and hosted CI
+OpenGL contexts cannot reliably render the scene (and can crash on macOS).
+
 To run tests with coverage:
 
 ```bash
