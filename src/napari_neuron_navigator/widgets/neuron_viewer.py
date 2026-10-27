@@ -1188,6 +1188,9 @@ class NeuronViewerWidget(QWidget):
     def _on_neuron_viewer_destroyed(self, *_args) -> None:
         """Release all plugin-owned flatmap viewers during widget teardown."""
         self._restore_3d_display_flip()
+        report = getattr(self, "_region_report", None)
+        if report is not None:
+            report.shutdown()
         cancel_profile = getattr(
             getattr(self, "_regional_profile_worker", None),
             "cancel",
@@ -2427,6 +2430,16 @@ class NeuronViewerWidget(QWidget):
         self._regions_status_label = QLabel("")
         self._regions_status_label.setWordWrap(True)
         layout.addWidget(self._regions_status_label)
+
+        from .region_report import RegionReportWidget
+
+        self._region_report = RegionReportWidget(self._region_report_cohort_file_ids)
+        self._region_report.build_profile_requested.connect(
+            self._start_regional_profile_build
+        )
+        self._neuron_table.selection_changed.connect(self._region_report.invalidate)
+        self._neuron_table.state_changed.connect(self._region_report.invalidate)
+        layout.addWidget(self._region_report)
 
         self._region_appearance_section = CollapsibleSection(
             "Region Appearance",
@@ -7052,8 +7065,20 @@ class NeuronViewerWidget(QWidget):
 
         return default_region_profile_path(self._db.parquet_path)
 
+    def _region_report_cohort_file_ids(self, scope: str) -> list[object]:
+        """Snapshot report membership independently of region-query scope."""
+        if scope == "selected":
+            table = getattr(self, "_neuron_table", None)
+            return [] if table is None else list(table.get_selected_file_ids())
+        return self._current_table_file_ids()
+
     def _refresh_regional_profile_status(self) -> None:
         """Show cheap sidecar availability without scanning source node rows."""
+        report = getattr(self, "_region_report", None)
+        if report is not None:
+            report.set_context(
+                None if self._db is None else self._db.parquet_path, self._atlas
+            )
         editor = getattr(self, "_compound_region_query", None)
         setter = getattr(editor, "set_profile_status", None)
         if not callable(setter):
@@ -7204,6 +7229,9 @@ class NeuronViewerWidget(QWidget):
         if callable(setter):
             setter(message)
         self._set_regional_query_busy(False)
+        report = getattr(self, "_region_report", None)
+        if report is not None:
+            report.refresh()
 
     def _on_regional_profile_cancelled(self, message: str) -> None:
         text = str(message).strip() or "Regional-profile construction was cancelled."

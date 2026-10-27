@@ -2925,6 +2925,124 @@ colors, and atlas resolution scaling remain unchanged.
   after transpose and roll. The complete button-driven workflow above remains
   unrun; details are recorded in the poster workflow's Step 8.
 
+### UC-024: Report Cohort Neurite Coverage by Anatomical Region
+
+**Capability**
+
+The collapsible **Region Report** in **Regions** summarizes neurite coverage,
+cable length, and reconstructed childless non-soma termini for a selected
+cohort. Its anatomical tree contains only regions with positive neurite node
+count or cable length in the cohort, together with their grouping ancestors.
+Expanded branches show individual direct-region contributions. Collapsing a
+branch combines its direct label and retained descendants, deduplicating
+neurons by `file_id`. Regions with only soma contributions do not appear.
+
+| Column | Meaning |
+| --- | --- |
+| Region | Atlas region name and acronym |
+| Neurons present | Distinct cohort `file_id` values with positive neurite node count or cable length |
+| Cohort present (%) | Neurons present divided by the entire selected cohort, times 100 |
+| Total cable (mm) | Summed neurite cable length in micrometres, divided by 1,000 |
+| Mean cable per cohort neuron (mm) | Total cable divided by the entire cohort, including zero contributions |
+| Neurons with termini (%) | Distinct cohort neurons with at least one reconstructed terminus, divided by the entire cohort, times 100 |
+| Total termini | Summed childless non-soma nodes |
+
+All non-soma source node types contribute to these measurements. The report
+does not separate axonal and dendritic compartments. Region `0` appears as
+**Outside / unmapped**, independently of the atlas root.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet` and its compatible
+  `allen_mouse_25um` atlas, version `1.2`.
+- Keep `isocortex_total_right_brainglobe_flatmap.region_profile.parquet` beside
+  the source, or complete **Build Regional Profile** first. The profile is
+  validated against the source and loaded atlas before report generation.
+- Populate **Data** > **Selected Neurons**, for example with an Atlas Regions
+  query. Include neurons with overlapping regional projections, neurons with
+  contralateral contributions, and neurons that do not contribute to at least
+  one represented region. Note the table's unique `file_id` cohort size.
+- For an independent numerical check, sum the profile's `compartment = neurite`
+  rows restricted to the same `file_id` cohort. Determine region presence from
+  `node_count > 0 OR cable_length_um > 0`. Count termini-positive neurons from
+  `terminus_count > 0`. Resolve grouping ancestors from atlas structure paths.
+
+**Steps and expected results**
+
+1. **Action:** Open **Regions** and expand **Region Report**. Set **Cohort** to
+   **Data table** and leave **Split by laterality** unchecked.
+   **Expected:** The report updates in the background and names the cohort
+   size. It shows the seven columns above and initially sorts **Cohort present
+   (%)** descending within anatomical siblings. All branches start expanded.
+   Grouping ancestors with no direct contribution show no separate direct row;
+   no unrelated or soma-only regions appear.
+2. **Action:** Compare a direct-region row with the independently restricted
+   profile rows. Include a region crossed by an edge without a sampled node.
+   **Expected:** Counts use distinct `file_id`, cable includes cable-only
+   intersections, and both percentage denominators and the mean denominator
+   are the entire cohort. A neuron absent from the region contributes zero.
+   Counts and percentages sort numerically when their column headers are used.
+3. **Action:** Collapse an anatomical branch containing several represented
+   child regions. Expand it again, and try **Collapse All** and **Expand All**.
+   **Expected:** A collapsed row shows combined measurements over the region's
+   direct label and retained descendants. A neuron present in multiple children
+   is counted once. Expanded grouping rows have blank numeric cells; a parent
+   with its own contribution also has a **[direct]** child, keeping visible
+   direct contributions separate from subtree totals. Outside/unmapped stays
+   separate from the atlas root.
+4. **Action:** Enable **Split by laterality**, then disable it.
+   **Expected:** A **Laterality** column appears and separates soma-relative
+   ipsilateral, contralateral, midline, and unknown contributions that actually
+   exist. Each side retains the full cohort denominator. Disabling the option
+   recombines sides and deduplicates neurons present on multiple sides.
+5. **Action:** Expand **Exclude Regions**, search for a represented child
+   region, and check it. Then exclude a parent and an overlapping child.
+   **Expected:** The familiar clustering hierarchy picker offers exclusion
+   only, without inclusion, dilation, or soma eligibility controls. Selected
+   regions and their descendants contribute no cable, presence, or termini.
+   Remaining parent totals are recomputed. Overlapping exclusions remove each
+   contribution once. The cohort and all denominators stay unchanged. Excluded
+   branches remain in the picker so they can be unchecked.
+6. **Action:** In **Data**, select a smaller set of rows. Return to the report
+   and choose **Selected rows**. Change the selected rows, then clear selection.
+   **Expected:** The report follows the selected `file_id` cohort, independently
+   of Regions query scope. With no selected rows it clears and asks for a row
+   selection. It never falls back to the full table. Table membership changes
+   similarly update **Data table** reports; color-only edits do not regenerate
+   measurements. Neuron tables, colors, and rendering are unchanged by reporting.
+7. **Action:** Exclude every represented region, including Outside/unmapped
+   if present. Clear the exclusions, and click **Refresh Report**.
+   **Expected:** Complete exclusion produces an empty report with the original
+   cohort size. Clearing exclusions restores contributions. A cohort with only
+   soma nodes likewise has no neurite rows, without a division-by-zero failure.
+8. **Action:** Try a missing or incompatible profile, then use **Build Regional
+   Profile**. Change the source, atlas, or cohort while a report is running.
+   **Expected:** Missing/incompatible inputs show an actionable report status
+   and no stale measurements. A completed build refreshes the report. Older
+   background results are discarded after context changes. A cohort containing
+   file IDs absent from the profile produces an explicit error. Closing the
+   plugin cancels pending report work.
+9. **Action:** Switch napari between its dark and light themes while the
+   populated report is open.
+   **Expected:** Region labels and numeric cells stay readable on every row.
+   Row backgrounds follow the active theme, including after switching themes.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-27
+- Notes: The complete interactive napari workflow above has not been exercised.
+  Automated tests cover cohort denominators, duplicate display identifiers,
+  direct and descendant aggregation, cable-only/node-only presence, laterality,
+  unmapped regions, overlapping exclusions, and empty or missing cohorts. Qt
+  tests cover table columns, numeric sorting, expand/collapse, exclusion-only
+  controls, cohort changes, stale results, and background report execution.
+  A backend audit on 2026-10-27 used all 18,621 neurons in the named profile:
+  combined and laterality-split reports both preserved 1,818,485,456.545 µm of
+  cable and 4,729,228 termini. A scripted napari-widget screenshot was inspected;
+  this does not establish completion of the manual workflow above.
+
 ## Use-Case Template
 
 Copy this section when adding a use case. Remove guidance in parentheses and

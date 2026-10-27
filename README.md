@@ -137,6 +137,15 @@ the current Data table.
 See [UC-021](USE_CASES.md#uc-021-build-and-run-a-compound-regional-profile-query)
 for the repeatable workflow and expected behavior.
 
+The collapsible **Region Report** in **Regions** summarizes either the **Data
+table** cohort or **Selected rows** using the same validated regional profile.
+It reports neurite presence, cable length, and reconstructed termini, initially
+sorted by **Cohort present (%)**. Expand the anatomical hierarchy to see direct
+region contributions; collapse a branch to aggregate its descendants, counting
+each neuron once. Optional laterality splitting and **Exclude Regions** retain
+the full cohort as the denominator for means and percentages. See
+[UC-024](USE_CASES.md#uc-024-report-cohort-neurite-coverage-by-anatomical-region).
+
 ### Running Tests
 
 To run the test suite:
