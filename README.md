@@ -143,7 +143,10 @@ It reports neurite presence, cable length, and reconstructed termini, initially
 sorted by **Cohort present (%)**. Expand the anatomical hierarchy to see direct
 region contributions; collapse a branch to aggregate its descendants, counting
 each neuron once. Optional laterality splitting and **Exclude Regions** retain
-the full cohort as the denominator for means and percentages. See
+the full cohort as the denominator for means and percentages. Select one or
+more report rows and click **Tag Neurons in Data** to append region tags to
+their matching cohort neurons, preserving existing Labels and Tags. The action
+opens Data with the Tags column visible. See
 [UC-024](USE_CASES.md#uc-024-report-cohort-neurite-coverage-by-anatomical-region).
 
 ### Running Tests

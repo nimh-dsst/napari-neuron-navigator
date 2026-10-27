@@ -2951,6 +2951,16 @@ All non-soma source node types contribute to these measurements. The report
 does not separate axonal and dendritic compartments. Region `0` appears as
 **Outside / unmapped**, independently of the atlas root.
 
+Selecting report rows previews the union of their matching cohort neurons.
+**Tag Neurons in Data** appends a separate **Region: acronym** tag for each
+selected region that a neuron actually contributes to. Parent rows cover
+retained descendants; **[direct]** rows cover their direct label only. Split
+rows include the laterality in the tag, for example **Region: CP
+(contralateral)**. This uses report membership by `file_id`, including
+cable-only intersections, and preserves existing Labels, Groups, Tags, Notes,
+colors, visibility, and Data row selection. Reapplying the same tag does not
+create duplicates. Report selection alone does not change annotations.
+
 **Prerequisites**
 
 - Load `isocortex_total_right_brainglobe_flatmap.parquet` and its compatible
@@ -3026,6 +3036,24 @@ does not separate axonal and dendritic compartments. Region `0` appears as
    populated report is open.
    **Expected:** Region labels and numeric cells stay readable on every row.
    Row backgrounds follow the active theme, including after switching themes.
+10. **Action:** Select multiple report rows using the platform's multi-selection
+    keys. Check the matching-neuron preview, then click **Tag Neurons in Data**.
+    **Expected:** Data opens with **Table view** set to **Label**, revealing
+    **Tags**; an existing **Full** view is retained. Each matching neuron gets
+    only the tags for the selected rows it contributes to. Neurons outside the
+    report cohort and non-contributors retain their previous metadata. Existing
+    Labels and Tags are preserved. Clicking the action again does not duplicate
+    tags. Save and reopen a project or enhanced Parquet to check tag persistence.
+11. **Action:** Repeat tagging with a collapsed parent, a **[direct]** row,
+    laterality-specific rows, active exclusions, and a **Selected rows** cohort.
+    Change the cohort after selecting report rows, before applying tags.
+    **Expected:** Tag membership agrees with **Neurons present** for each row,
+    respects exclusions and laterality, and distinguishes direct labels from
+    descendants. Selecting a parent and child adds both tags to shared neurons
+    without duplicate tags. Children hidden by a collapsed ancestor are not
+    applied. Tagging retains Data row selection, so it does not change a
+    **Selected rows** cohort. A changed cohort invalidates the report selection
+    and disables tagging until current rows are selected again.
 
 **Manual verification**
 
@@ -3042,6 +3070,8 @@ does not separate axonal and dendritic compartments. Region `0` appears as
   combined and laterality-split reports both preserved 1,818,485,456.545 µm of
   cable and 4,729,228 termini. A scripted napari-widget screenshot was inspected;
   this does not establish completion of the manual workflow above.
+  Row-to-neuron tagging and metadata preservation were added on 2026-10-27;
+  their complete manual workflow remains Not run.
 
 ## Use-Case Template
 

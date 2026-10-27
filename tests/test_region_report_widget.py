@@ -176,6 +176,93 @@ def test_missing_profile_has_build_action(report_widget):
     assert widget.build_button.isEnabled()
 
 
+def test_multiple_report_rows_tag_only_the_neurons_matching_each_row(report_widget):
+    from qtpy.QtWidgets import QAbstractItemView
+
+    widget, membership, _ = report_widget
+    requests = []
+    widget.tag_neurons_requested.connect(requests.append)
+    assert widget.tree.selectionMode() == QAbstractItemView.ExtendedSelection
+    assert not widget.tag_button.isEnabled()
+    _item(widget.tree, 11).setSelected(True)
+    _item(widget.tree, 0).setSelected(True)
+    assert widget.tag_button.isEnabled()
+    assert "match 2 cohort neurons" in widget.tag_status.text()
+    assert requests == []  # highlighting previews; the button applies tags
+    widget.tag_button.click()
+    a, b, zero = membership["table"]
+    assert requests == [
+        {
+            a: ("Region: R11",),
+            b: ("Region: R11", "Region: unmapped"),
+        }
+    ]
+    assert zero not in requests[0]
+
+
+def test_parent_and_direct_row_tagging_use_their_displayed_scope(report_widget):
+    widget, membership, _ = report_widget
+    requests = []
+    widget.tag_neurons_requested.connect(requests.append)
+    parent = _item(widget.tree, 10)
+    parent.setExpanded(False)
+    parent.setSelected(True)
+    widget.tag_button.click()
+    a, b, _ = membership["table"]
+    assert requests[-1] == {a: ("Region: R10",), b: ("Region: R10",)}
+    widget.tree.clearSelection()
+    parent.setExpanded(True)
+    direct = next(
+        parent.child(i)
+        for i in range(parent.childCount())
+        if parent.child(i).text(0).endswith("[direct]")
+    )
+    direct.setSelected(True)
+    widget.tag_button.click()
+    assert requests[-1] == {a: ("Region: R10 [direct]",)}
+    parent.setExpanded(False)
+    assert not widget.tag_button.isEnabled()  # selected direct row is now hidden
+
+
+def test_split_selection_and_exclusions_are_respected_by_tagging(
+    report_widget, report_context
+):
+    widget, membership, _ = report_widget
+    requests = []
+    widget.tag_neurons_requested.connect(requests.append)
+    widget.split_laterality.setChecked(True)
+    connection, structures, cohort = report_context
+    report = aggregate_region_report(
+        connection, structures=structures, file_ids=cohort, split_laterality=True
+    )
+    widget._accept_report(widget._generation, report)
+    _item(widget.tree, 11, "contralateral").setSelected(True)
+    widget.tag_button.click()
+    a, _, _ = membership["table"]
+    assert requests[-1] == {a: ("Region: R11 (contralateral)",)}
+    widget.split_laterality.setChecked(False)
+    widget.exclusion_editor.exclude_selector.set_selected_ids((11, 12))
+    report = aggregate_region_report(
+        connection, structures=structures, file_ids=cohort, excluded_region_ids=(11, 12)
+    )
+    widget._accept_report(widget._generation, report)
+    _item(widget.tree, 10).setSelected(True)
+    widget.tag_button.click()
+    assert requests[-1] == {a: ("Region: R10",)}
+
+
+def test_changed_cohort_blocks_tagging_a_stale_report_selection(report_widget):
+    widget, membership, _ = report_widget
+    requests = []
+    widget.tag_neurons_requested.connect(requests.append)
+    _item(widget.tree, 11).setSelected(True)
+    membership["table"] = []  # changes immediately before applying tags
+    widget.tag_button.click()
+    assert requests == []
+    assert not widget.tag_button.isEnabled()
+    assert widget._report is None
+
+
 def test_unmapped_exclusion_and_clustering_defaults(report_widget):
     widget, _, _ = report_widget
     widget.exclusion_editor.exclude_selector.set_selected_ids((0,))
@@ -200,6 +287,10 @@ def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atla
     from qtpy.QtWidgets import QScrollArea
 
     from napari_neuron_navigator.db import NeuronDatabase
+    from napari_neuron_navigator.widgets.neuron_table import (
+        COL_TAGS,
+        NeuronMetadataUpdate,
+    )
     from napari_neuron_navigator.widgets.neuron_viewer import NeuronViewerWidget
 
     source = tmp_path / "source.parquet"
@@ -236,6 +327,53 @@ def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atla
         assert report_widget.tree.topLevelItemCount() > 0, report_widget.status.text()
         assert f"Cohort: {len(cohort)} neurons" in report_widget.status.text()
         assert report_widget.tree.columnWidth(0) >= 300
+        widget._neuron_table.apply_metadata_updates(
+            {
+                file_id: NeuronMetadataUpdate(
+                    label="Keep Label", group="Keep Group", tags=("keep",)
+                )
+                for file_id in cohort
+            }
+        )
+        before = widget._neuron_table.export_state()
+        selection_before = widget._neuron_table.get_selected_file_ids()
+        _item(report_widget.tree, 11).setSelected(True)
+        report_widget.tag_button.click()
+        assert widget._tabs.currentIndex() == 0
+        assert not widget._neuron_table._table.isColumnHidden(COL_TAGS)
+        assert widget._neuron_table.get_selected_file_ids() == selection_before
+        for entry in widget._neuron_table.export_state()["entries"]:
+            previous = next(
+                row for row in before["entries"] if row["file_id"] == entry["file_id"]
+            )
+            assert entry == {**previous, "tags": ["keep", "Region: FIX"]}
+        assert report_widget._report is not None  # labels do not change the cohort
+        report_widget.tag_button.click()
+        assert all(
+            entry.tags == ("keep", "Region: FIX")
+            for entry in widget._neuron_table._entries.values()
+        )
+        # A full metadata view is retained, and selected-row cohorts do not
+        # shrink or lose report selection when tags are appended.
+        widget._neuron_table._table_view_combo.setCurrentIndex(
+            widget._neuron_table._table_view_combo.findData("full")
+        )
+        report_widget.cohort_combo.setCurrentIndex(1)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            qt_app.processEvents()
+            if (
+                report_widget._displayed_generation == report_widget._generation
+                and report_widget._worker is None
+            ):
+                break
+            time.sleep(0.01)
+        _item(report_widget.tree, 11).setSelected(True)
+        report_widget.tag_button.click()
+        assert widget._neuron_table._current_table_view == "full"
+        assert report_widget._report.cohort_count == 1
+        assert widget._neuron_table.get_selected_file_ids() == selection_before
+        widget._tabs.setCurrentIndex(1)
         scroll = widget._tabs.widget(1).findChild(QScrollArea)
         scroll.ensureWidgetVisible(report_widget)
         qt_app.processEvents()
@@ -250,6 +388,13 @@ def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atla
             image_path = tmp_path / f"region_report_{theme}.png"
             assert widget.grab().save(str(image_path))
             print(f"Region report {theme} preview: {image_path}")
+        widget._tabs.setCurrentIndex(0)
+        data_scroll = widget._tabs.widget(0).findChild(QScrollArea)
+        data_scroll.ensureWidgetVisible(widget._neuron_table)
+        qt_app.processEvents()
+        image_path = tmp_path / "region_tags_in_data.png"
+        assert widget.grab().save(str(image_path))
+        print(f"Region tags Data preview: {image_path}")
     finally:
         widget._on_neuron_viewer_destroyed()
         widget.close()

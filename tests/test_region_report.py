@@ -7,7 +7,10 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from napari_neuron_navigator.analysis.region_report import aggregate_region_report
+from napari_neuron_navigator.analysis.region_report import (
+    RegionReportSelection,
+    aggregate_region_report,
+)
 
 
 @pytest.fixture
@@ -58,7 +61,9 @@ def report_context():
     )
     frame["neuron_id"] = "shared"
     connection = duckdb.connect()
-    connection.register("input_profile", pa.Table.from_pandas(frame, preserve_index=False))
+    connection.register(
+        "input_profile", pa.Table.from_pandas(frame, preserve_index=False)
+    )
     connection.execute(
         "CREATE TEMP TABLE region_profile AS SELECT * FROM input_profile"
     )
@@ -190,6 +195,82 @@ def test_empty_and_soma_only_cohorts_have_no_report_rows(report_context):
     assert report.cohort_count == 1
     assert report.nodes == ()
     assert report.available_region_ids == frozenset()
+
+
+def test_selected_rows_match_file_ids_including_cable_only_contributors(report_context):
+    report = _report(report_context)
+    a, b, zero = report_context[2]
+    matches = report.match_rows((RegionReportSelection(11),))
+    assert matches[0].label == "R11"
+    assert matches[0].file_ids == {a, b}
+    assert zero not in matches[0].file_ids
+
+
+def test_selected_parent_and_direct_row_have_different_memberships(report_context):
+    report = _report(report_context)
+    a, b, _ = report_context[2]
+    parent, direct = report.match_rows(
+        (
+            RegionReportSelection(10),
+            RegionReportSelection(10, include_descendants=False),
+        )
+    )
+    assert parent.file_ids == {a, b}
+    assert direct.label == "R10 [direct]"
+    assert direct.file_ids == {a}
+
+
+def test_selected_rows_respect_laterality_and_exclusions(report_context):
+    a, b, _ = report_context[2]
+    split = _report(report_context, split_laterality=True)
+    matches = split.match_rows(
+        (
+            RegionReportSelection(11, "contralateral"),
+            RegionReportSelection(0, "unknown"),
+        )
+    )
+    assert {match.label: match.file_ids for match in matches} == {
+        "R11 (contralateral)": frozenset({a}),
+        "unmapped (unknown)": frozenset({b}),
+    }
+    excluded = _report(report_context, excluded_region_ids=(11, 12))
+    assert excluded.match_rows((RegionReportSelection(10),))[0].file_ids == {a}
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("exclusions", [(), (11,), (10,)])
+def test_report_membership_matches_displayed_neuron_counts(
+    report_context, split, exclusions
+):
+    report = _report(
+        report_context, split_laterality=split, excluded_region_ids=exclusions
+    )
+    for node in report.nodes:
+        for row in node.aggregate:
+            match = report.match_rows(
+                (RegionReportSelection(node.region_id, row.laterality),)
+            )[0]
+            assert len(match.file_ids) == row.neurons_present
+        for row in node.direct:
+            match = report.match_rows(
+                (
+                    RegionReportSelection(
+                        node.region_id, row.laterality, include_descendants=False
+                    ),
+                )
+            )[0]
+            assert len(match.file_ids) == row.neurons_present
+
+
+def test_empty_duplicate_and_stale_report_selections(report_context):
+    report = _report(report_context)
+    assert report.match_rows(()) == ()
+    selection = RegionReportSelection(11)
+    assert len(report.match_rows((selection, selection))) == 1
+    with pytest.raises(ValueError, match="region is no longer available"):
+        report.match_rows((RegionReportSelection(20),))
+    with pytest.raises(ValueError, match="laterality is no longer available"):
+        report.match_rows((RegionReportSelection(11, "midline"),))
 
 
 def test_missing_cohort_members_and_foreign_exclusions_are_actionable(report_context):

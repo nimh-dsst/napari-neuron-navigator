@@ -484,6 +484,13 @@ class NeuronTableWidget(QWidget):
         self._current_table_view = str(view_key)
         self._apply_table_view()
 
+    def show_metadata_columns(self) -> None:
+        """Reveal Labels, Groups and Tags, retaining an existing Full view."""
+        if self._current_table_view not in {"label", "full"}:
+            self._table_view_combo.setCurrentIndex(
+                self._table_view_combo.findData("label")
+            )
+
     def _apply_table_view(self) -> None:
         """Show only the columns included in the current focused view."""
         set_column_hidden = getattr(self._table, "setColumnHidden", None)

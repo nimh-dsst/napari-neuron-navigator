@@ -35,6 +35,7 @@ from ..analysis.region_report import (
     REPORT_LATERALITIES,
     RegionReport,
     RegionReportMeasurements,
+    RegionReportSelection,
     aggregate_region_report,
 )
 from .collapsible_section import CollapsibleSection
@@ -132,6 +133,7 @@ class RegionReportWidget(QWidget):
     """Show direct regions expanded and unique-neuron aggregates collapsed."""
 
     build_profile_requested = Signal()
+    tag_neurons_requested = Signal(object)
 
     def __init__(
         self,
@@ -147,6 +149,7 @@ class RegionReportWidget(QWidget):
         self._generation = 0
         self._displayed_generation = 0
         self._request_key = None
+        self._report: RegionReport | None = None
         self._closing = False
         self._populating = False
         self._collapsed_groups: set[tuple[int, str]] = set()
@@ -201,10 +204,26 @@ class RegionReportWidget(QWidget):
         # dark stylesheet. Use the inherited theme background for every row.
         self.tree.setAlternatingRowColors(False)
         self.tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setSortingEnabled(True)
         self.tree.itemExpanded.connect(self._expanded)
         self.tree.itemCollapsed.connect(self._collapsed)
+        self.tree.itemSelectionChanged.connect(self._update_tag_selection)
         content.addWidget(self.tree)
+        self.tag_button = QPushButton("Tag Neurons in Data")
+        self.tag_button.setToolTip(
+            "Append region tags to matching cohort neurons in Data. "
+            "Existing Labels and Tags are preserved."
+        )
+        self.tag_button.setEnabled(False)
+        self.tag_button.clicked.connect(self._tag_neurons_in_data)
+        content.addWidget(self.tag_button)
+        self.tag_status = QLabel(
+            "Select one or more report rows to tag matching neurons in Data."
+        )
+        self.tag_status.setWordWrap(True)
+        content.addWidget(self.tag_status)
         self.exclusion_section = CollapsibleSection("Exclude Regions", expanded=False)
         self.exclusion_editor = RegionFilterEditorWidget(
             anatomical_exclusions_only=True
@@ -276,9 +295,11 @@ class RegionReportWidget(QWidget):
             return
         self._request_key = key
         self._generation += 1
+        self._report = None
         if self._worker is not None:
             self._worker.cancel()
         self.tree.clear()
+        self._update_tag_selection()
         if self._source_path is None or self._atlas is None:
             self.status.setText(
                 "Load a neuron Parquet and compatible atlas for the report."
@@ -344,6 +365,7 @@ class RegionReportWidget(QWidget):
         if self._closing or generation != self._generation:
             return
         self._displayed_generation = generation
+        self._report = report
         # Reuse the clustering picker, including an explicit unmapped bucket.
         structures = dict(self._atlas.structures)
         structures[0] = {
@@ -384,7 +406,12 @@ class RegionReportWidget(QWidget):
                 items = {}
                 for region_id, node in nodes.items():
                     metrics = next(v for v in node.aggregate if v.laterality == side)
-                    item = self._make_item(node.label, metrics, report.split_laterality)
+                    item = self._make_item(
+                        node.label,
+                        metrics,
+                        report.split_laterality,
+                        selection=RegionReportSelection(region_id, side),
+                    )
                     item.group_key = (region_id, side)
                     item.setToolTip(
                         0, f"Atlas ID {region_id}. Collapse to aggregate descendants."
@@ -407,6 +434,7 @@ class RegionReportWidget(QWidget):
                                 f"{node.label} [direct]",
                                 direct,
                                 report.split_laterality,
+                                selection=RegionReportSelection(region_id, side, False),
                             )
                         )
                     item.setExpanded(item.group_key not in self._collapsed_groups)
@@ -414,11 +442,13 @@ class RegionReportWidget(QWidget):
         finally:
             self._populating = False
             self.tree.setSortingEnabled(True)
+            self._update_tag_selection()
 
-    def _make_item(self, label, metrics, split) -> _ReportItem:
+    def _make_item(self, label, metrics, split, *, selection=None) -> _ReportItem:
         item = _ReportItem([label])
         item.metrics = metrics
         item.group_key = None
+        item.report_selection = selection
         item.split = split
         if split:
             item.setText(1, metrics.laterality.capitalize())
@@ -442,11 +472,62 @@ class RegionReportWidget(QWidget):
         if not self._populating and item.group_key is not None:
             self._collapsed_groups.discard(item.group_key)
             self._update_group_cells(item)
+            self._update_tag_selection()
 
     def _collapsed(self, item) -> None:
         if not self._populating and item.group_key is not None:
             self._collapsed_groups.add(item.group_key)
             self._update_group_cells(item)
+            self._update_tag_selection()
+
+    def _selected_matches(self):
+        if self._report is None or self._displayed_generation != self._generation:
+            return ()
+        selections = []
+        for item in self.tree.selectedItems():
+            parent = item.parent()
+            while parent is not None and parent.isExpanded():
+                parent = parent.parent()
+            # Ignore selected children hidden by a collapsed ancestor.
+            if parent is None and item.report_selection is not None:
+                selections.append(item.report_selection)
+        return self._report.match_rows(selections)
+
+    def _update_tag_selection(self) -> None:
+        if self._populating:
+            return
+        matches = self._selected_matches()
+        file_ids = {file_id for match in matches for file_id in match.file_ids}
+        self.tag_button.setEnabled(bool(file_ids))
+        self.tag_status.setText(
+            f"Selected report rows match {len(file_ids):,} cohort neurons. "
+            "Tagging preserves existing Labels and Tags."
+            if file_ids
+            else "Select one or more report rows to tag matching neurons in Data."
+        )
+
+    def _tag_neurons_in_data(self) -> None:
+        # A table/context change must invalidate the row selection before it
+        # can apply metadata to a different cohort.
+        self.invalidate()
+        tags: dict[str, list[str]] = {}
+        for match in self._selected_matches():
+            for file_id in match.file_ids:
+                tags.setdefault(file_id, []).append(f"Region: {match.label}")
+        if tags:
+            self.tag_neurons_requested.emit(
+                {
+                    file_id: tuple(dict.fromkeys(values))
+                    for file_id, values in tags.items()
+                }
+            )
+
+    def on_neurons_tagged(self, updated_count: int, missing_count: int = 0) -> None:
+        """Display the result of the parent-owned Data metadata transaction."""
+        message = f"Applied region tags to {updated_count:,} neurons in Data."
+        if missing_count:
+            message += f" {missing_count:,} neurons are no longer in the Data table."
+        self.tag_status.setText(message)
 
     def _expand_all(self) -> None:
         self.tree.expandAll()

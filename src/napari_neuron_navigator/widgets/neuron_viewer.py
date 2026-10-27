@@ -2437,6 +2437,9 @@ class NeuronViewerWidget(QWidget):
         self._region_report.build_profile_requested.connect(
             self._start_regional_profile_build
         )
+        self._region_report.tag_neurons_requested.connect(
+            self._tag_region_report_neurons
+        )
         self._neuron_table.selection_changed.connect(self._region_report.invalidate)
         self._neuron_table.state_changed.connect(self._region_report.invalidate)
         layout.addWidget(self._region_report)
@@ -7071,6 +7074,33 @@ class NeuronViewerWidget(QWidget):
             table = getattr(self, "_neuron_table", None)
             return [] if table is None else list(table.get_selected_file_ids())
         return self._current_table_file_ids()
+
+    def _tag_region_report_neurons(
+        self, tags_by_file_id: Mapping[str, tuple[str, ...]]
+    ) -> None:
+        """Append selected report-region tags to existing Data rows by file_id."""
+        from .neuron_table import NeuronMetadataUpdate
+
+        summary = self._neuron_table.apply_metadata_updates(
+            {
+                file_id: NeuronMetadataUpdate(tags=tuple(tags))
+                for file_id, tags in tags_by_file_id.items()
+            }
+        )
+        self._region_report.on_neurons_tagged(
+            summary.updated_count, summary.missing_count
+        )
+        if summary.updated_count:
+            self._neuron_table.show_metadata_columns()
+            ancestor = self._neuron_table.parentWidget()
+            while ancestor is not None:
+                if isinstance(ancestor, CollapsibleSection):
+                    ancestor.set_expanded(True)
+                ancestor = ancestor.parentWidget()
+            self._tabs.setCurrentIndex(0)
+            scroll = self._tabs.widget(0).findChild(QScrollArea)
+            if scroll is not None:
+                scroll.ensureWidgetVisible(self._neuron_table)
 
     def _refresh_regional_profile_status(self) -> None:
         """Show cheap sidecar availability without scanning source node rows."""

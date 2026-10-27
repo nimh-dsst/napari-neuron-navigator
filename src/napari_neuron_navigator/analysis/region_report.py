@@ -53,6 +53,30 @@ class RegionReportMeasurements:
 
 
 @dataclass(frozen=True)
+class RegionReportMembers:
+    """Positive neurite contributors to one retained direct-region bucket."""
+
+    laterality: str
+    file_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
+class RegionReportSelection:
+    """One report row, including its anatomical and laterality scope."""
+
+    region_id: int
+    laterality: str = COMBINED_LATERALITY
+    include_descendants: bool = True
+
+
+@dataclass(frozen=True)
+class RegionReportRowMatch:
+    selection: RegionReportSelection
+    label: str
+    file_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
 class RegionReportNode:
     region_id: int
     parent_id: int | None
@@ -60,6 +84,7 @@ class RegionReportNode:
     acronym: str
     direct: tuple[RegionReportMeasurements, ...]
     aggregate: tuple[RegionReportMeasurements, ...]
+    members: tuple[RegionReportMembers, ...] = ()
 
     @property
     def label(self) -> str:
@@ -77,6 +102,46 @@ class RegionReport:
     @property
     def cohort_count(self) -> int:
         return len(self.cohort_file_ids)
+
+    def match_rows(
+        self, selections: Sequence[RegionReportSelection]
+    ) -> tuple[RegionReportRowMatch, ...]:
+        """Resolve selected rows against this report's immutable cohort snapshot.
+
+        Ancestor rows union retained descendants. Explicit [direct] rows use
+        their own bucket. Exclusions, soma filtering, and side restrictions are
+        already reflected in the stored contributors; no node scan is needed.
+        """
+        nodes = {node.region_id: node for node in self.nodes}
+        children: dict[int, list[int]] = defaultdict(list)
+        for node in self.nodes:
+            if node.parent_id is not None:
+                children[node.parent_id].append(node.region_id)
+        result = []
+        for selection in dict.fromkeys(selections):
+            node = nodes.get(selection.region_id)
+            if node is None:
+                raise ValueError("A selected report region is no longer available.")
+            if not any(
+                value.laterality == selection.laterality for value in node.aggregate
+            ):
+                raise ValueError("A selected report laterality is no longer available.")
+            pending = [selection.region_id]
+            matching: set[str] = set()
+            while pending:
+                region_id = pending.pop()
+                for members in nodes[region_id].members:
+                    if members.laterality == selection.laterality:
+                        matching.update(members.file_ids)
+                if selection.include_descendants:
+                    pending.extend(children.get(region_id, ()))
+            label = node.acronym or node.name
+            if not selection.include_descendants:
+                label += " [direct]"
+            if selection.laterality != COMBINED_LATERALITY:
+                label += f" ({selection.laterality})"
+            result.append(RegionReportRowMatch(selection, label, frozenset(matching)))
+        return tuple(sorted(result, key=lambda match: match.label))
 
 
 def aggregate_region_report(
@@ -122,6 +187,10 @@ def aggregate_region_report(
         "_report_excluded",
         pa.table({"region_id": pa.array(sorted(excluded), pa.int32())}),
     )
+    # Share cohort strings across membership sets rather than retaining a new
+    # Python string for every direct-region occurrence of a neuron.
+    cohort_ids = {file_id: file_id for file_id in cohort}
+    members_by_region: dict[int, list[RegionReportMembers]] = defaultdict(list)
     try:
         missing = connection.execute("""
             SELECT file_id FROM _report_cohort
@@ -179,6 +248,21 @@ def aggregate_region_report(
             GROUP BY is_aggregate, region_id, laterality
             ORDER BY region_id, laterality
         """).fetchall()
+        membership_cursor = connection.execute("""
+            SELECT p.region_id, p.laterality, list(DISTINCT p.file_id)
+            FROM _report_neurites p
+            WHERE NOT EXISTS (
+                SELECT 1 FROM _report_excluded e WHERE e.region_id = p.region_id
+            )
+            GROUP BY p.region_id, p.laterality
+        """)
+        while batch := membership_cursor.fetchmany(64):
+            for region_id, side, members in batch:
+                members_by_region[int(region_id)].append(
+                    RegionReportMembers(
+                        str(side), frozenset(cohort_ids[file_id] for file_id in members)
+                    )
+                )
     finally:
         connection.execute("DROP TABLE IF EXISTS _report_neurites")
         for name in ("_report_cohort", "_report_closure", "_report_excluded"):
@@ -225,6 +309,9 @@ def aggregate_region_report(
                 ),
                 direct=tuple(direct[region_id]),
                 aggregate=tuple(aggregate[region_id]),
+                members=tuple(
+                    sorted(members_by_region[region_id], key=lambda m: m.laterality)
+                ),
             )
         )
     return RegionReport(cohort, tuple(nodes), available, split_laterality)
