@@ -128,6 +128,33 @@ count, termini, and soma-relative ipsilateral or contralateral conditions using
 nested AND, OR, and NOT groups. Queries can use the **Whole Parquet** or
 **Current Table** scope and always identify neurons by `file_id`.
 
+Use **Result action** to choose **Replace table with matches**, **Add tag to
+matches in current table**, or **Set Label for matches in current table**.
+For example, populate Data with a simple MOs5 soma query, then run a compound
+query for thalamic termini with **Annotation text** set to `TH termini`.
+Annotation actions search **Current Table**, keep the whole cohort, and update
+only matching rows. Tags are appended without duplication; the Label action
+replaces the matching rows' Label. Nonmatches and other metadata are retained.
+
+In **Data**, the **Label** and checkable **Tag** dropdowns filter rows by exact
+annotations, including **No label** and **No tags**. Check one or several tags,
+then use **Tag matching** to require **All checked tags**, **Any checked tag**,
+or **Exactly these tags**. **Tag count** can restrict neurons to exactly one tag
+or two or more tags. These filters combine with Cluster and Manual Heatmap
+filters. Counts reflect the full table cohort; **Showing N of M neurons**
+reports the displayed subset. **Clear Label/Tag Filters** resets annotation
+choices. Hidden rows remain in the cohort; select displayed rows for a
+**Selected rows** analysis scope.
+
+Expand **Tag Tools** to delete checked tag names, undo the most recent deletion,
+or color neurons. Choose **Displayed rows**, **Selected rows**, or **Entire
+table** as the action scope. **Color by Tag Combination** gives each complete
+tag set one color, with gray for untagged neurons and a legend for the last
+application. **Set Color...** applies one chosen color to the scope. Colors
+propagate through the existing neuron rendering controls. Save a project or
+enhanced Parquet to retain tag edits and colors.
+See [UC-026](USE_CASES.md#uc-026-filter-data-rows-by-labels-and-tags).
+
 Compound queries read a compact `source.region_profile.parquet` sidecar. Use
 **Build Regional Profile** in the editor when a compatible sidecar is missing;
 construction is cancellable and runs in the background. The sidecar is
@@ -148,6 +175,25 @@ more report rows and click **Tag Neurons in Data** to append region tags to
 their matching cohort neurons, preserving existing Labels and Tags. The action
 opens Data with the Tags column visible. See
 [UC-024](USE_CASES.md#uc-024-report-cohort-neurite-coverage-by-anatomical-region).
+
+**Regions → Regional-Profile Clustering** clusters a current-table or selected-row
+cohort from the validated sidecar. The independent modes are **Neurite cable
+distribution** (cosine), **Regions reached** (binary Jaccard), and **Reconstructed
+terminus distribution** (cosine), all with average linkage. Laterality stays
+separate by default. Direct atlas regions or collapsed Region Report groups
+partition the features without overlapping parent/descendant contributions;
+**Exclude Regions** removes selected regions and descendants, including a
+source region such as MOs. Zero-feature neurons are listed explicitly.
+
+The background job checks memory before allocating pairwise distances and can
+be cancelled during distance computation or linkage. Its ordered feature
+heatmap supports post hoc Data Label/Group/Tags overlays. **Inspect cluster**
+selects neurons in Data and populates Region Report. Named neuron groups can
+be saved as JSON and applied to Data's Group field; result NPZ files preserve
+raw features, assignments, order, and provenance. Assignment definitions and
+cohort membership also persist through the existing project/assignment store.
+See [UC-025](USE_CASES.md#uc-025-cluster-mos-neurons-by-regional-neurite-profiles)
+for the MOs manual workflow and its interpretation limits.
 
 ### Running Tests
 

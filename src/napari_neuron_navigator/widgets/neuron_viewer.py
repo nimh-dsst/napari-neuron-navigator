@@ -1191,6 +1191,9 @@ class NeuronViewerWidget(QWidget):
         report = getattr(self, "_region_report", None)
         if report is not None:
             report.shutdown()
+        regional = getattr(self, "_regional_clustering", None)
+        if regional is not None:
+            regional.shutdown()
         cancel_profile = getattr(
             getattr(self, "_regional_profile_worker", None),
             "cancel",
@@ -2400,6 +2403,9 @@ class NeuronViewerWidget(QWidget):
         self._compound_region_query.cancel_profile_requested.connect(
             self._cancel_regional_profile_build
         )
+        self._compound_region_query.result_action_changed.connect(
+            self._sync_compound_query_result_action
+        )
         compound_layout.addWidget(self._compound_region_query)
         self._region_query_stack.addWidget(compound_page)
 
@@ -2443,6 +2449,30 @@ class NeuronViewerWidget(QWidget):
         self._neuron_table.selection_changed.connect(self._region_report.invalidate)
         self._neuron_table.state_changed.connect(self._region_report.invalidate)
         layout.addWidget(self._region_report)
+
+        from .regional_clustering import RegionalClusteringWidget
+
+        self._regional_clustering = RegionalClusteringWidget(
+            self._region_report_cohort_file_ids,
+            self._region_report.collapsed_region_ids,
+            self._regional_cluster_overlay,
+        )
+        self._regional_clustering.result_ready.connect(
+            self._on_regional_clusters_ready
+        )
+        self._regional_clustering.cluster_selected.connect(
+            self._select_regional_cluster
+        )
+        self._regional_clustering.neuron_group_saved.connect(
+            self._save_regional_neuron_group
+        )
+        self._neuron_table.selection_changed.connect(
+            self._regional_clustering.notify_cohort_changed
+        )
+        self._neuron_table.state_changed.connect(
+            self._regional_clustering.notify_cohort_changed
+        )
+        layout.addWidget(self._regional_clustering)
 
         self._region_appearance_section = CollapsibleSection(
             "Region Appearance",
@@ -6533,6 +6563,9 @@ class NeuronViewerWidget(QWidget):
             for button in self._mask_layer_query_buttons():
                 button.setVisible(show_mask_buttons)
         self._regions_status_label.setText("")
+        sync_result_action = getattr(self, "_sync_compound_query_result_action", None)
+        if callable(sync_result_action):
+            sync_result_action()
         if text in {
             _REGION_QUERY_SOURCE_ATLAS,
             _REGION_QUERY_SOURCE_CUSTOM,
@@ -7109,6 +7142,11 @@ class NeuronViewerWidget(QWidget):
             report.set_context(
                 None if self._db is None else self._db.parquet_path, self._atlas
             )
+        regional = getattr(self, "_regional_clustering", None)
+        if regional is not None:
+            regional.set_context(
+                None if self._db is None else self._db.parquet_path, self._atlas
+            )
         editor = getattr(self, "_compound_region_query", None)
         setter = getattr(editor, "set_profile_status", None)
         if not callable(setter):
@@ -7137,8 +7175,97 @@ class NeuronViewerWidget(QWidget):
                 "Build it before running the compound query."
             )
 
+    def _regional_cluster_overlay(self, file_ids, field):
+        """Read external annotations only for post-clustering visualization."""
+        entries = {
+            str(key): value for key, value in self._neuron_table._entries.items()
+        }
+        result = {}
+        for file_id in file_ids:
+            value = (
+                getattr(entries.get(str(file_id)), field, "")
+                if field in {"label", "group", "tags"}
+                else ""
+            )
+            result[str(file_id)] = (
+                "; ".join(value) if isinstance(value, (tuple, list)) else str(value)
+            )
+        return result
+
+    def _on_regional_clusters_ready(self, result):
+        """Publish assignments through the existing persistent registry."""
+        from ..analysis.regional_clustering import MODE_LABELS
+
+        method = f"Regional {MODE_LABELS[result.features.settings.mode]}"
+        store = self._cluster_assignment_store
+        assignment = store.add(
+            name=store.next_run_name(method),
+            assignments=dict(zip(result.file_ids, result.labels, strict=True)),
+            input_file_ids=result.features.settings.file_ids,
+            unassigned_neuron_ids=result.features.zero_feature_file_ids,
+            run_metadata=result.metadata,
+            input_scope=result.features.settings.scope,
+            coordinate_space="Regional Profile",
+        )
+        self._regional_clustering.assignment_id = assignment.assignment_id
+        self._refresh_cluster_assignment_controls()
+        self._apply_active_cluster_assignment()
+
+    def _select_regional_cluster(self, payload):
+        assignment_id, file_ids, settings = payload
+        store = self._cluster_assignment_store
+        if assignment_id is not None and store.get(assignment_id) is not None:
+            store.set_active(assignment_id)
+            self._apply_active_cluster_assignment()
+        assignment = store.active
+        # Clear row filters so every current-table member can be selected.
+        self._cluster_filter_combo.set_cluster_options(
+            sorted(set(assignment.assignments.values())) if assignment else [],
+            include_unclustered=True,
+            selection=ClusterFilterSelection(),
+        )
+        self._manual_heatmap_combo.setCurrentIndex(0)
+        self._neuron_table.clear_annotation_filters()
+        self._apply_neuron_table_filters()
+        self._neuron_table.select_file_ids(list(file_ids))
+        report = self._region_report
+        report.cohort_combo.setCurrentIndex(report.cohort_combo.findData("selected"))
+        report.split_laterality.setChecked(settings.laterality != "combined")
+        report.section.set_expanded(True)
+        # Refreshing its context first ensures the report picker has an atlas.
+        if report._atlas is not None:
+            from types import SimpleNamespace
+
+            structures = dict(report._atlas.structures)
+            structures[0] = {
+                "id": 0,
+                "name": "Outside / unmapped",
+                "acronym": "unmapped",
+                "structure_id_path": [0],
+            }
+            report.exclusion_editor.set_atlas_and_allowed_ids(
+                SimpleNamespace(
+                    atlas_name=getattr(report._atlas, "atlas_name", ""),
+                    structures=structures,
+                ),
+                set(structures),
+            )
+            report.exclusion_editor.exclude_selector.set_selected_ids(
+                settings.excluded_region_ids
+            )
+        report.refresh()
+
+    def _save_regional_neuron_group(self, file_ids, name):
+        from .neuron_table import NeuronMetadataUpdate
+
+        self._neuron_table.apply_metadata_updates(
+            {file_id: NeuronMetadataUpdate(group=name) for file_id in file_ids}
+        )
+        self._neuron_table.show_metadata_columns()
+
     def _set_regional_query_busy(self, busy: bool, *, building: bool = False) -> None:
         """Keep Regions controls consistent during a profile/query worker run."""
+        self._regional_controls_busy = busy
         editor = getattr(self, "_compound_region_query", None)
         setter = getattr(editor, "set_busy", None)
         if callable(setter):
@@ -7149,6 +7276,34 @@ class NeuronViewerWidget(QWidget):
             cancel_button.setVisible(query_active)
             cancel_button.setEnabled(query_active)
         self._set_region_query_buttons_enabled(not busy and self._db is not None)
+        sync_result_action = getattr(self, "_sync_compound_query_result_action", None)
+        if callable(sync_result_action):
+            sync_result_action()
+
+    def _sync_compound_query_result_action(self) -> None:
+        """Make annotation scope explicit and keep the action button descriptive."""
+        editor = getattr(self, "_compound_region_query", None)
+        getter = getattr(editor, "result_action", None)
+        action = getter() if callable(getter) else "replace"
+        compound = (
+            getattr(self, "_region_query_source", _REGION_QUERY_SOURCE_ATLAS)
+            == _REGION_QUERY_SOURCE_COMPOUND
+        )
+        annotating = compound and action in {"tag", "label"}
+        scope = getattr(self, "_region_query_scope_combo", None)
+        if scope is not None:
+            if annotating:
+                scope.setCurrentIndex(scope.findData(_REGION_QUERY_SCOPE_CURRENT))
+            scope.setEnabled(
+                not annotating and not getattr(self, "_regional_controls_busy", False)
+            )
+        if compound:
+            self._region_query_find_btn.setText(
+                {
+                    "tag": "Tag Matches in Current Table",
+                    "label": "Label Matches in Current Table",
+                }.get(action, "Run Compound Region Query")
+            )
 
     def _on_compound_region_selection_changed(self, _selection: object) -> None:
         """Preview the active compound clause without changing query semantics."""
@@ -7314,13 +7469,34 @@ class NeuronViewerWidget(QWidget):
         try:
             query = query_getter()
             canonical = canonical_getter() if callable(canonical_getter) else ""
+            action_getter = getattr(editor, "result_action", None)
+            action = action_getter() if callable(action_getter) else "replace"
+            text_getter = getattr(editor, "annotation_text", None)
+            annotation = text_getter() if callable(text_getter) else ""
+            if action not in {"replace", "tag", "label"}:
+                raise RegionQueryValidationError("Choose a supported result action.")
+            if action != "replace" and not annotation:
+                raise RegionQueryValidationError(
+                    "Enter annotation text for query matches."
+                )
         except RegionQueryValidationError as exc:
             self._regions_status_label.setText(f"Compound query is incomplete: {exc}")
             return
 
-        proceed, base_file_ids, scope_label, input_count = (
-            self._resolve_region_query_file_scope()
-        )
+        if action != "replace":
+            base_file_ids = self._current_table_file_ids()
+            if not base_file_ids:
+                self._regions_status_label.setText(
+                    "Current table is empty; populate it with a simple query before annotating."
+                )
+                return
+            proceed, scope_label, input_count = (
+                True, "current table", len(base_file_ids)
+            )
+        else:
+            proceed, base_file_ids, scope_label, input_count = (
+                self._resolve_region_query_file_scope()
+            )
         if not proceed:
             return
         sidecar = self._regional_profile_sidecar_path()
@@ -7341,6 +7517,13 @@ class NeuronViewerWidget(QWidget):
             else QueryScope.explicit(base_file_ids)
         )
         self._regional_query_snapshot = {
+            "result_action": action,
+            "annotation_text": annotation,
+            "input_file_ids": (
+                None
+                if base_file_ids is None
+                else tuple(str(v) for v in base_file_ids)
+            ),
             "preserve_existing": base_file_ids is not None,
             "scope_label": scope_label,
             "input_count": input_count,
@@ -7382,6 +7565,9 @@ class NeuronViewerWidget(QWidget):
         worker = self._regional_query_worker
         cancel = getattr(worker, "cancel", None)
         if callable(cancel):
+            snapshot = getattr(self, "_regional_query_snapshot", None)
+            if snapshot is not None:
+                snapshot["cancelled"] = True
             cancel()
             cancel_button = getattr(self, "_region_query_cancel_btn", None)
             if cancel_button is not None:
@@ -7392,6 +7578,12 @@ class NeuronViewerWidget(QWidget):
 
     def _on_regional_query_finished(self, result: object) -> None:
         snapshot = self._regional_query_snapshot or {}
+        if snapshot.get("cancelled"):
+            self._regions_status_label.setText(
+                "Compound regional query was cancelled. The Data table was not changed."
+            )
+            self._set_regional_query_busy(False)
+            return
         current_source = None if self._db is None else str(self._db.parquet_path)
         if (
             current_source != snapshot.get("source_path")
@@ -7404,10 +7596,42 @@ class NeuronViewerWidget(QWidget):
             self._set_regional_query_busy(False)
             return
         rows = result.rows
-        self._populate_neuron_table(
-            rows,
-            preserve_existing=bool(snapshot.get("preserve_existing", False)),
-        )
+        action = snapshot.get("result_action", "replace")
+        annotation_summary = ""
+        if action in {"tag", "label"}:
+            from .neuron_table import NeuronMetadataUpdate
+
+            cohort = set(snapshot["input_file_ids"])
+            current_ids = {str(v) for v in self._current_table_file_ids()}
+            if current_ids != cohort:
+                self._regions_status_label.setText(
+                    "Discarded annotation results because current-table membership changed "
+                    "during the query. Run again for the current cohort."
+                )
+                self._set_regional_query_busy(False)
+                return
+            text = snapshot["annotation_text"]
+            matched_ids = set(rows["file_id"].astype(str)) & cohort
+            update = (
+                NeuronMetadataUpdate(tags=(text,))
+                if action == "tag"
+                else NeuronMetadataUpdate(label=text)
+            )
+            summary = self._neuron_table.apply_metadata_updates(
+                {file_id: update for file_id in matched_ids}
+            )
+            if summary.updated_count:
+                self._neuron_table.show_metadata_columns()
+            annotation_summary = (
+                f" {'Tagged' if action == 'tag' else 'Labeled'} "
+                f"{summary.updated_count} matching neuron(s) with {text!r}; "
+                f"retained all {len(cohort)} table neurons."
+            )
+        else:
+            self._populate_neuron_table(
+                rows,
+                preserve_existing=bool(snapshot.get("preserve_existing", False)),
+            )
         metadata = result.metadata
         scope_suffix = self._query_scope_status_suffix(
             str(snapshot.get("scope_label", "whole parquet")),
@@ -7422,7 +7646,8 @@ class NeuronViewerWidget(QWidget):
         canonical = str(snapshot.get("canonical", metadata.canonical_query))
         message = (
             f"Found {metadata.matched_count} neuron(s){scope_suffix} in "
-            f"{metadata.runtime_seconds:.3f} s{unavailable_text}. Query: {canonical}"
+            f"{metadata.runtime_seconds:.3f} s{unavailable_text}."
+            f"{annotation_summary} Query: {canonical}"
         )
         self._regions_status_label.setText(message)
         editor = getattr(self, "_compound_region_query", None)

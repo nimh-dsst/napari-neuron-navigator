@@ -535,6 +535,10 @@ class RegionReportWidget(QWidget):
     def _collapse_all(self) -> None:
         self.tree.collapseAll()
 
+    def collapsed_region_ids(self) -> tuple[int, ...]:
+        """Return anatomical group roots; clustering resolves overlaps once."""
+        return tuple(sorted({region_id for region_id, _side in self._collapsed_groups}))
+
     def shutdown(self) -> None:
         """Stop scheduling work and discard results after dock teardown."""
         self._closing = True

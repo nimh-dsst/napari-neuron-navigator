@@ -2690,10 +2690,16 @@ class AnalysisTabWidget(QWidget):
             self._update_cluster_filter_combo()
         self._update_button_states()
         if assignment.runtime_result is None:
-            message = (
-                f"{assignment.name} assignments restored. Rerun required for "
-                "dendrogram and distance exports."
-            )
+            if assignment.run_metadata.get("analysis") == "regional_profile_clustering":
+                message = (
+                    f"{assignment.name}: {len(assignment.assignments):,} neurons assigned. "
+                    "Inspect the regional-profile heatmap in Regions."
+                )
+            else:
+                message = (
+                    f"{assignment.name} assignments restored. Rerun required for "
+                    "dendrogram and distance exports."
+                )
             clustermap_status = getattr(self, "_clustermap_status_label", None)
             if clustermap_status is not None:
                 clustermap_status.setText(message)

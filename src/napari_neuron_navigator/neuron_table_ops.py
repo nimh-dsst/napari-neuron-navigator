@@ -155,6 +155,72 @@ def cluster_filter_matches(
     }
 
 
+def annotation_matches(
+    label: str,
+    tags: Iterable[str],
+    *,
+    label_filter: str | None = None,
+    tag_filter: str | Iterable[str] | None = None,
+    tag_match: str = "all",
+    tag_count: str = "any",
+) -> bool:
+    """Match exact annotations with any/all/exact tags and optional cardinality.
+
+    None means no tag restriction, and an empty string means untagged.
+    Cardinality counts all distinct tags on the neuron, not just checked tags.
+    """
+    if tag_match not in {"any", "all", "exact"}:
+        raise ValueError("Unsupported tag matching mode.")
+    if tag_count not in {"any", "single", "multiple"}:
+        raise ValueError("Unsupported tag count filter.")
+    if label_filter is not None and label != label_filter:
+        return False
+    values = set(tags)
+    if tag_count == "single" and len(values) != 1:
+        return False
+    if tag_count == "multiple" and len(values) < 2:
+        return False
+    if tag_filter is None:
+        return True
+    if isinstance(tag_filter, str):
+        if tag_filter == "":
+            return not values
+        selected = {tag_filter}
+    else:
+        selected = set(tag_filter)
+    if tag_match == "any":
+        return bool(selected & values)
+    if tag_match == "exact":
+        return selected == values
+    return selected <= values
+
+
+def tag_combination_colors(
+    tags_by_file: Mapping[object, Iterable[str]],
+) -> tuple[dict[object, list[float]], dict[tuple[str, ...], list[float]]]:
+    """Give identical tag sets one color; untagged neurons are gray.
+
+    Build from the full table before restricting action scope so the same
+    combination has the same color when applying to different row subsets.
+    """
+    combinations = {
+        file_id: tuple(sorted(set(tags), key=label_sort_key))
+        for file_id, tags in tags_by_file.items()
+    }
+    groups = sorted(
+        {value for value in combinations.values() if value},
+        key=lambda value: tuple(label_sort_key(tag) for tag in value),
+    )
+    palette = neuron_palette(len(groups))
+    legend = dict(zip(groups, palette, strict=True))
+    if () in combinations.values():
+        legend[()] = list(GRAY_RGBA)
+    return (
+        {file_id: list(legend[value]) for file_id, value in combinations.items()},
+        legend,
+    )
+
+
 def visibility_for_selected_cluster(
     cluster_by_file: Mapping[str, int | None],
     selection: ClusterFilterSelection | int | None,

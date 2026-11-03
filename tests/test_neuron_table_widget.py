@@ -165,6 +165,358 @@ def test_label_sort_does_not_change_other_columns(real_table_widget) -> None:
     assert widget._table.horizontalHeader().sortIndicatorSection() == module.COL_GROUP
 
 
+def _filtered_fixture(real_table_widget):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = real_table_widget
+    widget.import_state(
+        {
+            "entries": [
+                {
+                    "file_id": "subject-a/shared",
+                    "label": "Rank 2",
+                    "tags": ["TH", "keep"],
+                    "cluster_id": 1,
+                },
+                {
+                    "file_id": "subject-b/shared",
+                    "label": "Rank 2",
+                    "tags": ["CP"],
+                    "cluster_id": 1,
+                },
+                {
+                    "file_id": "subject-c/shared",
+                    "label": "Rank 10",
+                    "tags": ["TH"],
+                    "cluster_id": 2,
+                },
+                {"file_id": "unannotated"},
+            ]
+        }
+    )
+    QApplication.processEvents()
+    return module, widget
+
+
+def _shown(widget):
+    return {
+        file_id
+        for row, file_id in widget._iter_rows_with_file_ids()
+        if not widget._table.isRowHidden(row)
+    }
+
+
+def test_label_tag_selectors_filter_rows_without_modifying_cohort(real_table_widget):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    before = {key: value.to_state() for key, value in widget._entries.items()}
+    ids = set(widget.file_ids())
+    assert [
+        widget.label_filter_combo.itemData(i)
+        for i in range(widget.label_filter_combo.count())
+    ] == [None, "", "Rank 2", "Rank 10"]
+    assert (
+        widget.tag_filter_combo.itemText(widget.tag_filter_combo.findData("TH"))
+        == "TH (2)"
+    )
+    widget.label_filter_combo.setCurrentIndex(
+        widget.label_filter_combo.findData("Rank 2")
+    )
+    assert _shown(widget) == {"subject-a/shared", "subject-b/shared"}
+    widget.tag_filter_combo.setCurrentIndex(widget.tag_filter_combo.findData("TH"))
+    assert _shown(widget) == {"subject-a/shared"}
+    assert widget._filter_summary_label.text() == "Showing 1 of 4 neurons"
+    widget._table.sortByColumn(module.COL_LABEL, module.Qt.DescendingOrder)
+    QApplication.processEvents()
+    assert _shown(widget) == {"subject-a/shared"}
+    assert set(widget.file_ids()) == ids
+    assert {key: value.to_state() for key, value in widget._entries.items()} == before
+    widget.clear_annotation_filters()
+    assert _shown(widget) == ids
+    assert widget._filter_summary_label.text() == "Showing 4 of 4 neurons"
+
+
+def test_annotation_filters_intersect_cluster_and_manual_heatmap_filters(
+    real_table_widget,
+):
+    module, widget = _filtered_fixture(real_table_widget)
+    widget.apply_filters(
+        module.ClusterFilterSelection({2}), ["subject-a/shared", "subject-c/shared"]
+    )
+    widget.tag_filter_combo.setCurrentIndex(widget.tag_filter_combo.findData("TH"))
+    assert _shown(widget) == {"subject-c/shared"}
+    widget.label_filter_combo.setCurrentIndex(
+        widget.label_filter_combo.findData("Rank 2")
+    )
+    assert _shown(widget) == set()
+    widget.clear_annotation_filters()
+    assert _shown(widget) == {"subject-c/shared"}
+    widget.apply_filters(module.ClusterFilterSelection())
+    assert len(_shown(widget)) == 4
+
+
+def test_annotation_filter_empty_values_and_annotation_updates(real_table_widget):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    widget.label_filter_combo.setCurrentIndex(widget.label_filter_combo.findData(""))
+    widget.tag_filter_combo.setCurrentIndex(widget.tag_filter_combo.findData(""))
+    assert _shown(widget) == {"unannotated"}
+    widget.apply_metadata_updates(
+        {
+            "unannotated": module.NeuronMetadataUpdate(
+                label="New label", tags=("New tag",)
+            )
+        }
+    )
+    QApplication.processEvents()
+    assert _shown(widget) == set()
+    assert widget.label_filter_combo.findData("New label") >= 0
+    assert widget.tag_filter_combo.findData("New tag") >= 0
+    widget.label_filter_combo.setCurrentIndex(
+        widget.label_filter_combo.findData("New label")
+    )
+    widget.tag_filter_combo.setCurrentIndex(widget.tag_filter_combo.findData("New tag"))
+    assert _shown(widget) == {"unannotated"}
+    widget.apply_metadata_updates(
+        {
+            "unannotated": module.NeuronMetadataUpdate(
+                label="Edited label", replace_tag_prefix="New "
+            )
+        }
+    )
+    QApplication.processEvents()
+    assert _shown(widget) == set()
+    assert widget.label_filter_combo.currentData() == "New label"
+    assert widget.tag_filter_combo.currentData() == "New tag"
+    assert widget.label_filter_combo.currentText() == "New label (0)"
+    assert widget.tag_filter_combo.currentText() == "New tag (0)"
+
+
+def test_filter_options_follow_inline_edits_and_new_cohorts_reset_filters(
+    real_table_widget,
+):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    row = widget._file_id_to_row("subject-a/shared")
+    widget._table.item(row, module.COL_TAGS).setText("TH, Added manually")
+    QApplication.processEvents()
+    assert widget.tag_filter_combo.findData("Added manually") >= 0
+    widget.tag_filter_combo.setCurrentIndex(
+        widget.tag_filter_combo.findData("Added manually")
+    )
+    assert _shown(widget) == {"subject-a/shared"}
+    widget.remove_file_ids(["subject-a/shared"])
+    QApplication.processEvents()
+    assert _shown(widget) == set()
+    assert widget.tag_filter_combo.currentText() == "Added manually (0)"
+    widget.populate(["replacement"])
+    QApplication.processEvents()
+    assert widget.label_filter_combo.currentData() is None
+    assert widget.tag_filter_combo.currentData() is None
+    assert widget.tag_filter_combo.findData("Added manually") == -1
+    assert _shown(widget) == {"replacement"}
+    widget.clear()
+    QApplication.processEvents()
+    assert widget._filter_summary_label.text() == "Showing 0 of 0 neurons"
+
+
+def test_filters_notify_selected_cohort_changes_without_selecting_hidden_neurons(
+    real_table_widget,
+):
+    _, widget = _filtered_fixture(real_table_widget)
+    widget.select_file_ids(widget.file_ids())
+    selections = []
+    widget.selection_changed.connect(selections.append)
+    widget.tag_filter_combo.setCurrentIndex(widget.tag_filter_combo.findData("TH"))
+    assert set(widget.get_selected_file_ids()) == {
+        "subject-a/shared",
+        "subject-c/shared",
+    }
+    assert set(selections[-1]) == {"subject-a/shared", "subject-c/shared"}
+    widget.clear_annotation_filters()
+    assert set(widget.get_selected_file_ids()) == set(widget.file_ids())
+
+
+def test_multi_tag_selector_search_modes_and_cardinality(real_table_widget):
+    _, widget = _filtered_fixture(real_table_widget)
+    widget.tag_filter_combo.set_selection(("TH", "CP"))
+    assert _shown(widget) == set()  # All checked tags is the default.
+    assert widget.tag_filter_combo.currentText() == "2 tags selected"
+    widget.tag_match_combo.setCurrentIndex(widget.tag_match_combo.findData("any"))
+    assert _shown(widget) == {
+        "subject-a/shared",
+        "subject-b/shared",
+        "subject-c/shared",
+    }
+    widget.tag_count_combo.setCurrentIndex(widget.tag_count_combo.findData("single"))
+    assert _shown(widget) == {"subject-b/shared", "subject-c/shared"}
+    widget.tag_count_combo.setCurrentIndex(widget.tag_count_combo.findData("multiple"))
+    assert _shown(widget) == {"subject-a/shared"}
+    widget.tag_count_combo.setCurrentIndex(0)
+    widget.tag_filter_combo.set_selection(("TH", "keep"))
+    widget.tag_match_combo.setCurrentIndex(widget.tag_match_combo.findData("exact"))
+    assert _shown(widget) == {"subject-a/shared"}
+    widget.tag_filter_combo.set_selection(("TH",))
+    assert _shown(widget) == {"subject-c/shared"}
+    widget.clear_annotation_filters()
+    widget.tag_count_combo.setCurrentIndex(widget.tag_count_combo.findData("multiple"))
+    assert _shown(widget) == {"subject-a/shared"}
+
+
+def test_tag_picker_mouse_and_keyboard_keep_multiple_checks(real_table_widget):
+    from qtpy.QtTest import QTest
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    selector = widget.tag_filter_combo
+    widget.show()
+    selector.showPopup()
+    QApplication.processEvents()
+    for tag in ("TH", "CP"):
+        index = selector.model().index(selector.findData(tag), 0)
+        point = selector.view().visualRect(index).center()
+        QTest.mouseClick(selector.view().viewport(), module.Qt.LeftButton, pos=point)
+    assert set(selector.selected_tags()) == {"TH", "CP"}
+    assert selector.view().isVisible()
+    QTest.keyClick(selector.view(), module.Qt.Key_Escape)
+    assert set(selector.selected_tags()) == {"TH", "CP"}
+    assert selector.currentText() == "2 tags selected"
+    selector.showPopup()
+    QApplication.processEvents()
+    selector.view().setCurrentIndex(selector.model().index(selector.findData("CP"), 0))
+    QTest.keyClick(selector.view(), module.Qt.Key_Space)
+    assert selector.selected_tags() == ("TH",)
+    selector.hidePopup()
+    selector.set_selection("")
+    assert selector.selected_tags() == ()
+    assert _shown(widget) == {"unannotated"}
+
+
+@pytest.mark.parametrize(
+    ("scope", "affected"),
+    [
+        ("displayed", {"subject-a/shared"}),
+        ("selected", {"subject-c/shared"}),
+        ("table", {"subject-a/shared", "subject-c/shared"}),
+    ],
+)
+def test_delete_tags_scope_and_undo_preserve_other_metadata(
+    real_table_widget, scope, affected
+):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    before = {key: entry.to_state() for key, entry in widget._entries.items()}
+    widget.tag_filter_combo.set_selection("TH")
+    if scope == "selected":
+        widget.select_file_ids(["subject-c/shared"])
+    else:
+        widget.label_filter_combo.setCurrentIndex(
+            widget.label_filter_combo.findData("Rank 2")
+        )
+    widget.tag_action_scope.setCurrentIndex(widget.tag_action_scope.findData(scope))
+    widget.delete_tags_button.click()
+    assert set(widget.file_ids()) == set(before)
+    for file_id, entry in widget._entries.items():
+        expected = dict(before[file_id])
+        if file_id in affected:
+            expected["tags"] = [tag for tag in expected["tags"] if tag != "TH"]
+        assert entry.to_state() == expected
+    assert widget.undo_tags_button.isEnabled()
+    # Undo restores deleted tags without losing a tag added since deletion.
+    changed_id = min(affected)
+    widget.apply_metadata_updates(
+        {changed_id: module.NeuronMetadataUpdate(tags=("New after deletion",))}
+    )
+    widget.undo_tags_button.click()
+    for file_id in before:
+        expected_tags = set(before[file_id]["tags"])
+        if file_id == changed_id:
+            expected_tags.add("New after deletion")
+        assert set(widget._entries[file_id].tags) == expected_tags
+    assert not widget.undo_tags_button.isEnabled()
+    QApplication.processEvents()
+    assert "Restored deleted tags" in widget._tag_action_status.text()
+
+
+def test_tag_deletion_removes_exact_names_and_resets_undo_on_replacement(
+    real_table_widget,
+):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    widget.apply_metadata_updates(
+        {"subject-a/shared": module.NeuronMetadataUpdate(tags=("TH ipsilateral",))}
+    )
+    QApplication.processEvents()
+    widget.tag_filter_combo.set_selection(("TH", "keep"))
+    widget.tag_action_scope.setCurrentIndex(widget.tag_action_scope.findData("table"))
+    widget.delete_tags_button.click()
+    assert widget._entries["subject-a/shared"].tags == ("TH ipsilateral",)
+    assert widget._entries["subject-c/shared"].tags == ()
+    assert widget._entries["subject-b/shared"].tags == ("CP",)
+    assert set(widget.tag_filter_combo.selected_tags()) == {"TH", "keep"}
+    widget.populate(["new-source"])
+    QApplication.processEvents()
+    assert not widget.undo_tags_button.isEnabled()
+    widget._undo_tag_deletion()
+    assert widget._entries["new-source"].tags == ()
+
+
+def test_tag_color_combinations_legend_and_saved_state(real_table_widget):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    widget.append_file_ids(["same-tags"])
+    widget.apply_metadata_updates(
+        {"same-tags": module.NeuronMetadataUpdate(tags=("keep", "TH"))}
+    )
+    QApplication.processEvents()
+    before = {key: value.to_state() for key, value in widget._entries.items()}
+    emitted = []
+    widget.colors_changed.connect(emitted.append)
+    widget.tag_action_scope.setCurrentIndex(widget.tag_action_scope.findData("table"))
+    widget.color_tags_button.click()
+    assert widget.get_color("subject-a/shared") == widget.get_color("same-tags")
+    assert widget.get_color("subject-a/shared") != widget.get_color("subject-c/shared")
+    assert widget.get_color("unannotated") == module.GRAY_RGBA
+    assert widget._tag_color_legend.rowCount() == 4
+    assert emitted
+    for file_id, entry in widget._entries.items():
+        expected = dict(before[file_id], color=entry.color)
+        assert entry.to_state() == expected
+    saved = widget.export_state()
+    widget.import_state(saved)
+    assert widget.export_state() == saved
+
+
+def test_chosen_tag_color_applies_only_to_scope_and_cancel_is_noop(
+    real_table_widget, monkeypatch
+):
+    from qtpy.QtGui import QColor
+
+    module, widget = _filtered_fixture(real_table_widget)
+    before = widget.get_full_color_map()
+    widget.tag_filter_combo.set_selection("TH")
+    widget.label_filter_combo.setCurrentIndex(
+        widget.label_filter_combo.findData("Rank 2")
+    )
+    chosen = QColor.fromRgbF(0.2, 0.4, 0.6, 1.0)
+    monkeypatch.setattr(module.QColorDialog, "getColor", lambda *_: chosen)
+    widget.set_tag_color_button.click()
+    expected = [chosen.redF(), chosen.greenF(), chosen.blueF(), chosen.alphaF()]
+    assert widget.get_color("subject-a/shared") == expected
+    for file_id in set(before) - {"subject-a/shared"}:
+        assert widget.get_color(file_id) == before[file_id]
+    before_cancel = widget.get_full_color_map()
+    monkeypatch.setattr(module.QColorDialog, "getColor", lambda *_: QColor())
+    widget.set_tag_color_button.click()
+    assert widget.get_full_color_map() == before_cancel
+
+
 class _DummySignal:
     def __init__(self) -> None:
         self.calls: list[object] = []
@@ -576,10 +928,8 @@ def test_apply_metadata_updates_replaces_only_managed_search_tags() -> None:
     )
     widget = _make_widget(module, {"n1": entry})
     cell_updates = []
-    widget._set_text_cell = (
-        lambda row, column, text, *, editable: cell_updates.append(
-            (row, column, text, editable)
-        )
+    widget._set_text_cell = lambda row, column, text, *, editable: cell_updates.append(
+        (row, column, text, editable)
     )
 
     summary = widget.apply_metadata_updates(

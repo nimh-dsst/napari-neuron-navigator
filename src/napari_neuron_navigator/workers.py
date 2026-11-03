@@ -331,6 +331,107 @@ class RegionalProfileBuildWorker(QObject):
             self.error.emit(str(exc))
 
 
+class RegionalClusteringWorker(QObject):
+    """Build a validated regional feature matrix and run cancellable clustering."""
+
+    prepared = Signal(int, object)
+    finished = Signal(int, object)
+    progress = Signal(str, int, int)
+    cancelled = Signal(int, str)
+    error = Signal(int, str)
+    done = Signal()
+
+    def __init__(self, generation, source_path, atlas, settings):
+        super().__init__()
+        self.generation = generation
+        self.source_path = Path(source_path)
+        self.atlas = atlas
+        self.settings = settings
+        self._cancel_event = Event()
+        self._connection = None
+
+    def cancel(self):
+        self._cancel_event.set()
+        connection = self._connection
+        if connection is not None:
+            try:
+                connection.interrupt()
+            except Exception:
+                logger.debug("Could not interrupt regional clustering SQL", exc_info=True)
+
+    def run(self):
+        import hashlib
+        from dataclasses import asdict
+
+        import duckdb
+
+        from .analysis.region_profile import (
+            RegionalProfileAtlas,
+            default_region_profile_path,
+            register_region_profile,
+        )
+        from .analysis.regional_clustering import (
+            RegionalClusteringCancelled,
+            build_regional_features,
+            cluster_regional_features,
+        )
+
+        try:
+            if self._cancel_event.is_set():
+                raise RegionalClusteringCancelled("Regional clustering cancelled.")
+            self.progress.emit("Validating regional profile...", 0, 0)
+            self._connection = duckdb.connect()
+            atlas = (
+                self.atlas
+                if isinstance(self.atlas, RegionalProfileAtlas)
+                else RegionalProfileAtlas.from_atlas(self.atlas)
+            )
+            sidecar = default_region_profile_path(self.source_path)
+            inspection = register_region_profile(
+                self._connection, sidecar, source_path=self.source_path, atlas=atlas
+            )
+            self.progress.emit("Building regional features...", 0, 0)
+            features = build_regional_features(
+                self._connection,
+                structures=atlas.structures,
+                settings=self.settings,
+                cancel_check=self._cancel_event.is_set,
+            )
+            self.prepared.emit(self.generation, features)
+            with sidecar.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            result = cluster_regional_features(
+                features,
+                provenance={
+                    "source_path": str(self.source_path.resolve()),
+                    "source_sha256": inspection.metadata.source.content_sha256,
+                    "sidecar_sha256": digest,
+                    "atlas": asdict(inspection.metadata.atlas),
+                    "profile_format_version": inspection.metadata.profile_format_version,
+                    "profile_builder_algorithm_version": inspection.metadata.builder_algorithm_version,
+                    "length_method": inspection.metadata.length_method,
+                },
+                cancel_check=self._cancel_event.is_set,
+                progress_callback=self.progress.emit,
+            )
+            if self._cancel_event.is_set():
+                raise RegionalClusteringCancelled("Regional clustering cancelled.")
+            self.finished.emit(self.generation, result)
+        except RegionalClusteringCancelled as exc:
+            self.cancelled.emit(self.generation, str(exc))
+        except Exception as exc:
+            if self._cancel_event.is_set():
+                self.cancelled.emit(self.generation, "Regional clustering cancelled.")
+            else:
+                logger.exception("Regional-profile clustering failed")
+                self.error.emit(self.generation, str(exc))
+        finally:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+            self.done.emit()
+
+
 class RegionalQueryWorker(QObject):
     """Validate a regional profile and execute one immutable query snapshot."""
 
