@@ -3385,6 +3385,125 @@ color all matching neurons together.
   color scope, cancellation, and table-state persistence.
   The complete manual napari workflow above has not been exercised.
 
+### UC-027: Define Live Neuron Sets and Compare Their Spatial Regions
+
+**Capability**
+
+Create named neuron sets from query-generated Tags and Label/Tag filter rules.
+Sets update with annotation edits and Data cohort changes. The Sets view shows
+each name, current neuron count, and live rule. Inspect members using existing
+Selected rows workflows, generate set heatmaps, and compare both shared neuron
+membership and spatial overlap of thresholded blurred heatmap regions.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet` and its matching atlas.
+  Populate Data with the MOs5 soma cohort described in UC-021; record the exact
+  source path, atlas name/resolution, cohort count, and tested `file_id` values.
+- Follow UC-021 or UC-024 to add query-derived Tags, such as `TH termini` and a
+  second regional-query tag. These are annotation rules; compartment labels
+  alone do not establish biological identity (see AGENTS.md).
+- For a controlled membership check, start with three distinct current-table
+  file IDs and record them as A, B, C. In **Table view: Label**, give A the Tags
+  `set-check-TH, set-check-CP`, B `set-check-TH`, and C `set-check-CP`.
+  Ensure no other cohort row has these two test tags. Preserve existing tags
+  when adding the test names. These controlled tags test the set logic, while
+  the region-query tags exercise the intended scientific workflow.
+
+**Steps and expected results**
+
+1. **Action:** In Data, choose **Table view: Sets**. Clear Label/Tag filters,
+   check `set-check-TH` in **Tag**, type `TH set` in **Set name**, and click
+   **Create Set from Filters**. Repeat for `set-check-CP`, naming it `CP set`.
+   **Expected:** Two set rows each show 2 neurons and their saved rules. A
+   belongs to both sets, B only to TH, C only to CP. Set counts evaluate the
+   entire Data cohort regardless of Cluster, Manual Heatmap, or Set filters.
+   Empty or duplicate set names produce a message without replacing a set.
+2. **Action:** Check both test tags. Try **Tag matching: All checked tags**,
+   **Any checked tag**, and **Exactly these tags**. Then choose only TH and
+   check CP under **Exclude tags**. Create a third set from that rule.
+   **Expected:** All gives A; Any gives A/B/C; Exactly gives only neurons whose
+   complete tag set equals the two checked names (A only if it has no other
+   tags). TH with CP excluded gives B. **Tag count** and Label restrictions
+   are saved too. Unchecked exclusions leave membership unrestricted.
+3. **Action:** Select `TH set`, click **Show Members**, and use an existing
+   analysis with **Selected rows** scope.
+   **Expected:** Annotation, Cluster, and Manual Heatmap filters are cleared;
+   the Set filter shows TH. A/B are visible and selected. All original cohort
+   rows remain in Data. Ordinary row filters can further narrow this view;
+   they do not alter the set rule.
+4. **Action:** Use **Load Rule into Filters** to inspect a set's rule. Edit
+   filters/name and use **Update Set from Filters**. Use **Delete Set** on the
+   temporary third set. Add TH to C, then remove it again.
+   **Expected:** Updating retains the set identifier. Deletion removes only
+   its definition. TH's count changes 2 → 3 → 2 without recreating it. A set
+   with no current members remains defined with count zero; its heatmap action
+   reports that no members are available.
+5. **Action:** Select each of TH and CP and click **Create Set Heatmap**. In
+   **Tools → Heatmap Sources**, select the two generated `Set: … Heatmap`
+   layers, choose **Create mode: Separate layers**, set **Gaussian sigma
+   (voxels): 1.00**, then click **Create Blurred Layer**.
+   **Expected:** Background heatmap creation uses all current set members,
+   independently of selected/hidden rows. Each heatmap and derived blurred
+   layer records the set name, rule, identifier, and creation-time file IDs.
+   Existing heatmap work blocks a competing request with a status message.
+6. **Action:** In **Histogram**, select each blurred layer in turn. Expand
+   **Mask Creation**, use **Separate layers**, click **Use Otsu Lower** (or
+   specify a positive **Lower bound**), leave **Use upper bound** unchecked,
+   and click **Create Mask Layer**. Record the exact thresholds and sigma.
+   **Expected:** Separate masks represent the two sets' spatial regions. The
+   displayed mask extent depends on sigma and threshold; these settings must
+   accompany any interpretation of the overlap result.
+7. **Action:** In **Tools → Neuron Set Overlap**, choose TH as **Set A**, CP as
+   **Set B**, and the corresponding masks under **Region**. Click **Compare
+   Sets**.
+   **Expected:** Neurons: A=2, B=2, intersection=1, union=3, A only=1, B only=1,
+   directional coverage=50%, Jaccard=33.33%, Dice=50%. Spatial voxels are
+   calculated independently from the masks: intersection counts voxels in both,
+   union counts voxels in either, Jaccard=intersection/union, and
+   Dice=2×intersection/(A+B). Sigma and both threshold ranges are shown.
+   **Membership only** works without masks. Empty denominators display N/A.
+8. **Action:** With both masks selected, click **Create Intersection Mask**.
+   **Expected:** A new yellow Labels layer named `Intersection: … ∩ …`
+   contains label 1 only where both masks are nonzero and label 0 elsewhere.
+   Its voxel count equals the reported spatial intersection, and it retains
+   the source spatial transform. The originals remain unchanged. Repeated
+   creation produces distinct layer names. The button is disabled until two
+   region masks are selected; a prior **Compare Sets** click is unnecessary.
+   Disjoint masks produce an empty mask and an explicit empty-intersection
+   status. The new mask is available in Regions mask queries and records both
+   source masks, set memberships, sigma, and thresholds. Query source exclusion
+   uses the union of source neurons that contributed to the two masks.
+9. **Action:** Add TH to C after creating the masks, then compare again. Also
+   test a region with a different shape or spatial transform.
+   **Expected:** Current neuron membership is reported; stale spatial results
+   display N/A with instructions to recreate the heatmap, blur, and mask.
+   Different atlas/grid/transform inputs are rejected. A combined mask from
+   different sets is not offered as a region belonging to either single set.
+   **Create Intersection Mask** rejects the same stale or incompatible inputs
+   without adding a layer.
+10. **Action:** Restore the initial annotations, regenerate if needed, save a
+   project, close and reload it. Also export/reload enhanced Parquet.
+   **Expected:** Set rules/names/identifiers survive both formats and resume
+   live evaluation. Projects additionally restore the mask arrays and their
+   source set snapshots, sigma, thresholds, and spatial transforms. Enhanced
+   Parquet preserves definitions and annotations; layer arrays are project
+   content. Removing rows changes live counts; clearing Data leaves rules
+   available with zero members. Loading a different source resets definitions.
+   Intersection masks also retain their arrays, spatial transforms, and both
+   source masks' provenance after a project reload.
+
+**Manual verification**
+
+- Status: **Not run**
+- Date recorded: **2026-11-03**
+- Notes: Automated checks cover live include/exclude rules, full `file_id`
+  identity, empty/overlapping sets, table inspection and selection, heatmap →
+  blur → mask provenance, stale-mask and grid checks, and project/enhanced
+  Parquet persistence. Intersection checks cover exact shared voxels, empty
+  intersections, source preservation, query eligibility, and disabled/stale
+  input behavior. The complete napari workflow remains to be exercised.
+
 ## Use-Case Template
 
 Copy this section when adding a use case. Remove guidance in parentheses and

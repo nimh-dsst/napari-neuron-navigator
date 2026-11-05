@@ -36,6 +36,7 @@ from qtpy.QtWidgets import (
 
 from ..cluster_assignments import ClusterAssignmentStore
 from ..neuron_palette import MAX_DISTINCT_COLORS, neuron_palette
+from ..neuron_sets import AnnotationRule, NeuronSetStore
 from ..neuron_table_ops import (
     GRAY_RGBA,
     ClusterFilterSelection,
@@ -53,6 +54,7 @@ from ..neuron_table_ops import (
     visibility_for_selected_cluster,
 )
 from .collapsible_section import CollapsibleSection
+from .neuron_sets import NeuronSetsWidget
 from .tag_selector import TagSelector
 
 if TYPE_CHECKING:
@@ -108,6 +110,11 @@ _TABLE_VIEW_DEFINITIONS = {
     "label": (
         "Label",
         frozenset({COL_NEURON_ID, COL_LABEL, COL_GROUP, COL_TAGS}),
+        True,
+    ),
+    "sets": (
+        "Sets",
+        frozenset({COL_NEURON_ID, COL_LABEL, COL_TAGS}),
         True,
     ),
     "full": (
@@ -306,6 +313,8 @@ class NeuronTableWidget(QWidget):
     visibility_changed = Signal(dict)
     selection_changed = Signal(list)
     state_changed = Signal()
+    set_heatmap_requested = Signal(object)
+    set_members_shown = Signal(list)
 
     def __init__(
         self,
@@ -328,6 +337,7 @@ class NeuronTableWidget(QWidget):
         self._filter_cluster_selection = ClusterFilterSelection()
         self._filter_heatmap_file_ids = None
         self._deleted_tags_undo = {}
+        self.neuron_sets = NeuronSetStore()
         self._setup_ui()
         # Batch row/cell notifications so loading a large cohort rebuilds the
         # annotation catalog once, after the bulk update reaches the event loop.
@@ -401,6 +411,24 @@ class NeuronTableWidget(QWidget):
         self.tag_count_combo.currentIndexChanged.connect(self._apply_annotation_filters)
         tag_match_row.addWidget(self.tag_count_combo, 1)
         layout.addLayout(tag_match_row)
+        exclude_row = QHBoxLayout()
+        exclude_row.addWidget(QLabel("Exclude tags:"))
+        self.excluded_tags_combo = TagSelector(
+            all_text="No excluded tags", include_untagged=False
+        )
+        self.excluded_tags_combo.selection_changed.connect(self._apply_annotation_filters)
+        exclude_row.addWidget(self.excluded_tags_combo, 1)
+        exclude_row.addWidget(QLabel("Set:"))
+        self.set_filter_combo = QComboBox()
+        self.set_filter_combo.addItem("All neurons", None)
+        self.set_filter_combo.currentIndexChanged.connect(self._apply_annotation_filters)
+        exclude_row.addWidget(self.set_filter_combo, 1)
+        layout.addLayout(exclude_row)
+        self._sets_panel = NeuronSetsWidget(self)
+        self._sets_panel.changed.connect(self._on_sets_changed)
+        self._sets_panel.heatmap_requested.connect(self.set_heatmap_requested.emit)
+        self._sets_panel.setVisible(False)
+        layout.addWidget(self._sets_panel)
         self._filter_summary_label = QLabel("Showing 0 of 0 neurons")
         layout.addWidget(self._filter_summary_label)
 
@@ -641,7 +669,79 @@ class NeuronTableWidget(QWidget):
         self.tag_filter_combo.set_tag_options(
             tags, sum(not entry.tags for entry in self._entries.values())
         )
+        self.excluded_tags_combo.set_tag_options(tags, 0)
+        self._refresh_set_controls()
         self._apply_annotation_filters()
+
+    def annotation_rule(self) -> AnnotationRule:
+        """Capture annotations only; row filters never redefine a live set."""
+        return AnnotationRule(
+            label_filter=self.label_filter_combo.currentData(),
+            tag_filter=self.tag_filter_combo.tag_filter(),
+            tag_match=self.tag_match_combo.currentData(),
+            tag_count=self.tag_count_combo.currentData(),
+            excluded_tags=self.excluded_tags_combo.selected_tags(),
+        )
+
+    def set_annotation_rule(self, rule: AnnotationRule) -> None:
+        self.clear_annotation_filters()
+        self._refresh_annotation_filters()
+        self.label_filter_combo.setCurrentIndex(
+            self.label_filter_combo.findData(rule.label_filter)
+        )
+        if self.label_filter_combo.currentIndex() < 0:
+            self.label_filter_combo.addItem(rule.label_filter, rule.label_filter)
+            self.label_filter_combo.setCurrentIndex(self.label_filter_combo.count() - 1)
+        self.tag_filter_combo.set_selection(rule.tag_filter)
+        self.excluded_tags_combo.set_selection(rule.excluded_tags)
+        self.tag_match_combo.setCurrentIndex(self.tag_match_combo.findData(rule.tag_match))
+        self.tag_count_combo.setCurrentIndex(self.tag_count_combo.findData(rule.tag_count))
+        self._apply_annotation_filters()
+
+    def _refresh_set_controls(self) -> None:
+        if "_sets_panel" not in self.__dict__:
+            return
+        self._sets_panel.refresh()
+        previous = self.set_filter_combo.currentData()
+        blocked = self.set_filter_combo.blockSignals(True)
+        try:
+            self.set_filter_combo.clear()
+            self.set_filter_combo.addItem("All neurons", None)
+            for item in self.neuron_sets.sets():
+                count = len(item.rule.members(self._entries))
+                self.set_filter_combo.addItem(f"{item.name} ({count:,})", item.set_id)
+            self.set_filter_combo.setCurrentIndex(
+                max(0, self.set_filter_combo.findData(previous))
+            )
+        finally:
+            self.set_filter_combo.blockSignals(blocked)
+
+    def _on_sets_changed(self) -> None:
+        self._refresh_set_controls()
+        self._apply_annotation_filters()
+        self.state_changed.emit()
+
+    def show_set_members(self, set_id) -> None:
+        """Select the live set for existing Selected rows analysis actions."""
+        self.clear_annotation_filters()
+        self._filter_cluster_selection = ClusterFilterSelection()
+        self._filter_heatmap_file_ids = None
+        self.set_filter_combo.setCurrentIndex(self.set_filter_combo.findData(set_id))
+        self._apply_annotation_filters()
+        self.select_file_ids(self.displayed_file_ids())
+        self.set_members_shown.emit(self.displayed_file_ids())
+
+    def displayed_file_ids(self):
+        return [file_id for row, file_id in self._iter_rows_with_file_ids()
+                if not self._table.isRowHidden(row)]
+
+    def load_neuron_sets(self, state, *, merge=False):
+        if "neuron_sets" not in self.__dict__:
+            return
+        self.neuron_sets.load_state(state, merge=merge)
+        self._refresh_set_controls()
+        self._apply_annotation_filters()
+        self.state_changed.emit()
 
     def _apply_annotation_filters(self, *_args) -> None:
         self.apply_filters(
@@ -659,6 +759,9 @@ class NeuronTableWidget(QWidget):
         tag_combo = self.__dict__.get("tag_filter_combo")
         if tag_combo is not None:
             tag_combo.set_selection(None, emit=False)
+        excluded = self.__dict__.get("excluded_tags_combo")
+        if excluded is not None:
+            excluded.set_selection(None, emit=False)
         if "label_filter_combo" in self.__dict__:
             self._apply_annotation_filters()
 
@@ -672,6 +775,9 @@ class NeuronTableWidget(QWidget):
             "_current_table_view",
             _DEFAULT_TABLE_VIEW,
         )
+        panel = self.__dict__.get("_sets_panel")
+        if panel is not None:
+            panel.setVisible(view_key == "sets")
         definition = _TABLE_VIEW_DEFINITIONS.get(
             view_key,
             _TABLE_VIEW_DEFINITIONS[_DEFAULT_TABLE_VIEW],
@@ -1090,6 +1196,8 @@ class NeuronTableWidget(QWidget):
         }
         if "_assignment_store" in self.__dict__:
             state["cluster_assignments"] = self.assignment_state()
+        if "neuron_sets" in self.__dict__:
+            state["neuron_sets"] = self.neuron_sets.to_state()
         return state
 
     def assignment_state(self) -> dict[str, object]:
@@ -1117,6 +1225,7 @@ class NeuronTableWidget(QWidget):
         ]
         self._load_assignment_state(state, entries)
         self._replace_entries(entries)
+        self.load_neuron_sets(state.get("neuron_sets", {}))
         selected = state.get("selected_file_ids", [])
         if isinstance(selected, (str, bytes)):
             selected_file_ids = [selected]
@@ -1503,6 +1612,14 @@ class NeuronTableWidget(QWidget):
         count_combo = self.__dict__.get("tag_count_combo")
         tag_match = "all" if match_combo is None else match_combo.currentData()
         tag_count = "any" if count_combo is None else count_combo.currentData()
+        excluded_combo = self.__dict__.get("excluded_tags_combo")
+        excluded_tags = () if excluded_combo is None else excluded_combo.selected_tags()
+        set_combo = self.__dict__.get("set_filter_combo")
+        store = self.__dict__.get("neuron_sets")
+        active_set = store.get(set_combo.currentData()) if store and set_combo else None
+        set_members = (
+            set(active_set.rule.members(self._entries)) if active_set else None
+        )
         cluster_map = self.get_cluster_map()
         cluster_matches = cluster_filter_matches(cluster_map, selection)
         if heatmap_file_ids is None:
@@ -1516,6 +1633,7 @@ class NeuronTableWidget(QWidget):
             visible = (
                 cluster_matches.get(file_id, True)
                 and heatmap_matches.get(file_id, False)
+                and (set_members is None or str(file_id) in set_members)
                 and annotation_matches(
                     entry.label,
                     entry.tags,
@@ -1523,6 +1641,7 @@ class NeuronTableWidget(QWidget):
                     tag_filter=tag_filter,
                     tag_match=tag_match,
                     tag_count=tag_count,
+                    excluded_tags=excluded_tags,
                 )
             )
             self._table.setRowHidden(row, not visible)

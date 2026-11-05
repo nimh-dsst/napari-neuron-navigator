@@ -13,8 +13,10 @@ class TagSelector(QComboBox):
 
     selection_changed = Signal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, all_text="All tags", include_untagged=True):
         super().__init__(parent)
+        self._all_text = all_text
+        self._include_untagged = include_untagged
         self._selection = None
         self._updating = False
         self._popup_open = False
@@ -54,8 +56,9 @@ class TagSelector(QComboBox):
         self._updating = True
         try:
             self.clear()
-            self.addItem("All tags", None)
-            self.addItem(f"No tags ({empty_count:,})", "")
+            self.addItem(self._all_text, None)
+            if self._include_untagged:
+                self.addItem(f"No tags ({empty_count:,})", "")
             for tag in sorted(counts, key=label_sort_key):
                 self.addItem(f"{tag} ({counts[tag]:,})", tag)
             for index in range(self.count()):
@@ -95,7 +98,7 @@ class TagSelector(QComboBox):
             self.setToolTip(
                 "Checked tags: " + ", ".join(tags)
                 if tags
-                else "All tags"
+                else self._all_text
                 if self._selection is None
                 else "Untagged neurons"
             )

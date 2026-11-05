@@ -13,6 +13,7 @@ import colorsys
 import logging
 import sys
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -58,6 +59,7 @@ from ..analysis.mask import (
     otsu_threshold_positive,
     smooth_heatmap_volume,
 )
+from ..analysis.set_overlap import source_set_metadata, validate_spatial_grids
 from ..auto_center import (
     center_to_depth_world,
     compute_center_of_rendered_neurons,
@@ -249,6 +251,7 @@ class _SelectedNeuronHeatmapRequest:
     file_ids: tuple[str, ...]
     creation_mode: str
     color: tuple[float, float, float, float] | None = None
+    neuron_set: dict | None = None
 
 
 def _point_heatmap_color(index: int) -> tuple[float, float, float, float]:
@@ -2034,6 +2037,8 @@ class NeuronViewerWidget(QWidget):
         self._neuron_table.colors_changed.connect(self._apply_neuron_colors)
         self._neuron_table.visibility_changed.connect(self._apply_neuron_visibility)
         self._neuron_table.selection_changed.connect(self._highlight_selected_neurons)
+        self._neuron_table.set_heatmap_requested.connect(self._create_neuron_set_heatmap)
+        self._neuron_table.set_members_shown.connect(self._on_neuron_set_members_shown)
         state_changed = getattr(self._neuron_table, "state_changed", None)
         if state_changed is not None:
             state_changed.connect(self._refresh_neuron_table_summary)
@@ -2576,6 +2581,15 @@ class NeuronViewerWidget(QWidget):
 
         layout.addWidget(blur_group)
 
+        from .set_overlap import SetOverlapWidget
+
+        self._set_overlap = SetOverlapWidget(
+            self._neuron_table, self._generated_mask_layers, self._current_atlas_name,
+            intersection_mask_creator=self._add_set_intersection_mask,
+        )
+        self._neuron_table.state_changed.connect(self._set_overlap.refresh)
+        layout.addWidget(self._set_overlap)
+
         isolation_group = QGroupBox("Region Isolation")
         isolation_layout = QVBoxLayout(isolation_group)
 
@@ -3117,6 +3131,9 @@ class NeuronViewerWidget(QWidget):
         if callable(refresh_assignments):
             refresh_assignments()
         table = getattr(self, "_neuron_table", None)
+        load_sets = getattr(table, "load_neuron_sets", None)
+        if callable(load_sets):
+            load_sets({})
         refresh_table_assignments = getattr(
             table,
             "refresh_cluster_assignments",
@@ -3149,6 +3166,8 @@ class NeuronViewerWidget(QWidget):
         if not entries:
             return 0
         self._saved_table_state = table_state
+        if callable(load_sets):
+            load_sets(table_state.get("neuron_sets", {}))
         assignment_state = table_state.get("cluster_assignments")
         if isinstance(assignment_state, dict):
             self._cluster_assignment_store.load_state(assignment_state)
@@ -3514,7 +3533,7 @@ class NeuronViewerWidget(QWidget):
                 "visible": bool(display.get("visible", True)),
                 "metadata": layer_metadata,
             }
-            for attr_name in ("scale", "translate"):
+            for attr_name in ("scale", "translate", "rotate", "shear", "affine"):
                 if attr_name in display and display[attr_name] is not None:
                     kwargs[attr_name] = display[attr_name]
 
@@ -4936,6 +4955,9 @@ class NeuronViewerWidget(QWidget):
         self._refresh_mask_layer_options()
         self._update_tools_controls()
         self._update_histogram_controls()
+        overlap = getattr(self, "_set_overlap", None)
+        if overlap is not None:
+            overlap.refresh()
         sync_heatmaps = getattr(self, "_sync_neuron_table_heatmap_membership", None)
         if callable(sync_heatmaps):
             sync_heatmaps()
@@ -6329,6 +6351,8 @@ class NeuronViewerWidget(QWidget):
         """Add or replace a blurred heatmap image layer."""
         from napari.utils.colormaps import Colormap
 
+        validate_spatial_grids(source_layers)
+
         for layer in list(self._iter_viewer_layers()):
             if layer.name == layer_name:
                 self.viewer.layers.remove(layer)
@@ -6365,6 +6389,7 @@ class NeuronViewerWidget(QWidget):
             }
         )
         metadata.update(_source_heatmap_filter_metadata(source_layers))
+        metadata.update(source_set_metadata(source_layers))
 
         add_kwargs = {
             "name": layer_name,
@@ -6377,7 +6402,7 @@ class NeuronViewerWidget(QWidget):
             "visible": True,
             "metadata": metadata,
         }
-        for attr_name in ("scale", "translate"):
+        for attr_name in ("scale", "translate", "rotate", "shear", "affine"):
             value = getattr(first_layer, attr_name, None)
             if value is not None:
                 add_kwargs[attr_name] = value
@@ -6401,6 +6426,8 @@ class NeuronViewerWidget(QWidget):
     ):
         """Add one post-hoc region-isolated heatmap image layer."""
         from napari.utils.colormaps import Colormap
+
+        validate_spatial_grids(source_layers)
 
         first_layer = source_layers[0]
         rgba = _mask_layer_color(source_layers)
@@ -6449,6 +6476,7 @@ class NeuronViewerWidget(QWidget):
             }
         )
         metadata.update(_source_heatmap_filter_metadata(source_layers))
+        metadata.update(source_set_metadata(source_layers))
 
         add_kwargs = {
             "name": self._unique_layer_name(layer_name),
@@ -6462,7 +6490,7 @@ class NeuronViewerWidget(QWidget):
             "contrast_limits": contrast_limits,
             "metadata": metadata,
         }
-        for attr_name in ("scale", "translate"):
+        for attr_name in ("scale", "translate", "rotate", "shear", "affine"):
             value = getattr(first_layer, attr_name, None)
             if value is not None:
                 add_kwargs[attr_name] = value
@@ -6484,6 +6512,13 @@ class NeuronViewerWidget(QWidget):
     ):
         """Add or replace a generated binary mask layer."""
         from napari.utils import DirectLabelColormap
+
+        validate_spatial_grids(source_layers)
+        transforms = {
+            name: getattr(source_layers[0], name)
+            for name in ("scale", "translate", "rotate", "shear", "affine")
+            if getattr(source_layers[0], name, None) is not None
+        }
 
         for layer in list(self._iter_viewer_layers()):
             if layer.name == layer_name:
@@ -6524,9 +6559,56 @@ class NeuronViewerWidget(QWidget):
                 "merge_mode": merge_mode,
                 "atlas_name": self._current_atlas_name(),
                 "color": rgba,
+                **source_set_metadata(source_layers),
                 **_source_heatmap_filter_metadata(source_layers),
             },
+            **transforms,
         )
+        return layer
+
+    def _add_set_intersection_mask(self, mask, source_layers):
+        """Publish an intersection with the original grid and both source records."""
+        from napari.utils import DirectLabelColormap
+
+        source_file_ids = self._source_file_ids_for_layers(source_layers)
+        provenance = [
+            {"name": layer.name, "metadata": deepcopy(_layer_metadata(layer))}
+            for layer in source_layers
+        ]
+        transforms = {
+            key: getattr(source_layers[0], key)
+            for key in ("scale", "translate", "rotate", "shear", "affine")
+            if getattr(source_layers[0], key, None) is not None
+        }
+        rgba = (1.0, 0.9, 0.0, 1.0)
+        layer = self.viewer.add_labels(
+            mask,
+            name=self._unique_layer_name(
+                f"Intersection: {source_layers[0].name} ∩ {source_layers[1].name}"
+            ),
+            opacity=self._opacity_slider.value() / 100.0,
+            visible=True,
+            colormap=DirectLabelColormap(color_dict={
+                None: (0.0, 0.0, 0.0, 0.0), 0: (0.0, 0.0, 0.0, 0.0), 1: rgba,
+            }),
+            metadata={
+                "mask_query_source": True,
+                "mask_operation": "intersection",
+                "source_mask_layers": [source.name for source in source_layers],
+                "source_masks": provenance,
+                "source_heatmap_layers": sorted({
+                    name for source in source_layers
+                    for name in _layer_metadata(source).get("source_heatmap_layers", [])
+                }),
+                "source_file_ids": source_file_ids,
+                "file_ids": source_file_ids,
+                "query_excluded_file_ids": source_file_ids,
+                "atlas_name": self._current_atlas_name(),
+                "color": rgba,
+            },
+            **transforms,
+        )
+        self._refresh_mask_layer_options()
         return layer
 
     def _on_region_query_source_changed(self, text: str) -> None:
@@ -7226,6 +7308,9 @@ class NeuronViewerWidget(QWidget):
         )
         self._manual_heatmap_combo.setCurrentIndex(0)
         self._neuron_table.clear_annotation_filters()
+        set_filter = getattr(self._neuron_table, "set_filter_combo", None)
+        if set_filter is not None:
+            set_filter.setCurrentIndex(0)
         self._apply_neuron_table_filters()
         self._neuron_table.select_file_ids(list(file_ids))
         report = self._region_report
@@ -8871,6 +8956,39 @@ class NeuronViewerWidget(QWidget):
         )
         self._start_selected_neuron_heatmap_requests([request])
 
+    def _on_neuron_set_members_shown(self, file_ids):
+        self._cluster_filter_combo.set_cluster_options(
+            self._neuron_table.available_cluster_ids(),
+            include_unclustered=True, selection=ClusterFilterSelection(),
+        )
+        self._manual_heatmap_combo.setCurrentIndex(0)
+        self._apply_neuron_table_filters()
+        self._neuron_table.select_file_ids(file_ids)
+
+    def _create_neuron_set_heatmap(self, snapshot):
+        """Use the existing background queue with an explicit set snapshot."""
+        message = None
+        if self._db is None or self._atlas is None:
+            message = "Load a neuron Parquet and atlas before creating a set heatmap."
+        elif self._selected_heatmap_running() or self._search_heatmap_running():
+            message = "Wait for the current heatmap request to finish."
+        elif not snapshot.get("file_ids"):
+            message = "The neuron set has no members in Data."
+        if message:
+            self._render_status_label.setText(message)
+            self._neuron_table._sets_panel.status.setText(message)
+            return
+        self._neuron_table._sets_panel.status.setText(
+            f"Building heatmap for {snapshot['name']!r}; progress is shown in Data."
+        )
+        self._start_selected_neuron_heatmap_requests([
+            _SelectedNeuronHeatmapRequest(
+                file_ids=tuple(snapshot["file_ids"]),
+                creation_mode=_SELECTED_HEATMAP_MODE_SINGLE,
+                neuron_set=snapshot,
+            )
+        ])
+
     @staticmethod
     def _individual_heatmap_estimated_bytes(
         atlas: BrainGlobeAtlas,
@@ -9082,9 +9200,13 @@ class NeuronViewerWidget(QWidget):
         *,
         creation_mode: str = _SELECTED_HEATMAP_MODE_SINGLE,
         color: tuple[float, float, float, float] | None = None,
+        neuron_set: dict | None = None,
     ):
         """Add one selected-neuron heatmap layer to the viewer."""
-        layer_name = self._selected_neuron_heatmap_layer_name(file_ids)
+        if neuron_set is not None:
+            layer_name = self._unique_layer_name(f"Set: {neuron_set['name']} Heatmap")
+        else:
+            layer_name = self._selected_neuron_heatmap_layer_name(file_ids)
         manual_heatmap_id = layer_name.removesuffix(" Heatmap")
         contrast_limits = _heatmap_contrast_limits(volume)
         if creation_mode == _SELECTED_HEATMAP_MODE_INDIVIDUAL:
@@ -9124,6 +9246,8 @@ class NeuronViewerWidget(QWidget):
         }
         if color is not None:
             metadata["color"] = [float(channel) for channel in color]
+        if neuron_set is not None:
+            metadata["neuron_set"] = neuron_set
         return self.viewer.add_image(
             volume,
             name=layer_name,
@@ -9154,6 +9278,7 @@ class NeuronViewerWidget(QWidget):
             file_ids,
             creation_mode=request.creation_mode,
             color=request.color,
+            **({"neuron_set": request.neuron_set} if getattr(request, "neuron_set", None) else {}),
         )
         completed = getattr(self, "_selected_heatmap_completed_requests", None)
         if completed is not None:

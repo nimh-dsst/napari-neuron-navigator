@@ -1855,6 +1855,105 @@ def _install_fake_colormaps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "napari.utils.colormaps", fake_colormaps)
 
 
+def test_set_heatmap_blur_and_mask_preserve_snapshot(monkeypatch):
+    from napari_neuron_navigator.analysis.set_overlap import compare_set_regions
+
+    _install_fake_colormaps(monkeypatch)
+    monkeypatch.setattr(sys.modules["napari.utils"], "DirectLabelColormap", lambda **kw: kw, raising=False)
+    viewer = _DummyViewer()
+    viewer.add_labels = viewer.add_image
+    widget = types.SimpleNamespace(
+        viewer=viewer, _db=types.SimpleNamespace(parquet_path="test.parquet"),
+        _atlas=types.SimpleNamespace(atlas_name="fake_atlas"),
+        _opacity_slider=_DummyValueControl(50),
+    )
+    for name in ("_current_atlas_name", "_unique_layer_name", "_iter_viewer_layers",
+                 "_source_file_ids_for_layers", "_selected_neuron_heatmap_layer_name"):
+        setattr(widget, name, types.MethodType(getattr(NeuronViewerWidget, name), widget))
+    widget._normalise_layer_file_ids = NeuronViewerWidget._normalise_layer_file_ids
+    snapshot = {"set_id": "live-th", "name": "TH", "rule": {"tag_filter": ["TH"]},
+                "file_ids": ["subject-a/shared", "subject-b/shared"]}
+    volume = np.array([[[0, 2], [4, 0]]], dtype=np.float32)
+    heatmap = NeuronViewerWidget._add_selected_neuron_heatmap_layer(
+        widget, volume, snapshot["file_ids"], neuron_set=snapshot
+    )
+    assert heatmap.name == "Set: TH Heatmap"
+    blurred = NeuronViewerWidget._add_blurred_heatmap_layer(
+        widget, "Blurred TH", volume, [heatmap], sigma=1, merge_mode="separate"
+    )
+    mask = NeuronViewerWidget._add_mask_layer(
+        widget, "TH Region", blurred.data >= 1, [blurred],
+        lower_threshold=1, upper_threshold=None, bounds_source="manual", merge_mode="separate"
+    )
+    assert mask.metadata["neuron_set"] == snapshot
+    assert mask.metadata["sigma"] == 1
+    assert mask.metadata["source_file_ids"] == snapshot["file_ids"]
+    assert compare_set_regions(mask, mask, set_a=snapshot, set_b=snapshot,
+                               atlas_name="fake_atlas")["jaccard"] == 1
+
+
+def test_set_intersection_layer_retains_both_sources_and_supports_queries(monkeypatch):
+    _install_fake_colormaps(monkeypatch)
+    monkeypatch.setattr(
+        sys.modules["napari.utils"], "DirectLabelColormap", lambda **kw: kw, raising=False
+    )
+    viewer = _DummyViewer()
+    viewer.add_labels = MagicMock(side_effect=viewer.add_image)
+    widget = types.SimpleNamespace(
+        viewer=viewer, _atlas=types.SimpleNamespace(atlas_name="fake_atlas"),
+        _opacity_slider=_DummyValueControl(50), _refresh_mask_layer_options=MagicMock(),
+    )
+    for name in ("_current_atlas_name", "_unique_layer_name", "_iter_viewer_layers",
+                 "_source_file_ids_for_layers"):
+        setattr(widget, name, types.MethodType(getattr(NeuronViewerWidget, name), widget))
+    widget._normalise_layer_file_ids = NeuronViewerWidget._normalise_layer_file_ids
+    sources = [
+        types.SimpleNamespace(
+            name=f"Mask {name}", scale=(2, 3, 4), translate=(5, 6, 7),
+            rotate=np.eye(3), shear=(0, 0, 0), affine=np.eye(4),
+            metadata={"mask_query_source": True, "atlas_name": "fake_atlas",
+                      "source_file_ids": [f"{name}/shared"],
+                      "neuron_set": {"set_id": name, "file_ids": [f"{name}/shared"]},
+                      "sigma": 1, "lower_threshold": 0.25},
+        ) for name in ("a", "b")
+    ]
+    data = np.array([[[0, 1], [0, 0]]], dtype=np.uint8)
+    layer = NeuronViewerWidget._add_set_intersection_mask(widget, data, sources)
+    np.testing.assert_array_equal(layer.data, data)
+    assert layer.metadata["mask_operation"] == "intersection"
+    assert layer.metadata["source_file_ids"] == ["a/shared", "b/shared"]
+    assert layer.metadata["query_excluded_file_ids"] == ["a/shared", "b/shared"]
+    assert "neuron_set" not in layer.metadata
+    assert layer.metadata["source_masks"][0]["metadata"] == sources[0].metadata
+    assert layer.metadata["source_masks"][1]["metadata"] == sources[1].metadata
+    kwargs = viewer.add_labels.call_args.kwargs
+    assert kwargs["scale"] == (2, 3, 4)
+    assert kwargs["translate"] == (5, 6, 7)
+    np.testing.assert_array_equal(kwargs["rotate"], np.eye(3))
+    np.testing.assert_array_equal(kwargs["affine"], np.eye(4))
+    assert NeuronViewerWidget._generated_mask_layers(widget) == [layer]
+    widget._refresh_mask_layer_options.assert_called_once_with()
+    sources[0].metadata["lower_threshold"] = 5
+    assert layer.metadata["source_masks"][0]["metadata"]["lower_threshold"] == 0.25
+    second = NeuronViewerWidget._add_set_intersection_mask(widget, data, sources)
+    assert second.name != layer.name
+    assert viewer.layers == [layer, second]
+
+
+def test_set_heatmap_request_uses_all_members_independently_of_selection():
+    snapshot = {"set_id": "set", "name": "TH", "file_ids": ["a/shared", "b/shared"]}
+    widget = types.SimpleNamespace(
+        _db=object(), _atlas=object(),
+        _selected_heatmap_running=lambda: False, _search_heatmap_running=lambda: False,
+        _neuron_table=types.SimpleNamespace(_sets_panel=types.SimpleNamespace(status=_DummyLabel())),
+        _start_selected_neuron_heatmap_requests=MagicMock(),
+    )
+    NeuronViewerWidget._create_neuron_set_heatmap(widget, snapshot)
+    request = widget._start_selected_neuron_heatmap_requests.call_args.args[0][0]
+    assert request.file_ids == ("a/shared", "b/shared")
+    assert request.neuron_set == snapshot
+
+
 def _bind_region_isolation_methods(widget) -> None:
     for method_name in (
         "_current_region_isolation_create_mode",

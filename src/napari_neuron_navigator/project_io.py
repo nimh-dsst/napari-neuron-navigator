@@ -1030,6 +1030,8 @@ def _layer_display_metadata(layer: Any) -> dict[str, Any]:
         "opacity",
         "scale",
         "translate",
+        "rotate",
+        "shear",
         "blending",
         "rendering",
         "gamma",
@@ -1038,6 +1040,10 @@ def _layer_display_metadata(layer: Any) -> dict[str, Any]:
     ):
         if hasattr(layer, attr_name):
             display[attr_name] = getattr(layer, attr_name)
+
+    affine = getattr(layer, "affine", None)
+    if affine is not None:
+        display["affine"] = getattr(affine, "affine_matrix", affine)
 
     colormap = getattr(layer, "colormap", None)
     if colormap is not None:

@@ -163,6 +163,7 @@ def annotation_matches(
     tag_filter: str | Iterable[str] | None = None,
     tag_match: str = "all",
     tag_count: str = "any",
+    excluded_tags: Iterable[str] = (),
 ) -> bool:
     """Match exact annotations with any/all/exact tags and optional cardinality.
 
@@ -176,6 +177,8 @@ def annotation_matches(
     if label_filter is not None and label != label_filter:
         return False
     values = set(tags)
+    if values.intersection(excluded_tags):
+        return False
     if tag_count == "single" and len(values) != 1:
         return False
     if tag_count == "multiple" and len(values) < 2:

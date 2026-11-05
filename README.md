@@ -155,6 +155,26 @@ propagate through the existing neuron rendering controls. Save a project or
 enhanced Parquet to retain tag edits and colors.
 See [UC-026](USE_CASES.md#uc-026-filter-data-rows-by-labels-and-tags).
 
+**Data → Table view: Sets** saves named, live cohorts from the Label/Tag filters.
+Use all/any/exact tag matching and **Exclude tags** to define intersections,
+unions, or differences of query-generated tags. Counts and membership update
+when annotations or the Data cohort change. **Show Members** selects a set for
+existing Selected rows analyses; **Create Set Heatmap** uses its entire current
+membership. Rules persist in projects and enhanced Parquet files.
+
+To compare two sets, create each heatmap, blur it in **Tools**, then threshold
+each blurred layer separately in **Histogram → Mask Creation**. In **Tools →
+Neuron Set Overlap**, choose the sets and their masks, then **Compare Sets**.
+Results include shared neurons, intersecting voxels, union, exclusive members,
+directional coverage, Jaccard, and Dice. Membership and spatial overlap are
+reported separately. Spatial comparisons reject changed source membership,
+different atlases, or mismatched voxel grids/transforms; recreate outdated
+heatmaps and masks. Sigma and thresholds are shown with the result.
+**Create Intersection Mask** adds a separate binary mask containing only the
+voxels shared by the selected regions. It can be used in Regions mask queries
+and saved in a project with both source masks' provenance.
+See [UC-027](USE_CASES.md#uc-027-define-live-neuron-sets-and-compare-their-spatial-regions).
+
 Compound queries read a compact `source.region_profile.parquet` sidecar. Use
 **Build Regional Profile** in the editor when a compatible sidecar is missing;
 construction is cancellable and runs in the background. The sidecar is

@@ -791,6 +791,14 @@ def test_neuron_table_focused_views_show_the_requested_columns() -> None:
             "Voxel Correlation 1 (active)",
             "Color",
         ],
+        "sets": [
+            "Neuron Name",
+            "Label",
+            "Tags",
+            "Soma Location 1",
+            "Voxel Correlation 1 (active)",
+            "Color",
+        ],
         "full": [
             "Vis",
             "Added",
@@ -808,7 +816,7 @@ def test_neuron_table_focused_views_show_the_requested_columns() -> None:
 
     assert [
         definition[0] for definition in module._TABLE_VIEW_DEFINITIONS.values()
-    ] == ["Default", "Notes", "Visibility", "Label", "Full"]
+    ] == ["Default", "Notes", "Visibility", "Label", "Sets", "Full"]
     for view_key, expected in expected_headers.items():
         widget._current_table_view = view_key
         widget._apply_table_view()
