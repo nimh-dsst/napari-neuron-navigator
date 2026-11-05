@@ -1,4 +1,4 @@
-"""Qt editor for per-region clustering include and exclude rules."""
+"""Shared atlas include/exclude picker with optional clustering rule controls."""
 
 from __future__ import annotations
 
@@ -56,9 +56,13 @@ class RegionFilterEditorWidget(QWidget):
         self,
         *,
         node_types: Iterable[int] = (NodeType.SOMA,),
+        anatomical_exclusions_only: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # Regional summaries can exclude whole atlas buckets, but cannot apply
+        # spatial dilation or soma eligibility to already aggregated data.
+        self._anatomical_exclusions_only = bool(anatomical_exclusions_only)
         self._node_types = tuple(sorted({int(value) for value in node_types}))
         if NodeType.SOMA not in self._node_types:
             self._node_types = (NodeType.SOMA, *self._node_types)
@@ -88,7 +92,14 @@ class RegionFilterEditorWidget(QWidget):
         self.include_table = None
         self.exclude_table = None
 
-        if QTabWidget is None:
+        if self._anatomical_exclusions_only:
+            self.include_selector.setParent(self)
+            self.include_selector.hide()
+            for spin in (self.include_default_dilation, self.exclude_default_dilation):
+                spin.setParent(self)
+                spin.hide()
+            layout.addWidget(self._build_tab(excluded=True))
+        elif QTabWidget is None:
             layout.addWidget(QLabel("Include regions"))
             layout.addWidget(self.include_selector)
             layout.addWidget(QLabel("Exclude regions"))
@@ -126,13 +137,25 @@ class RegionFilterEditorWidget(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Default dilation for new regions:"))
-        row.addWidget(
-            self.exclude_default_dilation if excluded else self.include_default_dilation
-        )
-        layout.addLayout(row)
+        if not self._anatomical_exclusions_only:
+            row = QHBoxLayout()
+            row.addWidget(QLabel("Default dilation for new regions:"))
+            row.addWidget(
+                self.exclude_default_dilation
+                if excluded
+                else self.include_default_dilation
+            )
+            layout.addLayout(row)
         layout.addWidget(self.exclude_selector if excluded else self.include_selector)
+
+        if self._anatomical_exclusions_only:
+            note = QLabel(
+                "Excluded regions include their descendants. Exclusions remove "
+                "regional contributions; the selected cohort stays unchanged."
+            )
+            note.setWordWrap(True)
+            layout.addWidget(note)
+            return page
 
         table = QTableWidget()
         headers = (
@@ -218,6 +241,10 @@ class RegionFilterEditorWidget(QWidget):
         finally:
             self._syncing = False
         self._rebuild_tables()
+
+    def excluded_region_ids(self) -> tuple[int, ...]:
+        """Return explicitly selected exclusion IDs; descendants resolve later."""
+        return tuple(sorted(self._exclude_settings))
 
     def _on_selection_changed(self, excluded: bool) -> None:
         if self._syncing:

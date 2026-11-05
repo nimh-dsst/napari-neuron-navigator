@@ -54,6 +54,7 @@ def _import_editor_module():
         "QGroupBox",
         "QHBoxLayout",
         "QLabel",
+        "QLineEdit",
         "QProgressBar",
         "QPushButton",
         "QVBoxLayout",

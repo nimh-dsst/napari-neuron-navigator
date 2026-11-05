@@ -11,12 +11,13 @@ Provides an interactive table for viewing and controlling neurons:
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
 
-from qtpy.QtCore import QItemSelection, QItemSelectionModel, Qt, Signal
+from qtpy.QtCore import QItemSelection, QItemSelectionModel, Qt, QTimer, Signal
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QAbstractItemView,
@@ -34,12 +35,14 @@ from qtpy.QtWidgets import (
 )
 
 from ..cluster_assignments import ClusterAssignmentStore
-from ..neuron_palette import neuron_palette
+from ..neuron_palette import MAX_DISTINCT_COLORS, neuron_palette
+from ..neuron_sets import AnnotationRule, NeuronSetStore
 from ..neuron_table_ops import (
     GRAY_RGBA,
     ClusterFilterSelection,
     NeuronTableSummary,
     added_flags,
+    annotation_matches,
     cluster_filter_matches,
     cluster_ids_available,
     cluster_sort_value,
@@ -47,8 +50,12 @@ from ..neuron_table_ops import (
     label_sort_key,
     recolor_cluster_distinct,
     summarize_neuron_table,
+    tag_combination_colors,
     visibility_for_selected_cluster,
 )
+from .collapsible_section import CollapsibleSection
+from .neuron_sets import NeuronSetsWidget
+from .tag_selector import TagSelector
 
 if TYPE_CHECKING:
     from ..analysis.clustering import ClusterResult
@@ -103,6 +110,11 @@ _TABLE_VIEW_DEFINITIONS = {
     "label": (
         "Label",
         frozenset({COL_NEURON_ID, COL_LABEL, COL_GROUP, COL_TAGS}),
+        True,
+    ),
+    "sets": (
+        "Sets",
+        frozenset({COL_NEURON_ID, COL_LABEL, COL_TAGS}),
         True,
     ),
     "full": (
@@ -265,6 +277,7 @@ class NeuronMetadataUpdate:
     group: str | None = None
     tags: tuple[str, ...] = ()
     replace_tag_prefix: str | None = None
+    remove_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -300,6 +313,8 @@ class NeuronTableWidget(QWidget):
     visibility_changed = Signal(dict)
     selection_changed = Signal(list)
     state_changed = Signal()
+    set_heatmap_requested = Signal(object)
+    set_members_shown = Signal(list)
 
     def __init__(
         self,
@@ -319,7 +334,21 @@ class NeuronTableWidget(QWidget):
         )
         self._cluster_column_by_id: dict[str, int] = {}
         self._current_table_view = _DEFAULT_TABLE_VIEW
+        self._filter_cluster_selection = ClusterFilterSelection()
+        self._filter_heatmap_file_ids = None
+        self._deleted_tags_undo = {}
+        self.neuron_sets = NeuronSetStore()
         self._setup_ui()
+        # Batch row/cell notifications so loading a large cohort rebuilds the
+        # annotation catalog once, after the bulk update reaches the event loop.
+        self._annotation_filter_timer = QTimer(self)
+        self._annotation_filter_timer.setSingleShot(True)
+        self._annotation_filter_timer.timeout.connect(self._refresh_annotation_filters)
+        self.state_changed.connect(lambda: self._annotation_filter_timer.start(0))
+        self.selection_changed.connect(self._update_tag_action_controls)
+        self._table.horizontalHeader().sortIndicatorChanged.connect(
+            lambda *_args: self._annotation_filter_timer.start(0)
+        )
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -338,6 +367,123 @@ class NeuronTableWidget(QWidget):
         view_row.addWidget(self._table_view_combo, 1)
         layout.addLayout(view_row)
 
+        filter_row = QHBoxLayout()
+        self.label_filter_combo = QComboBox()
+        self.tag_filter_combo = TagSelector()
+        for title, combo in (
+            ("Label", self.label_filter_combo),
+            ("Tag", self.tag_filter_combo),
+        ):
+            filter_row.addWidget(QLabel(f"{title}:"))
+            if title == "Label":
+                combo.addItem("All labels", None)
+                combo.addItem("No label", "")
+                combo.currentIndexChanged.connect(self._apply_annotation_filters)
+                combo.setToolTip(
+                    "Match an exact Label, combined with the other row filters."
+                )
+            else:
+                combo.selection_changed.connect(self._apply_annotation_filters)
+            filter_row.addWidget(combo, 1)
+        clear = QPushButton("Clear Label/Tag Filters")
+        clear.clicked.connect(self.clear_annotation_filters)
+        filter_row.addWidget(clear)
+        layout.addLayout(filter_row)
+        tag_match_row = QHBoxLayout()
+        tag_match_row.addWidget(QLabel("Tag matching:"))
+        self.tag_match_combo = QComboBox()
+        for title, value in (
+            ("All checked tags", "all"),
+            ("Any checked tag", "any"),
+            ("Exactly these tags", "exact"),
+        ):
+            self.tag_match_combo.addItem(title, value)
+        self.tag_match_combo.currentIndexChanged.connect(self._apply_annotation_filters)
+        tag_match_row.addWidget(self.tag_match_combo, 1)
+        tag_match_row.addWidget(QLabel("Tag count:"))
+        self.tag_count_combo = QComboBox()
+        for title, value in (
+            ("Any number", "any"),
+            ("Exactly one tag", "single"),
+            ("Two or more tags", "multiple"),
+        ):
+            self.tag_count_combo.addItem(title, value)
+        self.tag_count_combo.currentIndexChanged.connect(self._apply_annotation_filters)
+        tag_match_row.addWidget(self.tag_count_combo, 1)
+        layout.addLayout(tag_match_row)
+        exclude_row = QHBoxLayout()
+        exclude_row.addWidget(QLabel("Exclude tags:"))
+        self.excluded_tags_combo = TagSelector(
+            all_text="No excluded tags", include_untagged=False
+        )
+        self.excluded_tags_combo.selection_changed.connect(self._apply_annotation_filters)
+        exclude_row.addWidget(self.excluded_tags_combo, 1)
+        exclude_row.addWidget(QLabel("Set:"))
+        self.set_filter_combo = QComboBox()
+        self.set_filter_combo.addItem("All neurons", None)
+        self.set_filter_combo.currentIndexChanged.connect(self._apply_annotation_filters)
+        exclude_row.addWidget(self.set_filter_combo, 1)
+        layout.addLayout(exclude_row)
+        self._sets_panel = NeuronSetsWidget(self)
+        self._sets_panel.changed.connect(self._on_sets_changed)
+        self._sets_panel.heatmap_requested.connect(self.set_heatmap_requested.emit)
+        self._sets_panel.setVisible(False)
+        layout.addWidget(self._sets_panel)
+        self._filter_summary_label = QLabel("Showing 0 of 0 neurons")
+        layout.addWidget(self._filter_summary_label)
+
+        self.tag_tools = CollapsibleSection("Tag Tools", expanded=False)
+        tools_layout = self.tag_tools.content_layout()
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(QLabel("Tag action scope:"))
+        self.tag_action_scope = QComboBox()
+        self.tag_action_scope.addItem("Displayed rows", "displayed")
+        self.tag_action_scope.addItem("Selected rows", "selected")
+        self.tag_action_scope.addItem("Entire table", "table")
+        self.tag_action_scope.currentIndexChanged.connect(
+            self._update_tag_action_controls
+        )
+        scope_row.addWidget(self.tag_action_scope, 1)
+        tools_layout.addLayout(scope_row)
+        action_row = QHBoxLayout()
+        self.delete_tags_button = QPushButton("Delete Checked Tags")
+        self.delete_tags_button.clicked.connect(self._delete_checked_tags)
+        action_row.addWidget(self.delete_tags_button)
+        self.undo_tags_button = QPushButton("Undo Tag Deletion")
+        self.undo_tags_button.clicked.connect(self._undo_tag_deletion)
+        action_row.addWidget(self.undo_tags_button)
+        self.color_tags_button = QPushButton("Color by Tag Combination")
+        self.color_tags_button.clicked.connect(self._color_by_tags)
+        action_row.addWidget(self.color_tags_button)
+        self.set_tag_color_button = QPushButton("Set Color...")
+        self.set_tag_color_button.clicked.connect(self._set_tag_scope_color)
+        action_row.addWidget(self.set_tag_color_button)
+        tools_layout.addLayout(action_row)
+        hint = QLabel(
+            "Check tag names above to delete only those tags. Automatic colors use "
+            "each neuron's complete tag combination; untagged neurons are gray. "
+            "Set Color applies one chosen color to the action scope."
+        )
+        hint.setWordWrap(True)
+        tools_layout.addWidget(hint)
+        self._tag_action_preview = QLabel()
+        self._tag_action_preview.setWordWrap(True)
+        tools_layout.addWidget(self._tag_action_preview)
+        self._tag_action_status = QLabel()
+        self._tag_action_status.setWordWrap(True)
+        tools_layout.addWidget(self._tag_action_status)
+        self._tag_color_legend = QTableWidget(0, 3)
+        self._tag_color_legend.setHorizontalHeaderLabels(
+            ["Last applied tag combination", "Neurons", "Color"]
+        )
+        self._tag_color_legend.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tag_color_legend.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._tag_color_legend.setVisible(False)
+        tools_layout.addWidget(self._tag_color_legend)
+        layout.addWidget(self.tag_tools)
+
         self._table = QTableWidget(0, COL_COLOR + 1)
         self._adaptive_height_enabled = True
         self._table_maximum_height = self._table.maximumHeight()
@@ -355,6 +501,7 @@ class NeuronTableWidget(QWidget):
 
         layout.addWidget(self._table)
         self._refresh_preferred_height(visible_row_count=0)
+        self._update_tag_action_controls()
 
     def _refresh_preferred_height(
         self,
@@ -484,6 +631,140 @@ class NeuronTableWidget(QWidget):
         self._current_table_view = str(view_key)
         self._apply_table_view()
 
+    def show_metadata_columns(self) -> None:
+        """Reveal Labels, Groups and Tags, retaining an existing Full view."""
+        if self._current_table_view not in {"label", "full"}:
+            self._table_view_combo.setCurrentIndex(
+                self._table_view_combo.findData("label")
+            )
+
+    def _refresh_annotation_filters(self) -> None:
+        """Refresh from the whole cohort, retaining active zero-match choices."""
+        labels = Counter(entry.label for entry in self._entries.values() if entry.label)
+        tags = Counter(
+            tag for entry in self._entries.values() for tag in set(entry.tags)
+        )
+        for combo, counts, all_text, empty_text, empty_count in (
+            (
+                self.label_filter_combo,
+                labels,
+                "All labels",
+                "No label",
+                sum(not entry.label for entry in self._entries.values()),
+            ),
+        ):
+            previous = combo.currentData()
+            if previous:
+                counts.setdefault(previous, 0)
+            blocked = combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItem(all_text, None)
+                combo.addItem(f"{empty_text} ({empty_count:,})", "")
+                for value in sorted(counts, key=label_sort_key):
+                    combo.addItem(f"{value} ({counts[value]:,})", value)
+                combo.setCurrentIndex(max(0, combo.findData(previous)))
+            finally:
+                combo.blockSignals(blocked)
+        self.tag_filter_combo.set_tag_options(
+            tags, sum(not entry.tags for entry in self._entries.values())
+        )
+        self.excluded_tags_combo.set_tag_options(tags, 0)
+        self._refresh_set_controls()
+        self._apply_annotation_filters()
+
+    def annotation_rule(self) -> AnnotationRule:
+        """Capture annotations only; row filters never redefine a live set."""
+        return AnnotationRule(
+            label_filter=self.label_filter_combo.currentData(),
+            tag_filter=self.tag_filter_combo.tag_filter(),
+            tag_match=self.tag_match_combo.currentData(),
+            tag_count=self.tag_count_combo.currentData(),
+            excluded_tags=self.excluded_tags_combo.selected_tags(),
+        )
+
+    def set_annotation_rule(self, rule: AnnotationRule) -> None:
+        self.clear_annotation_filters()
+        self._refresh_annotation_filters()
+        self.label_filter_combo.setCurrentIndex(
+            self.label_filter_combo.findData(rule.label_filter)
+        )
+        if self.label_filter_combo.currentIndex() < 0:
+            self.label_filter_combo.addItem(rule.label_filter, rule.label_filter)
+            self.label_filter_combo.setCurrentIndex(self.label_filter_combo.count() - 1)
+        self.tag_filter_combo.set_selection(rule.tag_filter)
+        self.excluded_tags_combo.set_selection(rule.excluded_tags)
+        self.tag_match_combo.setCurrentIndex(self.tag_match_combo.findData(rule.tag_match))
+        self.tag_count_combo.setCurrentIndex(self.tag_count_combo.findData(rule.tag_count))
+        self._apply_annotation_filters()
+
+    def _refresh_set_controls(self) -> None:
+        if "_sets_panel" not in self.__dict__:
+            return
+        self._sets_panel.refresh()
+        previous = self.set_filter_combo.currentData()
+        blocked = self.set_filter_combo.blockSignals(True)
+        try:
+            self.set_filter_combo.clear()
+            self.set_filter_combo.addItem("All neurons", None)
+            for item in self.neuron_sets.sets():
+                count = len(item.rule.members(self._entries))
+                self.set_filter_combo.addItem(f"{item.name} ({count:,})", item.set_id)
+            self.set_filter_combo.setCurrentIndex(
+                max(0, self.set_filter_combo.findData(previous))
+            )
+        finally:
+            self.set_filter_combo.blockSignals(blocked)
+
+    def _on_sets_changed(self) -> None:
+        self._refresh_set_controls()
+        self._apply_annotation_filters()
+        self.state_changed.emit()
+
+    def show_set_members(self, set_id) -> None:
+        """Select the live set for existing Selected rows analysis actions."""
+        self.clear_annotation_filters()
+        self._filter_cluster_selection = ClusterFilterSelection()
+        self._filter_heatmap_file_ids = None
+        self.set_filter_combo.setCurrentIndex(self.set_filter_combo.findData(set_id))
+        self._apply_annotation_filters()
+        self.select_file_ids(self.displayed_file_ids())
+        self.set_members_shown.emit(self.displayed_file_ids())
+
+    def displayed_file_ids(self):
+        return [file_id for row, file_id in self._iter_rows_with_file_ids()
+                if not self._table.isRowHidden(row)]
+
+    def load_neuron_sets(self, state, *, merge=False):
+        if "neuron_sets" not in self.__dict__:
+            return
+        self.neuron_sets.load_state(state, merge=merge)
+        self._refresh_set_controls()
+        self._apply_annotation_filters()
+        self.state_changed.emit()
+
+    def _apply_annotation_filters(self, *_args) -> None:
+        self.apply_filters(
+            self._filter_cluster_selection, self._filter_heatmap_file_ids
+        )
+
+    def clear_annotation_filters(self) -> None:
+        """Clear the Label/Tag choices while retaining other row filters."""
+        for name in ("label_filter_combo", "tag_match_combo", "tag_count_combo"):
+            combo = self.__dict__.get(name)
+            if combo is not None:
+                blocked = combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(blocked)
+        tag_combo = self.__dict__.get("tag_filter_combo")
+        if tag_combo is not None:
+            tag_combo.set_selection(None, emit=False)
+        excluded = self.__dict__.get("excluded_tags_combo")
+        if excluded is not None:
+            excluded.set_selection(None, emit=False)
+        if "label_filter_combo" in self.__dict__:
+            self._apply_annotation_filters()
+
     def _apply_table_view(self) -> None:
         """Show only the columns included in the current focused view."""
         set_column_hidden = getattr(self._table, "setColumnHidden", None)
@@ -494,6 +775,9 @@ class NeuronTableWidget(QWidget):
             "_current_table_view",
             _DEFAULT_TABLE_VIEW,
         )
+        panel = self.__dict__.get("_sets_panel")
+        if panel is not None:
+            panel.setVisible(view_key == "sets")
         definition = _TABLE_VIEW_DEFINITIONS.get(
             view_key,
             _TABLE_VIEW_DEFINITIONS[_DEFAULT_TABLE_VIEW],
@@ -517,6 +801,8 @@ class NeuronTableWidget(QWidget):
         file_ids : list[object]
             Per-neuron ``file_id`` values to show as neuron names.
         """
+        self._reset_tag_actions()
+        self.clear_annotation_filters()
         sorting_enabled = self._table.isSortingEnabled()
         self._table.setSortingEnabled(False)
 
@@ -910,6 +1196,8 @@ class NeuronTableWidget(QWidget):
         }
         if "_assignment_store" in self.__dict__:
             state["cluster_assignments"] = self.assignment_state()
+        if "neuron_sets" in self.__dict__:
+            state["neuron_sets"] = self.neuron_sets.to_state()
         return state
 
     def assignment_state(self) -> dict[str, object]:
@@ -921,6 +1209,7 @@ class NeuronTableWidget(QWidget):
 
     def import_state(self, state: Mapping[str, object]) -> None:
         """Replace table contents from a previously exported state payload."""
+        self._reset_tag_actions()
         raw_entries = state.get("entries", [])
         if isinstance(raw_entries, Mapping):
             iterable = raw_entries.values()
@@ -936,6 +1225,7 @@ class NeuronTableWidget(QWidget):
         ]
         self._load_assignment_state(state, entries)
         self._replace_entries(entries)
+        self.load_neuron_sets(state.get("neuron_sets", {}))
         selected = state.get("selected_file_ids", [])
         if isinstance(selected, (str, bytes)):
             selected_file_ids = [selected]
@@ -1065,6 +1355,8 @@ class NeuronTableWidget(QWidget):
 
     def clear(self) -> None:
         """Clear all table rows and tracked neuron state."""
+        self._reset_tag_actions()
+        self.clear_annotation_filters()
         sorting_enabled = self._table.isSortingEnabled()
         signals_blocked = self._table.blockSignals(True)
         self._table.setSortingEnabled(False)
@@ -1116,11 +1408,7 @@ class NeuronTableWidget(QWidget):
         palette = neuron_palette(len(existing_entries) + len(added_ids))
         new_entries: list[NeuronEntry] = []
         for offset, file_id in enumerate(added_ids, start=len(existing_entries)):
-            color = (
-                palette[offset]
-                if offset < len(palette)
-                else list(GRAY_RGBA)
-            )
+            color = palette[offset] if offset < len(palette) else list(GRAY_RGBA)
             new_entries.append(NeuronEntry(file_id=file_id, color=list(color)))
 
         self._replace_entries([*existing_entries, *new_entries])
@@ -1169,6 +1457,9 @@ class NeuronTableWidget(QWidget):
                         for tag in retained_tags
                         if not str(tag).startswith(update.replace_tag_prefix)
                     ]
+                if update.remove_tags:
+                    removed = set(update.remove_tags)
+                    retained_tags = [tag for tag in retained_tags if tag not in removed]
                 entry.tags = tuple(
                     dict.fromkeys(
                         str(tag).strip()
@@ -1307,7 +1598,28 @@ class NeuronTableWidget(QWidget):
         selection: ClusterFilterSelection | int | None,
         heatmap_file_ids: set[object] | list[object] | tuple[object, ...] | None = None,
     ) -> None:
-        """Hide rows outside the combined cluster and manual heatmap filters."""
+        """Intersect cluster, manual heatmap, Label, and Tag row filters."""
+        self._filter_cluster_selection = selection
+        self._filter_heatmap_file_ids = (
+            None if heatmap_file_ids is None else tuple(heatmap_file_ids)
+        )
+        before = self.get_selected_file_ids()
+        label_combo = self.__dict__.get("label_filter_combo")
+        tag_combo = self.__dict__.get("tag_filter_combo")
+        label_filter = None if label_combo is None else label_combo.currentData()
+        tag_filter = None if tag_combo is None else tag_combo.tag_filter()
+        match_combo = self.__dict__.get("tag_match_combo")
+        count_combo = self.__dict__.get("tag_count_combo")
+        tag_match = "all" if match_combo is None else match_combo.currentData()
+        tag_count = "any" if count_combo is None else count_combo.currentData()
+        excluded_combo = self.__dict__.get("excluded_tags_combo")
+        excluded_tags = () if excluded_combo is None else excluded_combo.selected_tags()
+        set_combo = self.__dict__.get("set_filter_combo")
+        store = self.__dict__.get("neuron_sets")
+        active_set = store.get(set_combo.currentData()) if store and set_combo else None
+        set_members = (
+            set(active_set.rule.members(self._entries)) if active_set else None
+        )
         cluster_map = self.get_cluster_map()
         cluster_matches = cluster_filter_matches(cluster_map, selection)
         if heatmap_file_ids is None:
@@ -1317,13 +1629,165 @@ class NeuronTableWidget(QWidget):
 
         visible_row_count = 0
         for row, file_id in self._iter_rows_with_file_ids():
-            visible = cluster_matches.get(file_id, True) and heatmap_matches.get(
-                file_id,
-                False,
+            entry = self._entries[file_id]
+            visible = (
+                cluster_matches.get(file_id, True)
+                and heatmap_matches.get(file_id, False)
+                and (set_members is None or str(file_id) in set_members)
+                and annotation_matches(
+                    entry.label,
+                    entry.tags,
+                    label_filter=label_filter,
+                    tag_filter=tag_filter,
+                    tag_match=tag_match,
+                    tag_count=tag_count,
+                    excluded_tags=excluded_tags,
+                )
             )
             self._table.setRowHidden(row, not visible)
             visible_row_count += int(visible)
         self._refresh_preferred_height(visible_row_count=visible_row_count)
+        summary = self.__dict__.get("_filter_summary_label")
+        if summary is not None:
+            summary.setText(
+                f"Showing {visible_row_count:,} of {len(self._entries):,} neurons"
+            )
+        after = self.get_selected_file_ids()
+        if before != after:
+            self.selection_changed.emit(after)
+        self._update_tag_action_controls()
+
+    def _tag_action_file_ids(self):
+        scope = self.tag_action_scope.currentData()
+        if scope == "selected":
+            return self.get_selected_file_ids()
+        if scope == "table":
+            return list(self._entries)
+        return [
+            file_id
+            for row, file_id in self._iter_rows_with_file_ids()
+            if not self._table.isRowHidden(row)
+        ]
+
+    def _update_tag_action_controls(self, *_args):
+        if "delete_tags_button" not in self.__dict__:
+            return
+        ids = self._tag_action_file_ids()
+        tags = set(self.tag_filter_combo.selected_tags())
+        affected = [
+            file_id for file_id in ids if tags.intersection(self._entries[file_id].tags)
+        ]
+        self.delete_tags_button.setEnabled(bool(affected))
+        self.undo_tags_button.setEnabled(
+            any(file_id in self._entries for file_id in self._deleted_tags_undo)
+        )
+        self.color_tags_button.setEnabled(bool(ids))
+        self.set_tag_color_button.setEnabled(bool(ids))
+        self._tag_action_preview.setText(
+            f"Scope: {len(ids):,} neurons. {len(tags):,} checked tag(s); "
+            f"deletion affects {len(affected):,} neurons."
+        )
+
+    def _reset_tag_actions(self):
+        self._deleted_tags_undo = {}
+        legend = self.__dict__.get("_tag_color_legend")
+        if legend is not None:
+            legend.setVisible(False)
+            legend.setRowCount(0)
+            self._tag_action_status.clear()
+
+    def _delete_checked_tags(self):
+        selected = set(self.tag_filter_combo.selected_tags())
+        removed = {
+            file_id: tuple(
+                tag for tag in self._entries[file_id].tags if tag in selected
+            )
+            for file_id in self._tag_action_file_ids()
+        }
+        removed = {file_id: tags for file_id, tags in removed.items() if tags}
+        if not removed:
+            self._tag_action_status.setText(
+                "Check tag names and choose a scope with matching neurons."
+            )
+            return
+        self._deleted_tags_undo = removed
+        self.apply_metadata_updates(
+            {
+                file_id: NeuronMetadataUpdate(remove_tags=tags)
+                for file_id, tags in removed.items()
+            }
+        )
+        self.show_metadata_columns()
+        self._tag_action_status.setText(
+            f"Deleted {sum(map(len, removed.values())):,} tag assignment(s) from "
+            f"{len(removed):,} neurons. Undo Tag Deletion restores these tags."
+        )
+        self._refresh_annotation_filters()
+
+    def _undo_tag_deletion(self):
+        restored = {
+            file_id: NeuronMetadataUpdate(tags=tags)
+            for file_id, tags in self._deleted_tags_undo.items()
+            if file_id in self._entries
+        }
+        self.apply_metadata_updates(restored)
+        self._deleted_tags_undo = {}
+        self._tag_action_status.setText(
+            f"Restored deleted tags on {len(restored):,} neurons."
+        )
+        self._refresh_annotation_filters()
+
+    def _color_by_tags(self):
+        ids = self._tag_action_file_ids()
+        if not ids:
+            return
+        colors, legend = tag_combination_colors(
+            {file_id: entry.tags for file_id, entry in self._entries.items()}
+        )
+        self.update_colors({file_id: colors[file_id] for file_id in ids})
+        counts = Counter(
+            tuple(sorted(set(self._entries[file_id].tags), key=label_sort_key))
+            for file_id in ids
+        )
+        self._tag_color_legend.setRowCount(len(counts))
+        for row, group in enumerate(group for group in legend if group in counts):
+            self._tag_color_legend.setItem(
+                row, 0, QTableWidgetItem(" + ".join(group) if group else "No tags")
+            )
+            self._tag_color_legend.setItem(row, 1, QTableWidgetItem(str(counts[group])))
+            swatch = QTableWidgetItem()
+            swatch.setBackground(QColor.fromRgbF(*legend[group]))
+            self._tag_color_legend.setItem(row, 2, swatch)
+        self._tag_color_legend.setVisible(True)
+        self._tag_action_status.setText(
+            f"Applied tag-combination colors to {len(ids):,} neurons. Reapply after changing tags."
+            + (
+                f" The palette repeats beyond {MAX_DISTINCT_COLORS} tagged combinations."
+                if len([group for group in legend if group]) > MAX_DISTINCT_COLORS
+                else ""
+            )
+        )
+        self.state_changed.emit()
+
+    def _set_tag_scope_color(self):
+        ids = self._tag_action_file_ids()
+        if not ids:
+            return
+        chosen = QColorDialog.getColor(
+            QColor.fromRgbF(*self._entries[ids[0]].color),
+            self,
+            "Choose Color for Tag Action Scope",
+            QColorDialog.ShowAlphaChannel,
+        )
+        if not chosen.isValid():
+            return
+        rgba = [chosen.redF(), chosen.greenF(), chosen.blueF(), chosen.alphaF()]
+        self.update_colors({file_id: rgba for file_id in ids})
+        self._tag_color_legend.setVisible(False)
+        self._tag_action_status.setText(
+            f"Applied the chosen color to {len(ids):,} neurons."
+        )
+        self.state_changed.emit()
 
     def hide_all_not_in_cluster(
         self,

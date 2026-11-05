@@ -1855,6 +1855,105 @@ def _install_fake_colormaps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "napari.utils.colormaps", fake_colormaps)
 
 
+def test_set_heatmap_blur_and_mask_preserve_snapshot(monkeypatch):
+    from napari_neuron_navigator.analysis.set_overlap import compare_set_regions
+
+    _install_fake_colormaps(monkeypatch)
+    monkeypatch.setattr(sys.modules["napari.utils"], "DirectLabelColormap", lambda **kw: kw, raising=False)
+    viewer = _DummyViewer()
+    viewer.add_labels = viewer.add_image
+    widget = types.SimpleNamespace(
+        viewer=viewer, _db=types.SimpleNamespace(parquet_path="test.parquet"),
+        _atlas=types.SimpleNamespace(atlas_name="fake_atlas"),
+        _opacity_slider=_DummyValueControl(50),
+    )
+    for name in ("_current_atlas_name", "_unique_layer_name", "_iter_viewer_layers",
+                 "_source_file_ids_for_layers", "_selected_neuron_heatmap_layer_name"):
+        setattr(widget, name, types.MethodType(getattr(NeuronViewerWidget, name), widget))
+    widget._normalise_layer_file_ids = NeuronViewerWidget._normalise_layer_file_ids
+    snapshot = {"set_id": "live-th", "name": "TH", "rule": {"tag_filter": ["TH"]},
+                "file_ids": ["subject-a/shared", "subject-b/shared"]}
+    volume = np.array([[[0, 2], [4, 0]]], dtype=np.float32)
+    heatmap = NeuronViewerWidget._add_selected_neuron_heatmap_layer(
+        widget, volume, snapshot["file_ids"], neuron_set=snapshot
+    )
+    assert heatmap.name == "Set: TH Heatmap"
+    blurred = NeuronViewerWidget._add_blurred_heatmap_layer(
+        widget, "Blurred TH", volume, [heatmap], sigma=1, merge_mode="separate"
+    )
+    mask = NeuronViewerWidget._add_mask_layer(
+        widget, "TH Region", blurred.data >= 1, [blurred],
+        lower_threshold=1, upper_threshold=None, bounds_source="manual", merge_mode="separate"
+    )
+    assert mask.metadata["neuron_set"] == snapshot
+    assert mask.metadata["sigma"] == 1
+    assert mask.metadata["source_file_ids"] == snapshot["file_ids"]
+    assert compare_set_regions(mask, mask, set_a=snapshot, set_b=snapshot,
+                               atlas_name="fake_atlas")["jaccard"] == 1
+
+
+def test_set_intersection_layer_retains_both_sources_and_supports_queries(monkeypatch):
+    _install_fake_colormaps(monkeypatch)
+    monkeypatch.setattr(
+        sys.modules["napari.utils"], "DirectLabelColormap", lambda **kw: kw, raising=False
+    )
+    viewer = _DummyViewer()
+    viewer.add_labels = MagicMock(side_effect=viewer.add_image)
+    widget = types.SimpleNamespace(
+        viewer=viewer, _atlas=types.SimpleNamespace(atlas_name="fake_atlas"),
+        _opacity_slider=_DummyValueControl(50), _refresh_mask_layer_options=MagicMock(),
+    )
+    for name in ("_current_atlas_name", "_unique_layer_name", "_iter_viewer_layers",
+                 "_source_file_ids_for_layers"):
+        setattr(widget, name, types.MethodType(getattr(NeuronViewerWidget, name), widget))
+    widget._normalise_layer_file_ids = NeuronViewerWidget._normalise_layer_file_ids
+    sources = [
+        types.SimpleNamespace(
+            name=f"Mask {name}", scale=(2, 3, 4), translate=(5, 6, 7),
+            rotate=np.eye(3), shear=(0, 0, 0), affine=np.eye(4),
+            metadata={"mask_query_source": True, "atlas_name": "fake_atlas",
+                      "source_file_ids": [f"{name}/shared"],
+                      "neuron_set": {"set_id": name, "file_ids": [f"{name}/shared"]},
+                      "sigma": 1, "lower_threshold": 0.25},
+        ) for name in ("a", "b")
+    ]
+    data = np.array([[[0, 1], [0, 0]]], dtype=np.uint8)
+    layer = NeuronViewerWidget._add_set_intersection_mask(widget, data, sources)
+    np.testing.assert_array_equal(layer.data, data)
+    assert layer.metadata["mask_operation"] == "intersection"
+    assert layer.metadata["source_file_ids"] == ["a/shared", "b/shared"]
+    assert layer.metadata["query_excluded_file_ids"] == ["a/shared", "b/shared"]
+    assert "neuron_set" not in layer.metadata
+    assert layer.metadata["source_masks"][0]["metadata"] == sources[0].metadata
+    assert layer.metadata["source_masks"][1]["metadata"] == sources[1].metadata
+    kwargs = viewer.add_labels.call_args.kwargs
+    assert kwargs["scale"] == (2, 3, 4)
+    assert kwargs["translate"] == (5, 6, 7)
+    np.testing.assert_array_equal(kwargs["rotate"], np.eye(3))
+    np.testing.assert_array_equal(kwargs["affine"], np.eye(4))
+    assert NeuronViewerWidget._generated_mask_layers(widget) == [layer]
+    widget._refresh_mask_layer_options.assert_called_once_with()
+    sources[0].metadata["lower_threshold"] = 5
+    assert layer.metadata["source_masks"][0]["metadata"]["lower_threshold"] == 0.25
+    second = NeuronViewerWidget._add_set_intersection_mask(widget, data, sources)
+    assert second.name != layer.name
+    assert viewer.layers == [layer, second]
+
+
+def test_set_heatmap_request_uses_all_members_independently_of_selection():
+    snapshot = {"set_id": "set", "name": "TH", "file_ids": ["a/shared", "b/shared"]}
+    widget = types.SimpleNamespace(
+        _db=object(), _atlas=object(),
+        _selected_heatmap_running=lambda: False, _search_heatmap_running=lambda: False,
+        _neuron_table=types.SimpleNamespace(_sets_panel=types.SimpleNamespace(status=_DummyLabel())),
+        _start_selected_neuron_heatmap_requests=MagicMock(),
+    )
+    NeuronViewerWidget._create_neuron_set_heatmap(widget, snapshot)
+    request = widget._start_selected_neuron_heatmap_requests.call_args.args[0][0]
+    assert request.file_ids == ("a/shared", "b/shared")
+    assert request.neuron_set == snapshot
+
+
 def _bind_region_isolation_methods(widget) -> None:
     for method_name in (
         "_current_region_isolation_create_mode",
@@ -3063,6 +3162,18 @@ def test_mask_source_exclusion_defaults_to_enabled_without_checkbox() -> None:
     assert NeuronViewerWidget._mask_source_exclusion_enabled(widget) is True
 
 
+def _start_and_complete_mask_request(widget, result, *, soma_only=False):
+    widget._atlas.resolution = (1, 1, 1)
+    widget._launch_mask_query = MagicMock()
+    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=soma_only)
+    snapshot = widget._launch_mask_query.call_args.args[0]
+    widget._regional_query_snapshot = snapshot
+    widget._set_regional_query_busy = MagicMock()
+    widget._mask_query_is_current = types.MethodType(NeuronViewerWidget._mask_query_is_current, widget)
+    NeuronViewerWidget._on_mask_query_finished(widget, result)
+    return snapshot
+
+
 def test_query_neurons_by_mask_uses_current_layer_data_and_excludes_sources() -> None:
     result = pd.DataFrame(
         {
@@ -3096,22 +3207,17 @@ def test_query_neurons_by_mask_uses_current_layer_data_and_excludes_sources() ->
     )
     _bind_region_query_scope_helpers(widget)
 
-    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=False)
-
-    args, kwargs = db.get_neurons_by_mask.call_args
-    np.testing.assert_array_equal(args[0], mask_data > 0)
-    assert args[1] is widget._atlas
-    assert kwargs == {
-        "soma_only": False,
-        "file_ids": None,
-        "exclude_file_ids": ["n1", "n2"],
-        "node_types": None,
-    }
+    snapshot = _start_and_complete_mask_request(widget, result)
+    db.get_neurons_by_mask.assert_not_called()
+    assert snapshot["layers"][0].data is mask_data
+    assert snapshot["input_file_ids"] is None
+    assert snapshot["exclude_file_ids"] == ("n1", "n2")
+    assert snapshot["node_types"] is None
     widget._populate_neuron_table.assert_called_once_with(
         result,
         preserve_existing=False,
     )
-    assert widget._regions_status_label.text == (
+    assert widget._regions_status_label.text.startswith(
         "Found 1 neuron(s) with any node in 1 selected mask layer(s) "
         "within whole parquet: Mask A; excluded 2 source neurons"
     )
@@ -3153,22 +3259,17 @@ def test_query_neurons_by_mask_soma_uses_soma_only_and_status_text() -> None:
     )
     _bind_region_query_scope_helpers(widget)
 
-    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=True)
-
-    args, kwargs = db.get_neurons_by_mask.call_args
-    np.testing.assert_array_equal(args[0], mask_data > 0)
-    assert args[1] is widget._atlas
-    assert kwargs == {
-        "soma_only": True,
-        "file_ids": None,
-        "exclude_file_ids": None,
-        "node_types": (1,),
-    }
+    snapshot = _start_and_complete_mask_request(widget, result, soma_only=True)
+    db.get_neurons_by_mask.assert_not_called()
+    assert snapshot["layers"][0].data is mask_data
+    assert snapshot["input_file_ids"] is None
+    assert snapshot["exclude_file_ids"] == ()
+    assert snapshot["node_types"] == (1,)
     widget._populate_neuron_table.assert_called_once_with(
         result,
         preserve_existing=False,
     )
-    assert widget._regions_status_label.text == (
+    assert widget._regions_status_label.text.startswith(
         "Found 1 neuron(s) with soma in 1 selected mask layer(s) "
         "within whole parquet: Mask Soma"
     )
@@ -3200,12 +3301,11 @@ def test_query_neurons_by_mask_includes_sources_when_checkbox_unchecked() -> Non
     )
     _bind_region_query_scope_helpers(widget)
 
-    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=False)
-
-    _args, kwargs = db.get_neurons_by_mask.call_args
-    assert kwargs["exclude_file_ids"] is None
-    assert kwargs["node_types"] is None
-    assert widget._regions_status_label.text == (
+    snapshot = _start_and_complete_mask_request(widget, result)
+    db.get_neurons_by_mask.assert_not_called()
+    assert snapshot["exclude_file_ids"] == ()
+    assert snapshot["node_types"] is None
+    assert widget._regions_status_label.text.startswith(
         "Found 2 neuron(s) with any node in 1 selected mask layer(s) "
         "within whole parquet: Mask A"
     )
@@ -3278,7 +3378,7 @@ def test_update_mask_query_summary_handles_empty_selection_and_missing_sources()
     NeuronViewerWidget._update_mask_query_summary(widget)
 
     assert label.text == (
-        "2 generated mask layer(s) available. "
+        "2 mask layer(s) available. "
         "Select mask layers to see source-neuron count."
     )
 
@@ -3290,7 +3390,7 @@ def test_update_mask_query_summary_handles_empty_selection_and_missing_sources()
     widget._generated_mask_layers = lambda: []
     NeuronViewerWidget._update_mask_query_summary(widget)
 
-    assert label.text == "No generated mask layers are available."
+    assert label.text == "No mask layers are available. Load a TIF and click Use Active Layer as Mask."
 
 
 def test_on_region_query_source_changed_uses_named_pages_and_scope_stacks() -> None:

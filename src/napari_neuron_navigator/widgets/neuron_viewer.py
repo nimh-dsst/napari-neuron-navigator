@@ -13,9 +13,11 @@ import colorsys
 import logging
 import sys
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -58,6 +60,7 @@ from ..analysis.mask import (
     otsu_threshold_positive,
     smooth_heatmap_volume,
 )
+from ..analysis.set_overlap import source_set_metadata, validate_spatial_grids
 from ..auto_center import (
     center_to_depth_world,
     compute_center_of_rendered_neurons,
@@ -249,6 +252,7 @@ class _SelectedNeuronHeatmapRequest:
     file_ids: tuple[str, ...]
     creation_mode: str
     color: tuple[float, float, float, float] | None = None
+    neuron_set: dict | None = None
 
 
 def _point_heatmap_color(index: int) -> tuple[float, float, float, float]:
@@ -1188,6 +1192,12 @@ class NeuronViewerWidget(QWidget):
     def _on_neuron_viewer_destroyed(self, *_args) -> None:
         """Release all plugin-owned flatmap viewers during widget teardown."""
         self._restore_3d_display_flip()
+        report = getattr(self, "_region_report", None)
+        if report is not None:
+            report.shutdown()
+        regional = getattr(self, "_regional_clustering", None)
+        if regional is not None:
+            regional.shutdown()
         cancel_profile = getattr(
             getattr(self, "_regional_profile_worker", None),
             "cancel",
@@ -2028,6 +2038,8 @@ class NeuronViewerWidget(QWidget):
         self._neuron_table.colors_changed.connect(self._apply_neuron_colors)
         self._neuron_table.visibility_changed.connect(self._apply_neuron_visibility)
         self._neuron_table.selection_changed.connect(self._highlight_selected_neurons)
+        self._neuron_table.set_heatmap_requested.connect(self._create_neuron_set_heatmap)
+        self._neuron_table.set_members_shown.connect(self._on_neuron_set_members_shown)
         state_changed = getattr(self._neuron_table, "state_changed", None)
         if state_changed is not None:
             state_changed.connect(self._refresh_neuron_table_summary)
@@ -2352,6 +2364,14 @@ class NeuronViewerWidget(QWidget):
         mask_layout = QVBoxLayout(mask_page)
         mask_layout.setContentsMargins(0, 0, 0, 0)
 
+        self._use_layer_as_mask_btn = QPushButton("Use Active Layer as Mask")
+        self._use_layer_as_mask_btn.setToolTip(
+            "Select a loaded 3D Image or Labels layer in napari, then register it "
+            "as an atlas-aligned query mask. Positive values are inside."
+        )
+        self._use_layer_as_mask_btn.clicked.connect(self._use_active_layer_as_mask)
+        mask_layout.addWidget(self._use_layer_as_mask_btn)
+
         self._mask_layer_selector = MaskLayerSelectorWidget()
         self._mask_layer_selector.selection_changed.connect(
             self._on_mask_layer_selection_changed
@@ -2397,6 +2417,9 @@ class NeuronViewerWidget(QWidget):
         self._compound_region_query.cancel_profile_requested.connect(
             self._cancel_regional_profile_build
         )
+        self._compound_region_query.result_action_changed.connect(
+            self._sync_compound_query_result_action
+        )
         compound_layout.addWidget(self._compound_region_query)
         self._region_query_stack.addWidget(compound_page)
 
@@ -2417,6 +2440,11 @@ class NeuronViewerWidget(QWidget):
         query_btn_row.addWidget(self._region_query_cancel_btn)
         layout.addLayout(query_btn_row)
 
+        self._mask_query_progress = QProgressBar()
+        self._mask_query_progress.setRange(0, 100)
+        self._mask_query_progress.setVisible(False)
+        layout.addWidget(self._mask_query_progress)
+
         clear_table_row = QHBoxLayout()
         self._regions_clear_table_btn = QPushButton("Clear Table")
         self._regions_clear_table_btn.clicked.connect(self._clear_neuron_table)
@@ -2427,6 +2455,43 @@ class NeuronViewerWidget(QWidget):
         self._regions_status_label = QLabel("")
         self._regions_status_label.setWordWrap(True)
         layout.addWidget(self._regions_status_label)
+
+        from .region_report import RegionReportWidget
+
+        self._region_report = RegionReportWidget(self._region_report_cohort_file_ids)
+        self._region_report.build_profile_requested.connect(
+            self._start_regional_profile_build
+        )
+        self._region_report.tag_neurons_requested.connect(
+            self._tag_region_report_neurons
+        )
+        self._neuron_table.selection_changed.connect(self._region_report.invalidate)
+        self._neuron_table.state_changed.connect(self._region_report.invalidate)
+        layout.addWidget(self._region_report)
+
+        from .regional_clustering import RegionalClusteringWidget
+
+        self._regional_clustering = RegionalClusteringWidget(
+            self._region_report_cohort_file_ids,
+            self._region_report.collapsed_region_ids,
+            self._regional_cluster_overlay,
+        )
+        self._regional_clustering.result_ready.connect(
+            self._on_regional_clusters_ready
+        )
+        self._regional_clustering.cluster_selected.connect(
+            self._select_regional_cluster
+        )
+        self._regional_clustering.neuron_group_saved.connect(
+            self._save_regional_neuron_group
+        )
+        self._neuron_table.selection_changed.connect(
+            self._regional_clustering.notify_cohort_changed
+        )
+        self._neuron_table.state_changed.connect(
+            self._regional_clustering.notify_cohort_changed
+        )
+        layout.addWidget(self._regional_clustering)
 
         self._region_appearance_section = CollapsibleSection(
             "Region Appearance",
@@ -2529,6 +2594,15 @@ class NeuronViewerWidget(QWidget):
         blur_layout.addWidget(self._create_blur_btn)
 
         layout.addWidget(blur_group)
+
+        from .set_overlap import SetOverlapWidget
+
+        self._set_overlap = SetOverlapWidget(
+            self._neuron_table, self._generated_mask_layers, self._current_atlas_name,
+            intersection_mask_creator=self._add_set_intersection_mask,
+        )
+        self._neuron_table.state_changed.connect(self._set_overlap.refresh)
+        layout.addWidget(self._set_overlap)
 
         isolation_group = QGroupBox("Region Isolation")
         isolation_layout = QVBoxLayout(isolation_group)
@@ -3071,6 +3145,9 @@ class NeuronViewerWidget(QWidget):
         if callable(refresh_assignments):
             refresh_assignments()
         table = getattr(self, "_neuron_table", None)
+        load_sets = getattr(table, "load_neuron_sets", None)
+        if callable(load_sets):
+            load_sets({})
         refresh_table_assignments = getattr(
             table,
             "refresh_cluster_assignments",
@@ -3103,6 +3180,8 @@ class NeuronViewerWidget(QWidget):
         if not entries:
             return 0
         self._saved_table_state = table_state
+        if callable(load_sets):
+            load_sets(table_state.get("neuron_sets", {}))
         assignment_state = table_state.get("cluster_assignments")
         if isinstance(assignment_state, dict):
             self._cluster_assignment_store.load_state(assignment_state)
@@ -3468,7 +3547,7 @@ class NeuronViewerWidget(QWidget):
                 "visible": bool(display.get("visible", True)),
                 "metadata": layer_metadata,
             }
-            for attr_name in ("scale", "translate"):
+            for attr_name in ("scale", "translate", "rotate", "shear", "affine"):
                 if attr_name in display and display[attr_name] is not None:
                     kwargs[attr_name] = display[attr_name]
 
@@ -4890,6 +4969,9 @@ class NeuronViewerWidget(QWidget):
         self._refresh_mask_layer_options()
         self._update_tools_controls()
         self._update_histogram_controls()
+        overlap = getattr(self, "_set_overlap", None)
+        if overlap is not None:
+            overlap.refresh()
         sync_heatmaps = getattr(self, "_sync_neuron_table_heatmap_membership", None)
         if callable(sync_heatmaps):
             sync_heatmaps()
@@ -5227,7 +5309,7 @@ class NeuronViewerWidget(QWidget):
         return True, ""
 
     def _generated_mask_layers(self) -> list:
-        """Return generated mask layers eligible for Regions queries."""
+        """Return generated and imported masks eligible for Regions queries."""
         masks = []
         atlas_name = self._current_atlas_name()
         for layer in self._iter_viewer_layers():
@@ -5238,6 +5320,60 @@ class NeuronViewerWidget(QWidget):
                 continue
             masks.append(layer)
         return masks
+
+    def _use_active_layer_as_mask(self):
+        """Register an existing native-grid volume without copying its data."""
+        from napari.layers import Image, Labels
+
+        try:
+            if getattr(self, "_regional_controls_busy", False):
+                raise ValueError(
+                    "Wait for the current query or profile build to finish."
+                )
+            if self._atlas is None:
+                raise ValueError("Load an atlas before registering a mask.")
+            layer = self.viewer.layers.selection.active
+            if not isinstance(layer, (Image, Labels)):
+                raise TypeError(
+                    "Select a loaded 3D Image or Labels layer in napari first."
+                )
+            if getattr(layer, "multiscale", False) or layer.ndim != 3:
+                raise ValueError(
+                    "Select a single 3D volume, without time, channel, or multiscale axes."
+                )
+            if layer.data.dtype.kind not in "buif":
+                raise ValueError(
+                    "A mask must contain real numeric or Boolean voxel values."
+                )
+            atlas_name = self._current_atlas_name()
+            if not atlas_name:
+                raise ValueError(
+                    "The loaded atlas must have a name before registering a mask."
+                )
+            metadata = dict(_layer_metadata(layer))
+            if metadata.get("atlas_name") not in (None, atlas_name):
+                raise ValueError(
+                    "The layer records a different atlas from the loaded atlas."
+                )
+            native_grid = SimpleNamespace(data=self._atlas.annotation)
+            try:
+                validate_spatial_grids([layer, native_grid])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Mask must match the atlas's native voxel grid: {exc} "
+                    "Use the matching atlas resolution and reset layer transforms if needed."
+                ) from exc
+            if not metadata.get("mask_query_source"):
+                metadata["mask_imported"] = True
+            metadata.update({"mask_query_source": True, "atlas_name": atlas_name})
+            layer.metadata = metadata
+            self._refresh_mask_layer_options()
+            self._mask_layer_selector.set_selected_layer_names([layer.name])
+            self._regions_status_label.setText(
+                f"Registered {layer.name} as a mask. Positive voxel values are inside."
+            )
+        except (ValueError, TypeError) as exc:
+            self._regions_status_label.setText(f"Could not register mask: {exc}")
 
     def _eligible_heatmap_layers_with_exclusions(self) -> tuple[list, list[str]]:
         """Return eligible heatmap layers and exclusion messages."""
@@ -5348,7 +5484,8 @@ class NeuronViewerWidget(QWidget):
             mask_entries.append(
                 {
                     "name": layer.name,
-                    "sources": metadata.get("source_heatmap_layers", []),
+                    "sources": metadata.get("source_heatmap_layers", [])
+                    or (["Imported layer"] if metadata.get("mask_imported") else []),
                 }
             )
         self._mask_layer_selector.set_mask_layers(mask_entries)
@@ -5992,20 +6129,25 @@ class NeuronViewerWidget(QWidget):
 
         masks = self._generated_mask_layers()
         if not masks:
-            label.setText("No generated mask layers are available.")
+            label.setText("No mask layers are available. Load a TIF and click Use Active Layer as Mask.")
             return
 
         selected_layers = self._selected_mask_query_layers()
         if not selected_layers:
             label.setText(
-                f"{len(masks)} generated mask layer(s) available. "
+                f"{len(masks)} mask layer(s) available. "
                 "Select mask layers to see source-neuron count."
             )
             return
 
         source_file_ids = self._source_file_ids_for_layers(selected_layers)
         if not source_file_ids:
-            label.setText("Selected mask layer(s) do not record source neurons.")
+            label.setText(
+                "Imported mask: positive voxels are inside. Source neurons are not "
+                "recorded, so source-neuron exclusion cannot be applied."
+                if any(_layer_metadata(layer).get("mask_imported") for layer in selected_layers)
+                else "Selected mask layer(s) do not record source neurons."
+            )
             return
 
         action = "excluded" if self._mask_source_exclusion_enabled() else "included"
@@ -6283,6 +6425,8 @@ class NeuronViewerWidget(QWidget):
         """Add or replace a blurred heatmap image layer."""
         from napari.utils.colormaps import Colormap
 
+        validate_spatial_grids(source_layers)
+
         for layer in list(self._iter_viewer_layers()):
             if layer.name == layer_name:
                 self.viewer.layers.remove(layer)
@@ -6319,6 +6463,7 @@ class NeuronViewerWidget(QWidget):
             }
         )
         metadata.update(_source_heatmap_filter_metadata(source_layers))
+        metadata.update(source_set_metadata(source_layers))
 
         add_kwargs = {
             "name": layer_name,
@@ -6331,7 +6476,7 @@ class NeuronViewerWidget(QWidget):
             "visible": True,
             "metadata": metadata,
         }
-        for attr_name in ("scale", "translate"):
+        for attr_name in ("scale", "translate", "rotate", "shear", "affine"):
             value = getattr(first_layer, attr_name, None)
             if value is not None:
                 add_kwargs[attr_name] = value
@@ -6355,6 +6500,8 @@ class NeuronViewerWidget(QWidget):
     ):
         """Add one post-hoc region-isolated heatmap image layer."""
         from napari.utils.colormaps import Colormap
+
+        validate_spatial_grids(source_layers)
 
         first_layer = source_layers[0]
         rgba = _mask_layer_color(source_layers)
@@ -6403,6 +6550,7 @@ class NeuronViewerWidget(QWidget):
             }
         )
         metadata.update(_source_heatmap_filter_metadata(source_layers))
+        metadata.update(source_set_metadata(source_layers))
 
         add_kwargs = {
             "name": self._unique_layer_name(layer_name),
@@ -6416,7 +6564,7 @@ class NeuronViewerWidget(QWidget):
             "contrast_limits": contrast_limits,
             "metadata": metadata,
         }
-        for attr_name in ("scale", "translate"):
+        for attr_name in ("scale", "translate", "rotate", "shear", "affine"):
             value = getattr(first_layer, attr_name, None)
             if value is not None:
                 add_kwargs[attr_name] = value
@@ -6438,6 +6586,13 @@ class NeuronViewerWidget(QWidget):
     ):
         """Add or replace a generated binary mask layer."""
         from napari.utils import DirectLabelColormap
+
+        validate_spatial_grids(source_layers)
+        transforms = {
+            name: getattr(source_layers[0], name)
+            for name in ("scale", "translate", "rotate", "shear", "affine")
+            if getattr(source_layers[0], name, None) is not None
+        }
 
         for layer in list(self._iter_viewer_layers()):
             if layer.name == layer_name:
@@ -6478,9 +6633,56 @@ class NeuronViewerWidget(QWidget):
                 "merge_mode": merge_mode,
                 "atlas_name": self._current_atlas_name(),
                 "color": rgba,
+                **source_set_metadata(source_layers),
                 **_source_heatmap_filter_metadata(source_layers),
             },
+            **transforms,
         )
+        return layer
+
+    def _add_set_intersection_mask(self, mask, source_layers):
+        """Publish an intersection with the original grid and both source records."""
+        from napari.utils import DirectLabelColormap
+
+        source_file_ids = self._source_file_ids_for_layers(source_layers)
+        provenance = [
+            {"name": layer.name, "metadata": deepcopy(_layer_metadata(layer))}
+            for layer in source_layers
+        ]
+        transforms = {
+            key: getattr(source_layers[0], key)
+            for key in ("scale", "translate", "rotate", "shear", "affine")
+            if getattr(source_layers[0], key, None) is not None
+        }
+        rgba = (1.0, 0.9, 0.0, 1.0)
+        layer = self.viewer.add_labels(
+            mask,
+            name=self._unique_layer_name(
+                f"Intersection: {source_layers[0].name} ∩ {source_layers[1].name}"
+            ),
+            opacity=self._opacity_slider.value() / 100.0,
+            visible=True,
+            colormap=DirectLabelColormap(color_dict={
+                None: (0.0, 0.0, 0.0, 0.0), 0: (0.0, 0.0, 0.0, 0.0), 1: rgba,
+            }),
+            metadata={
+                "mask_query_source": True,
+                "mask_operation": "intersection",
+                "source_mask_layers": [source.name for source in source_layers],
+                "source_masks": provenance,
+                "source_heatmap_layers": sorted({
+                    name for source in source_layers
+                    for name in _layer_metadata(source).get("source_heatmap_layers", [])
+                }),
+                "source_file_ids": source_file_ids,
+                "file_ids": source_file_ids,
+                "query_excluded_file_ids": source_file_ids,
+                "atlas_name": self._current_atlas_name(),
+                "color": rgba,
+            },
+            **transforms,
+        )
+        self._refresh_mask_layer_options()
         return layer
 
     def _on_region_query_source_changed(self, text: str) -> None:
@@ -6517,6 +6719,9 @@ class NeuronViewerWidget(QWidget):
             for button in self._mask_layer_query_buttons():
                 button.setVisible(show_mask_buttons)
         self._regions_status_label.setText("")
+        sync_result_action = getattr(self, "_sync_compound_query_result_action", None)
+        if callable(sync_result_action):
+            sync_result_action()
         if text in {
             _REGION_QUERY_SOURCE_ATLAS,
             _REGION_QUERY_SOURCE_CUSTOM,
@@ -7030,6 +7235,7 @@ class NeuronViewerWidget(QWidget):
 
     def _set_region_query_buttons_enabled(self, enabled: bool) -> None:
         """Enable or disable all Regions-tab query buttons."""
+        enabled = enabled and not getattr(self, "_regional_controls_busy", False)
         buttons: list[QPushButton] = []
         seen: set[int] = set()
         for button in (
@@ -7052,8 +7258,52 @@ class NeuronViewerWidget(QWidget):
 
         return default_region_profile_path(self._db.parquet_path)
 
+    def _region_report_cohort_file_ids(self, scope: str) -> list[object]:
+        """Snapshot report membership independently of region-query scope."""
+        if scope == "selected":
+            table = getattr(self, "_neuron_table", None)
+            return [] if table is None else list(table.get_selected_file_ids())
+        return self._current_table_file_ids()
+
+    def _tag_region_report_neurons(
+        self, tags_by_file_id: Mapping[str, tuple[str, ...]]
+    ) -> None:
+        """Append selected report-region tags to existing Data rows by file_id."""
+        from .neuron_table import NeuronMetadataUpdate
+
+        summary = self._neuron_table.apply_metadata_updates(
+            {
+                file_id: NeuronMetadataUpdate(tags=tuple(tags))
+                for file_id, tags in tags_by_file_id.items()
+            }
+        )
+        self._region_report.on_neurons_tagged(
+            summary.updated_count, summary.missing_count
+        )
+        if summary.updated_count:
+            self._neuron_table.show_metadata_columns()
+            ancestor = self._neuron_table.parentWidget()
+            while ancestor is not None:
+                if isinstance(ancestor, CollapsibleSection):
+                    ancestor.set_expanded(True)
+                ancestor = ancestor.parentWidget()
+            self._tabs.setCurrentIndex(0)
+            scroll = self._tabs.widget(0).findChild(QScrollArea)
+            if scroll is not None:
+                scroll.ensureWidgetVisible(self._neuron_table)
+
     def _refresh_regional_profile_status(self) -> None:
         """Show cheap sidecar availability without scanning source node rows."""
+        report = getattr(self, "_region_report", None)
+        if report is not None:
+            report.set_context(
+                None if self._db is None else self._db.parquet_path, self._atlas
+            )
+        regional = getattr(self, "_regional_clustering", None)
+        if regional is not None:
+            regional.set_context(
+                None if self._db is None else self._db.parquet_path, self._atlas
+            )
         editor = getattr(self, "_compound_region_query", None)
         setter = getattr(editor, "set_profile_status", None)
         if not callable(setter):
@@ -7082,8 +7332,106 @@ class NeuronViewerWidget(QWidget):
                 "Build it before running the compound query."
             )
 
+    def _regional_cluster_overlay(self, file_ids, field):
+        """Read external annotations only for post-clustering visualization."""
+        entries = {
+            str(key): value for key, value in self._neuron_table._entries.items()
+        }
+        result = {}
+        for file_id in file_ids:
+            value = (
+                getattr(entries.get(str(file_id)), field, "")
+                if field in {"label", "group", "tags"}
+                else ""
+            )
+            result[str(file_id)] = (
+                "; ".join(value) if isinstance(value, (tuple, list)) else str(value)
+            )
+        return result
+
+    def _on_regional_clusters_ready(self, result):
+        """Publish assignments through the existing persistent registry."""
+        from ..analysis.regional_clustering import MODE_LABELS
+
+        method = f"Regional {MODE_LABELS[result.features.settings.mode]}"
+        store = self._cluster_assignment_store
+        assignment = store.add(
+            name=store.next_run_name(method),
+            assignments=dict(zip(result.file_ids, result.labels, strict=True)),
+            input_file_ids=result.features.settings.file_ids,
+            unassigned_neuron_ids=result.features.zero_feature_file_ids,
+            run_metadata=result.metadata,
+            input_scope=result.features.settings.scope,
+            coordinate_space="Regional Profile",
+        )
+        self._regional_clustering.assignment_id = assignment.assignment_id
+        self._refresh_cluster_assignment_controls()
+        self._apply_active_cluster_assignment()
+
+    def _select_regional_cluster(self, payload):
+        assignment_id, file_ids, settings = payload
+        store = self._cluster_assignment_store
+        if assignment_id is not None and store.get(assignment_id) is not None:
+            store.set_active(assignment_id)
+            self._apply_active_cluster_assignment()
+        assignment = store.active
+        # Clear row filters so every current-table member can be selected.
+        self._cluster_filter_combo.set_cluster_options(
+            sorted(set(assignment.assignments.values())) if assignment else [],
+            include_unclustered=True,
+            selection=ClusterFilterSelection(),
+        )
+        self._manual_heatmap_combo.setCurrentIndex(0)
+        self._neuron_table.clear_annotation_filters()
+        set_filter = getattr(self._neuron_table, "set_filter_combo", None)
+        if set_filter is not None:
+            set_filter.setCurrentIndex(0)
+        self._apply_neuron_table_filters()
+        self._neuron_table.select_file_ids(list(file_ids))
+        report = self._region_report
+        report.cohort_combo.setCurrentIndex(report.cohort_combo.findData("selected"))
+        report.split_laterality.setChecked(settings.laterality != "combined")
+        report.section.set_expanded(True)
+        # Refreshing its context first ensures the report picker has an atlas.
+        if report._atlas is not None:
+            from types import SimpleNamespace
+
+            structures = dict(report._atlas.structures)
+            structures[0] = {
+                "id": 0,
+                "name": "Outside / unmapped",
+                "acronym": "unmapped",
+                "structure_id_path": [0],
+            }
+            report.exclusion_editor.set_atlas_and_allowed_ids(
+                SimpleNamespace(
+                    atlas_name=getattr(report._atlas, "atlas_name", ""),
+                    structures=structures,
+                ),
+                set(structures),
+            )
+            report.exclusion_editor.exclude_selector.set_selected_ids(
+                settings.excluded_region_ids
+            )
+        report.refresh()
+
+    def _save_regional_neuron_group(self, file_ids, name):
+        from .neuron_table import NeuronMetadataUpdate
+
+        self._neuron_table.apply_metadata_updates(
+            {file_id: NeuronMetadataUpdate(group=name) for file_id in file_ids}
+        )
+        self._neuron_table.show_metadata_columns()
+
     def _set_regional_query_busy(self, busy: bool, *, building: bool = False) -> None:
         """Keep Regions controls consistent during a profile/query worker run."""
+        self._regional_controls_busy = busy
+        import_button = getattr(self, "_use_layer_as_mask_btn", None)
+        if import_button is not None:
+            import_button.setEnabled(not busy)
+        progress = getattr(self, "_mask_query_progress", None)
+        if progress is not None and not busy:
+            progress.setVisible(False)
         editor = getattr(self, "_compound_region_query", None)
         setter = getattr(editor, "set_busy", None)
         if callable(setter):
@@ -7094,6 +7442,34 @@ class NeuronViewerWidget(QWidget):
             cancel_button.setVisible(query_active)
             cancel_button.setEnabled(query_active)
         self._set_region_query_buttons_enabled(not busy and self._db is not None)
+        sync_result_action = getattr(self, "_sync_compound_query_result_action", None)
+        if callable(sync_result_action):
+            sync_result_action()
+
+    def _sync_compound_query_result_action(self) -> None:
+        """Make annotation scope explicit and keep the action button descriptive."""
+        editor = getattr(self, "_compound_region_query", None)
+        getter = getattr(editor, "result_action", None)
+        action = getter() if callable(getter) else "replace"
+        compound = (
+            getattr(self, "_region_query_source", _REGION_QUERY_SOURCE_ATLAS)
+            == _REGION_QUERY_SOURCE_COMPOUND
+        )
+        annotating = compound and action in {"tag", "label"}
+        scope = getattr(self, "_region_query_scope_combo", None)
+        if scope is not None:
+            if annotating:
+                scope.setCurrentIndex(scope.findData(_REGION_QUERY_SCOPE_CURRENT))
+            scope.setEnabled(
+                not annotating and not getattr(self, "_regional_controls_busy", False)
+            )
+        if compound:
+            self._region_query_find_btn.setText(
+                {
+                    "tag": "Tag Matches in Current Table",
+                    "label": "Label Matches in Current Table",
+                }.get(action, "Run Compound Region Query")
+            )
 
     def _on_compound_region_selection_changed(self, _selection: object) -> None:
         """Preview the active compound clause without changing query semantics."""
@@ -7204,6 +7580,9 @@ class NeuronViewerWidget(QWidget):
         if callable(setter):
             setter(message)
         self._set_regional_query_busy(False)
+        report = getattr(self, "_region_report", None)
+        if report is not None:
+            report.refresh()
 
     def _on_regional_profile_cancelled(self, message: str) -> None:
         text = str(message).strip() or "Regional-profile construction was cancelled."
@@ -7256,13 +7635,34 @@ class NeuronViewerWidget(QWidget):
         try:
             query = query_getter()
             canonical = canonical_getter() if callable(canonical_getter) else ""
+            action_getter = getattr(editor, "result_action", None)
+            action = action_getter() if callable(action_getter) else "replace"
+            text_getter = getattr(editor, "annotation_text", None)
+            annotation = text_getter() if callable(text_getter) else ""
+            if action not in {"replace", "tag", "label"}:
+                raise RegionQueryValidationError("Choose a supported result action.")
+            if action != "replace" and not annotation:
+                raise RegionQueryValidationError(
+                    "Enter annotation text for query matches."
+                )
         except RegionQueryValidationError as exc:
             self._regions_status_label.setText(f"Compound query is incomplete: {exc}")
             return
 
-        proceed, base_file_ids, scope_label, input_count = (
-            self._resolve_region_query_file_scope()
-        )
+        if action != "replace":
+            base_file_ids = self._current_table_file_ids()
+            if not base_file_ids:
+                self._regions_status_label.setText(
+                    "Current table is empty; populate it with a simple query before annotating."
+                )
+                return
+            proceed, scope_label, input_count = (
+                True, "current table", len(base_file_ids)
+            )
+        else:
+            proceed, base_file_ids, scope_label, input_count = (
+                self._resolve_region_query_file_scope()
+            )
         if not proceed:
             return
         sidecar = self._regional_profile_sidecar_path()
@@ -7283,6 +7683,13 @@ class NeuronViewerWidget(QWidget):
             else QueryScope.explicit(base_file_ids)
         )
         self._regional_query_snapshot = {
+            "result_action": action,
+            "annotation_text": annotation,
+            "input_file_ids": (
+                None
+                if base_file_ids is None
+                else tuple(str(v) for v in base_file_ids)
+            ),
             "preserve_existing": base_file_ids is not None,
             "scope_label": scope_label,
             "input_count": input_count,
@@ -7324,16 +7731,26 @@ class NeuronViewerWidget(QWidget):
         worker = self._regional_query_worker
         cancel = getattr(worker, "cancel", None)
         if callable(cancel):
+            snapshot = getattr(self, "_regional_query_snapshot", None)
+            if snapshot is not None:
+                snapshot["cancelled"] = True
             cancel()
             cancel_button = getattr(self, "_region_query_cancel_btn", None)
             if cancel_button is not None:
                 cancel_button.setEnabled(False)
             self._regions_status_label.setText(
-                "Cancelling the compound regional query..."
+                "Cancelling mask search..." if (snapshot or {}).get("kind") == "mask"
+                else "Cancelling the compound regional query..."
             )
 
     def _on_regional_query_finished(self, result: object) -> None:
         snapshot = self._regional_query_snapshot or {}
+        if snapshot.get("cancelled"):
+            self._regions_status_label.setText(
+                "Compound regional query was cancelled. The Data table was not changed."
+            )
+            self._set_regional_query_busy(False)
+            return
         current_source = None if self._db is None else str(self._db.parquet_path)
         if (
             current_source != snapshot.get("source_path")
@@ -7346,10 +7763,42 @@ class NeuronViewerWidget(QWidget):
             self._set_regional_query_busy(False)
             return
         rows = result.rows
-        self._populate_neuron_table(
-            rows,
-            preserve_existing=bool(snapshot.get("preserve_existing", False)),
-        )
+        action = snapshot.get("result_action", "replace")
+        annotation_summary = ""
+        if action in {"tag", "label"}:
+            from .neuron_table import NeuronMetadataUpdate
+
+            cohort = set(snapshot["input_file_ids"])
+            current_ids = {str(v) for v in self._current_table_file_ids()}
+            if current_ids != cohort:
+                self._regions_status_label.setText(
+                    "Discarded annotation results because current-table membership changed "
+                    "during the query. Run again for the current cohort."
+                )
+                self._set_regional_query_busy(False)
+                return
+            text = snapshot["annotation_text"]
+            matched_ids = set(rows["file_id"].astype(str)) & cohort
+            update = (
+                NeuronMetadataUpdate(tags=(text,))
+                if action == "tag"
+                else NeuronMetadataUpdate(label=text)
+            )
+            summary = self._neuron_table.apply_metadata_updates(
+                {file_id: update for file_id in matched_ids}
+            )
+            if summary.updated_count:
+                self._neuron_table.show_metadata_columns()
+            annotation_summary = (
+                f" {'Tagged' if action == 'tag' else 'Labeled'} "
+                f"{summary.updated_count} matching neuron(s) with {text!r}; "
+                f"retained all {len(cohort)} table neurons."
+            )
+        else:
+            self._populate_neuron_table(
+                rows,
+                preserve_existing=bool(snapshot.get("preserve_existing", False)),
+            )
         metadata = result.metadata
         scope_suffix = self._query_scope_status_suffix(
             str(snapshot.get("scope_label", "whole parquet")),
@@ -7364,7 +7813,8 @@ class NeuronViewerWidget(QWidget):
         canonical = str(snapshot.get("canonical", metadata.canonical_query))
         message = (
             f"Found {metadata.matched_count} neuron(s){scope_suffix} in "
-            f"{metadata.runtime_seconds:.3f} s{unavailable_text}. Query: {canonical}"
+            f"{metadata.runtime_seconds:.3f} s{unavailable_text}."
+            f"{annotation_summary} Query: {canonical}"
         )
         self._regions_status_label.setText(message)
         editor = getattr(self, "_compound_region_query", None)
@@ -7417,6 +7867,12 @@ class NeuronViewerWidget(QWidget):
         worker: object,
     ) -> None:
         if self._regional_query_thread is thread:
+            snapshot = self._regional_query_snapshot or {}
+            for signal, callback in snapshot.get("mask_connections", []):
+                try:
+                    signal.disconnect(callback)
+                except (RuntimeError, ValueError):
+                    logger.debug("Mask data event was already disconnected")
             self._regional_query_thread = None
             self._regional_query_snapshot = None
         if self._regional_query_worker is worker:
@@ -7708,22 +8164,22 @@ class NeuronViewerWidget(QWidget):
         soma_only: bool = False,
         node_types: tuple[int, ...] | list[int] | None = None,
     ) -> None:
-        """Query neurons using a generated mask layer."""
+        """Snapshot a mask request and scan it off the GUI thread."""
         if self._db is None or self._atlas is None:
             return
-
+        if (
+            getattr(self, "_regional_query_thread", None) is not None
+            or getattr(self, "_regional_profile_thread", None) is not None
+        ):
+            self._regions_status_label.setText(
+                "Wait for the current regional query or profile build to finish."
+            )
+            return
         layers = self._selected_mask_query_layers()
         if not layers:
             self._regions_status_label.setText(
                 "Select at least one generated mask layer."
             )
-            return
-
-        mask = np.logical_or.reduce([np.asarray(layer.data) > 0 for layer in layers])
-        if not mask.any():
-            message = "Selected mask layer selection is empty and cannot be queried."
-            self._regions_status_label.setText(message)
-            show_warning(message)
             return
 
         source_file_ids = self._source_file_ids_for_layers(layers)
@@ -7741,49 +8197,160 @@ class NeuronViewerWidget(QWidget):
                 node_types,
                 soma_only,
             )
-            result = self._db.get_neurons_by_mask(
-                mask,
-                self._atlas,
-                soma_only=soma_only,
-                file_ids=base_file_ids,
-                exclude_file_ids=exclude_file_ids or None,
-                node_types=effective_node_types,
-            )
-            self._populate_neuron_table(
-                result,
-                preserve_existing=base_file_ids is not None,
-            )
-            membership = NodeTypeSelectorComboBox.query_text(effective_node_types)
-            selected_names = ", ".join(layer.name for layer in layers[:3])
-            if len(layers) > 3:
-                selected_names += ", ..."
-            exclusion_text = ""
-            if exclude_file_ids:
-                excluded_word = "neuron" if len(exclude_file_ids) == 1 else "neurons"
-                exclusion_text = (
-                    f"; excluded {len(exclude_file_ids)} source {excluded_word}"
+            snapshot = {
+                "kind": "mask",
+                "source_path": str(self._db.parquet_path),
+                "atlas_object": self._atlas,
+                "atlas_shape": tuple(self._atlas.annotation.shape),
+                "resolution_um": tuple(self._atlas.resolution),
+                "input_file_ids": None
+                if base_file_ids is None
+                else tuple(map(str, base_file_ids)),
+                "exclude_file_ids": tuple(map(str, exclude_file_ids)),
+                "node_types": effective_node_types,
+                "scope_label": scope_label,
+                "input_count": input_count,
+                "layers": tuple(layers),
+                "data_ids": tuple(id(layer.data) for layer in layers),
+                "names": tuple(layer.name for layer in layers),
+                "started": perf_counter(),
+            }
+            self._launch_mask_query(snapshot)
+        except (ValueError, RuntimeError) as exc:
+            logger.exception("Could not start mask search")
+            self._regions_status_label.setText(f"Mask query failed: {exc}")
+
+    def _launch_mask_query(self, snapshot):
+        from ..workers import MaskQueryWorker
+
+        thread = QThread()
+        worker = MaskQueryWorker(
+            source_path=snapshot["source_path"],
+            volumes=tuple(layer.data for layer in snapshot["layers"]),
+            atlas_shape=snapshot["atlas_shape"],
+            resolution_um=snapshot["resolution_um"],
+            file_ids=snapshot["input_file_ids"],
+            exclude_file_ids=snapshot["exclude_file_ids"],
+            node_types=snapshot["node_types"],
+        )
+        worker.moveToThread(thread)
+        self._regional_query_thread, self._regional_query_worker = thread, worker
+        self._regional_query_snapshot = snapshot
+        snapshot["mask_connections"] = []
+        for layer in snapshot["layers"]:
+            signal = getattr(getattr(layer, "events", None), "data", None)
+            if signal is not None and callable(getattr(signal, "connect", None)):
+                signal.connect(self._on_mask_source_data_changed)
+                snapshot["mask_connections"].append(
+                    (signal, self._on_mask_source_data_changed)
                 )
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_mask_query_progress)
+        worker.finished.connect(self._on_mask_query_finished)
+        worker.cancelled.connect(self._on_mask_query_cancelled)
+        worker.error.connect(self._on_mask_query_error)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda: self._cleanup_regional_query_thread(thread, worker)
+        )
+        thread.finished.connect(thread.deleteLater)
+        app = QApplication.instance()
+        if app is not None and not getattr(self, "_mask_shutdown_connected", False):
+            app.aboutToQuit.connect(self._shutdown_mask_query)
+            self._mask_shutdown_connected = True
+        self._set_regional_query_busy(True)
+        self._mask_query_progress.setValue(0)
+        self._mask_query_progress.setVisible(True)
+        self._regions_status_label.setText("Preparing mask for background search...")
+        thread.start()
+
+    def _on_mask_source_data_changed(self, _event=None):
+        snapshot = self._regional_query_snapshot or {}
+        if snapshot.get("kind") == "mask":
+            snapshot["mask_changed"] = True
+            self._regional_query_worker.cancel()
+
+    def _on_mask_query_progress(self, message, completed, total):
+        snapshot = self._regional_query_snapshot or {}
+        if snapshot.get("cancelled"):
+            return
+        percent = int(100 * completed / total) if total else 0
+        self._mask_query_progress.setValue(percent)
+        self._regions_status_label.setText(
+            f"{message} ({percent}%) · {perf_counter() - snapshot['started']:.0f} s elapsed"
+        )
+
+    def _mask_query_is_current(self, snapshot):
+        if snapshot.get("cancelled") or snapshot.get("mask_changed"):
+            return False
+        if (
+            self._db is None
+            or str(self._db.parquet_path) != snapshot["source_path"]
+            or self._atlas is not snapshot["atlas_object"]
+        ):
+            return False
+        if any(
+            id(layer.data) != data_id
+            for layer, data_id in zip(
+                snapshot["layers"], snapshot["data_ids"], strict=True
+            )
+        ):
+            return False
+        if snapshot["input_file_ids"] is not None:
+            return set(map(str, self._current_table_file_ids())) == set(
+                snapshot["input_file_ids"]
+            )
+        return True
+
+    def _on_mask_query_finished(self, result):
+        snapshot = self._regional_query_snapshot or {}
+        self._set_regional_query_busy(False)
+        if not self._mask_query_is_current(snapshot):
             self._regions_status_label.setText(
-                "Found "
-                f"{len(result)} neuron(s) with {membership} in "
-                f"{len(layers)} selected mask layer(s)"
-                f"{self._query_scope_status_suffix(scope_label, input_count)}: "
-                f"{selected_names}{exclusion_text}"
+                "Mask search discarded because its inputs changed or it was cancelled. The Data table was not changed."
             )
-            logger.info(
-                (
-                    "Found %d neurons with %s in %d selected mask layers "
-                    "within %s after excluding %d source neurons"
-                ),
-                len(result),
-                membership,
-                len(layers),
-                scope_label,
-                len(exclude_file_ids),
-            )
-        except Exception as e:
-            logger.error(f"Mask query failed: {e}")
-            self._regions_status_label.setText(f"Mask query failed: {e}")
+            return
+        self._populate_neuron_table(
+            result, preserve_existing=snapshot["input_file_ids"] is not None
+        )
+        membership = NodeTypeSelectorComboBox.query_text(snapshot["node_types"])
+        names = ", ".join(snapshot["names"][:3]) + (
+            ", ..." if len(snapshot["names"]) > 3 else ""
+        )
+        count = len(snapshot["exclude_file_ids"])
+        exclusion = (
+            f"; excluded {count} source {'neuron' if count == 1 else 'neurons'}"
+            if count
+            else ""
+        )
+        self._regions_status_label.setText(
+            f"Found {len(result)} neuron(s) with {membership} in {len(snapshot['layers'])} selected mask layer(s)"
+            f"{self._query_scope_status_suffix(snapshot['scope_label'], snapshot['input_count'])}: "
+            f"{names}{exclusion} · {perf_counter() - snapshot['started']:.1f} s"
+        )
+
+    def _on_mask_query_cancelled(self, message):
+        self._set_regional_query_busy(False)
+        self._regions_status_label.setText(str(message))
+
+    def _on_mask_query_error(self, message):
+        self._set_regional_query_busy(False)
+        self._regions_status_label.setText(
+            f"Mask query failed: {message}. The Data table was not changed."
+        )
+
+    def _shutdown_mask_query(self):
+        snapshot = getattr(self, "_regional_query_snapshot", None) or {}
+        if snapshot.get("kind") == "mask":
+            snapshot["cancelled"] = True
+            self._regional_query_worker.cancel()
+            self._regional_query_thread.quit()
+            self._regional_query_thread.wait(5000)
+
+    def closeEvent(self, event):
+        self._shutdown_mask_query()
+        super().closeEvent(event)
 
     def _current_table_file_ids_in_scene(self) -> list[object]:
         """Return the subset of current table IDs that are rendered in the scene."""
@@ -8588,6 +9155,39 @@ class NeuronViewerWidget(QWidget):
         )
         self._start_selected_neuron_heatmap_requests([request])
 
+    def _on_neuron_set_members_shown(self, file_ids):
+        self._cluster_filter_combo.set_cluster_options(
+            self._neuron_table.available_cluster_ids(),
+            include_unclustered=True, selection=ClusterFilterSelection(),
+        )
+        self._manual_heatmap_combo.setCurrentIndex(0)
+        self._apply_neuron_table_filters()
+        self._neuron_table.select_file_ids(file_ids)
+
+    def _create_neuron_set_heatmap(self, snapshot):
+        """Use the existing background queue with an explicit set snapshot."""
+        message = None
+        if self._db is None or self._atlas is None:
+            message = "Load a neuron Parquet and atlas before creating a set heatmap."
+        elif self._selected_heatmap_running() or self._search_heatmap_running():
+            message = "Wait for the current heatmap request to finish."
+        elif not snapshot.get("file_ids"):
+            message = "The neuron set has no members in Data."
+        if message:
+            self._render_status_label.setText(message)
+            self._neuron_table._sets_panel.status.setText(message)
+            return
+        self._neuron_table._sets_panel.status.setText(
+            f"Building heatmap for {snapshot['name']!r}; progress is shown in Data."
+        )
+        self._start_selected_neuron_heatmap_requests([
+            _SelectedNeuronHeatmapRequest(
+                file_ids=tuple(snapshot["file_ids"]),
+                creation_mode=_SELECTED_HEATMAP_MODE_SINGLE,
+                neuron_set=snapshot,
+            )
+        ])
+
     @staticmethod
     def _individual_heatmap_estimated_bytes(
         atlas: BrainGlobeAtlas,
@@ -8799,9 +9399,13 @@ class NeuronViewerWidget(QWidget):
         *,
         creation_mode: str = _SELECTED_HEATMAP_MODE_SINGLE,
         color: tuple[float, float, float, float] | None = None,
+        neuron_set: dict | None = None,
     ):
         """Add one selected-neuron heatmap layer to the viewer."""
-        layer_name = self._selected_neuron_heatmap_layer_name(file_ids)
+        if neuron_set is not None:
+            layer_name = self._unique_layer_name(f"Set: {neuron_set['name']} Heatmap")
+        else:
+            layer_name = self._selected_neuron_heatmap_layer_name(file_ids)
         manual_heatmap_id = layer_name.removesuffix(" Heatmap")
         contrast_limits = _heatmap_contrast_limits(volume)
         if creation_mode == _SELECTED_HEATMAP_MODE_INDIVIDUAL:
@@ -8841,6 +9445,8 @@ class NeuronViewerWidget(QWidget):
         }
         if color is not None:
             metadata["color"] = [float(channel) for channel in color]
+        if neuron_set is not None:
+            metadata["neuron_set"] = neuron_set
         return self.viewer.add_image(
             volume,
             name=layer_name,
@@ -8871,6 +9477,7 @@ class NeuronViewerWidget(QWidget):
             file_ids,
             creation_mode=request.creation_mode,
             color=request.color,
+            **({"neuron_set": request.neuron_set} if getattr(request, "neuron_set", None) else {}),
         )
         completed = getattr(self, "_selected_heatmap_completed_requests", None)
         if completed is not None:

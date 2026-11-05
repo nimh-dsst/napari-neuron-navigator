@@ -8,6 +8,7 @@ from napari_neuron_navigator.neuron_table_ops import (
     ClusterFilterSelection,
     NeuronTableSummary,
     added_flags,
+    annotation_matches,
     cluster_filter_matches,
     cluster_ids_available,
     cluster_sort_value,
@@ -16,8 +17,90 @@ from napari_neuron_navigator.neuron_table_ops import (
     label_sort_key,
     recolor_cluster_distinct,
     summarize_neuron_table,
+    tag_combination_colors,
     visibility_for_selected_cluster,
 )
+
+
+@pytest.mark.parametrize(
+    ("label", "tags", "label_filter", "tag_filter", "expected"),
+    [
+        ("IT-like", ("TH", "keep"), None, None, True),
+        ("IT-like", ("TH", "keep"), "IT-like", "TH", True),
+        ("PT-like", ("TH",), "IT-like", "TH", False),
+        ("IT-like", ("CP",), "IT-like", "TH", False),
+        ("IT-like", ("TH ipsilateral",), None, "TH", False),
+        ("IT-like", ("th",), None, "TH", False),
+        ("IT-like", ("TH",), "IT", None, False),
+        ("", (), "", "", True),
+        ("IT-like", (), "", None, False),
+        ("", ("TH",), "", "", False),
+        ("IT-like", (), None, "", True),
+    ],
+)
+def test_annotation_filters_match_exact_values_and_combine_with_and(
+    label, tags, label_filter, tag_filter, expected
+):
+    assert (
+        annotation_matches(
+            label, tags, label_filter=label_filter, tag_filter=tag_filter
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tags", "selected", "mode", "expected"),
+    [
+        (("TH",), ("TH", "CP"), "any", True),
+        (("TH",), ("TH", "CP"), "all", False),
+        (("TH", "CP", "keep"), ("TH", "CP"), "all", True),
+        (("TH", "CP", "keep"), ("TH", "CP"), "exact", False),
+        (("CP", "TH", "TH"), ("TH", "CP"), "exact", True),
+        (("TH ipsilateral",), ("TH", "CP"), "any", False),
+    ],
+)
+def test_multiple_tag_modes(tags, selected, mode, expected):
+    assert annotation_matches("", tags, tag_filter=selected, tag_match=mode) is expected
+
+
+@pytest.mark.parametrize(
+    ("tags", "count", "expected"),
+    [
+        ((), "single", False),
+        (("TH", "TH"), "single", True),
+        (("TH", "CP"), "single", False),
+        (("TH",), "multiple", False),
+        (("TH", "CP"), "multiple", True),
+    ],
+)
+def test_tag_count_counts_all_distinct_tags(tags, count, expected):
+    assert annotation_matches("", tags, tag_count=count) is expected
+
+
+def test_tag_combination_colors_preserve_overlap_and_file_identity():
+    tags = {
+        "subject-a/shared": ("TH", "CP"),
+        "subject-b/shared": ("CP", "TH", "TH"),
+        "single": ("TH",),
+        "none": (),
+    }
+    colors, legend = tag_combination_colors(tags)
+    assert colors["subject-a/shared"] == colors["subject-b/shared"]
+    assert colors["single"] != colors["subject-a/shared"]
+    assert colors["none"] == GRAY_RGBA
+    assert set(legend) == {("CP", "TH"), ("TH",), ()}
+    assert tag_combination_colors(dict(reversed(list(tags.items())))) == (
+        colors,
+        legend,
+    )
+
+
+def test_invalid_tag_search_modes_are_rejected():
+    with pytest.raises(ValueError, match="matching mode"):
+        annotation_matches("", (), tag_match="other")
+    with pytest.raises(ValueError, match="count filter"):
+        annotation_matches("", (), tag_count="other")
 
 
 def test_added_flags_transition() -> None:

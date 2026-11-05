@@ -226,6 +226,47 @@ def test_export_enhanced_neuron_parquet_round_trips_labels_and_metadata(
     ]
 
 
+def test_project_and_enhanced_parquet_preserve_live_sets_and_mask_snapshot(tmp_path):
+    from napari_neuron_navigator.neuron_sets import AnnotationRule, NeuronSetStore
+
+    source = tmp_path / "source.parquet"
+    _write_source_parquet(source)
+    state = _table_state()
+    store = NeuronSetStore()
+    item = store.save("Reviewed", AnnotationRule(tag_filter=("reviewed",)))
+    state["neuron_sets"] = store.to_state()
+    output = tmp_path / "enhanced.parquet"
+    export_enhanced_neuron_parquet(source, output, table_state=state)
+    assert read_enhanced_parquet_metadata(output)["table_state"]["neuron_sets"] == store.to_state()
+    snapshot = {**item.to_state(), "file_ids": ["n1"]}
+    layer = _DummyLayer("Region", np.ones((1, 2, 2), dtype=np.uint8), {
+        "mask_query_source": True, "atlas_name": "fake_atlas",
+        "neuron_set": snapshot, "source_file_ids": ["n1"],
+        "sigma": 1.0, "lower_threshold": 0.25,
+    })
+    layer.rotate = np.eye(3)
+    layer.shear = (0.0, 0.0, 0.0)
+    layer.affine = SimpleNamespace(affine_matrix=np.eye(4))
+    intersection = _DummyLayer(
+        "Intersection: A ∩ B", np.array([[[0, 1], [0, 0]]], dtype=np.uint8),
+        {"mask_query_source": True, "mask_operation": "intersection",
+         "atlas_name": "fake_atlas", "source_file_ids": ["n1", "n2"],
+         "source_masks": [
+             {"name": "A", "metadata": layer.metadata},
+             {"name": "B", "metadata": {"source_file_ids": ["n2"], "sigma": 2}},
+         ]},
+    )
+    destination = tmp_path / "sets.nnproj"
+    save_project_bundle(destination, source_parquet_path=source, table_state=state,
+                        layers=[layer, intersection], atlas_name="fake_atlas")
+    bundle = load_project_bundle(destination)
+    assert bundle.table_state["neuron_sets"] == store.to_state()
+    assert bundle.layers[0].metadata["metadata"]["neuron_set"] == snapshot
+    assert bundle.layers[0].metadata["display"]["affine"] == np.eye(4).tolist()
+    np.testing.assert_array_equal(bundle.layers[1].data, intersection.data)
+    assert bundle.layers[1].metadata["metadata"] == intersection.metadata
+
+
 def test_enhanced_parquet_writes_all_named_assignment_columns_and_active_mirror(
     tmp_path: Path,
 ) -> None:

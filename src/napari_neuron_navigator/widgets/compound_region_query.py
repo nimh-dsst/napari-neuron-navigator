@@ -23,6 +23,7 @@ from qtpy.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -330,7 +331,7 @@ class RegionPickerDialog(QDialog):
         ids = () if selection is None else selection.region_ids
         self._selector.set_selected_ids(ids)
         self._selector.set_include_children_enabled(
-            False if selection is None else selection.include_descendants
+            True if selection is None else selection.include_descendants
         )
 
     def selection(
@@ -565,6 +566,7 @@ class CompoundRegionQueryWidget(QWidget):
     active_selection_changed = Signal(object)
     build_profile_requested = Signal()
     cancel_profile_requested = Signal()
+    result_action_changed = Signal()
 
     def __init__(
         self,
@@ -587,6 +589,32 @@ class CompoundRegionQueryWidget(QWidget):
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
+
+        self._result_controls = QWidget()
+        result_layout = QGridLayout(self._result_controls)
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        result_layout.addWidget(QLabel("Result action:"), 0, 0)
+        self.result_action_combo = QComboBox()
+        for label, action in (
+            ("Replace table with matches", "replace"),
+            ("Add tag to matches in current table", "tag"),
+            ("Set Label for matches in current table", "label"),
+        ):
+            self.result_action_combo.addItem(label, action)
+        result_layout.addWidget(self.result_action_combo, 0, 1)
+        self._annotation_label = QLabel("Annotation text:")
+        result_layout.addWidget(self._annotation_label, 1, 0)
+        self.annotation_input = QLineEdit()
+        self.annotation_input.setPlaceholderText("For example: TH termini")
+        result_layout.addWidget(self.annotation_input, 1, 1)
+        self._result_hint = QLabel()
+        self._result_hint.setWordWrap(True)
+        result_layout.addWidget(self._result_hint, 2, 0, 1, 2)
+        layout.addWidget(self._result_controls)
+        self.result_action_combo.currentIndexChanged.connect(
+            self._on_result_action_changed
+        )
+        self._on_result_action_changed()
 
         self._editor = QWidget()
         self._editor_layout = QVBoxLayout(self._editor)
@@ -672,6 +700,25 @@ class CompoundRegionQueryWidget(QWidget):
     def canonical_query(self) -> str:
         return format_structured_query(self.query())
 
+    def result_action(self) -> str:
+        return str(self.result_action_combo.currentData())
+
+    def annotation_text(self) -> str:
+        return self.annotation_input.text().strip()
+
+    def _on_result_action_changed(self, *_args) -> None:
+        action = self.result_action()
+        self._annotation_label.setVisible(action != "replace")
+        self.annotation_input.setVisible(action != "replace")
+        self._result_hint.setText(
+            {
+                "replace": "Replace Data with matching neurons from the chosen search scope.",
+                "tag": "Search Current Table and add this tag to matches. All rows, existing Labels, and existing Tags are retained.",
+                "label": "Search Current Table and set this Label on matches, replacing their existing Label. All rows and Tags are retained; nonmatches are unchanged.",
+            }[action]
+        )
+        self.result_action_changed.emit()
+
     def active_region_selection(self) -> RegionSelection | None:
         try:
             node = _node_at(self._value, self._active_path)
@@ -703,6 +750,7 @@ class CompoundRegionQueryWidget(QWidget):
 
     def set_busy(self, busy: bool, *, building: bool = False) -> None:
         self._editor.setEnabled(not busy)
+        self._result_controls.setEnabled(not busy)
         self._build_profile.setEnabled(not busy)
         self._cancel_profile.setVisible(bool(busy and building))
         self._cancel_profile.setEnabled(bool(busy and building))

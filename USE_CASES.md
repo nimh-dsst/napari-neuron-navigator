@@ -46,9 +46,12 @@ Unless a use case says otherwise:
 | [UC-018](#uc-018-include-and-exclude-atlas-regions-when-clustering) | Include or exclude independently dilated atlas regions before voxel or soma clustering | Partially run |
 | [UC-019](#uc-019-filter-voxel-correlation-by-node-type-dendrite-label-coverage-or-soma-distance) | Exclude soma and possible dendrites from voxel correlation using annotation-aware or geometric filters | Not run |
 | [UC-020](#uc-020-find-neurons-with-similar-voxel-count-patterns) | Search scoped neurons in CCFv3 or flatmap space by Pearson distance, annotate the cohort, and transfer Search distance colors into Data and Flatmap | Partially run |
-| [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Build a regional profile and combine soma, neurite, laterality, and measurement conditions in the Regions tab | Partially run |
+| [UC-021](#uc-021-build-and-run-a-compound-regional-profile-query) | Query regional soma/neurite measurements and annotate matching neurons in an existing cohort | Partially run |
 | [UC-022](#uc-022-adjust-clustermap-contrast-and-compare-color-scales) | Reveal small distance differences and lock clustermap color limits across comparable runs | Not run |
 | [UC-023](#uc-023-keep-region-surfaces-aligned-when-transposing-axes) | Keep region meshes and cached flatmap surfaces aligned when changing display axes | Not run |
+| [UC-024](#uc-024-report-cohort-neurite-coverage-by-anatomical-region) | Report regional cohort coverage and tag neurons from selected report regions | Not run |
+| [UC-025](#uc-025-cluster-mos-neurons-by-regional-neurite-profiles) | Cluster regional neurite profiles and inspect MOs cohorts with post hoc annotation overlays | Not run |
+| [UC-026](#uc-026-filter-data-rows-by-labels-and-tags) | Search single/multiple Tags, delete Tags, and color annotated neurons while retaining the cohort | Not run |
 
 ### UC-001: Download an Allen Mouse Atlas
 
@@ -2675,8 +2678,10 @@ The user can build a validated regional-profile sidecar for the loaded neuron
 Parquet and use it to find neurons with nested Boolean combinations of soma
 location, non-soma neurite intersection, cable length, node count, termini,
 and soma-relative laterality. The structured builder keeps this workflow in
-the existing **Regions** tab and sends matches through the same **Data** table
-path as the existing simple Atlas, Custom, and Mask queries.
+the existing **Regions** tab. **Result action** can replace Data with matches,
+add a tag to matching current-table neurons, or set their Label while retaining
+the table cohort. Annotation actions always use **Current Table**, keyed by
+`file_id`; nonmatching neurons retain their metadata.
 
 **Prerequisites**
 
@@ -2732,7 +2737,8 @@ path as the existing simple Atlas, Custom, and Mask queries.
    **Expected:** The selected terminal numeric atlas IDs are copied into that
    condition as direct regions. They are not inferred from display acronyms and
    do not change another condition.
-8. **Action:** Set **Search scope** to **Whole Parquet**, click **Run Compound
+8. **Action:** Keep **Result action** at **Replace table with matches**. Set
+   **Search scope** to **Whole Parquet**, click **Run Compound
    Region Query** for the two-clause contralateral CP query, and exercise
    **Cancel Query** once before completing a subsequent run.
    **Expected:** The sidecar is validated against the source and atlas before
@@ -2761,6 +2767,37 @@ path as the existing simple Atlas, Custom, and Mask queries.
     behavior, scope behavior, previews, and Data-table results retain their
     prior semantics. In a new widget session, **Node types** defaults to
     **Soma**; other node types and **All node types** remain selectable.
+12. **Action:** To label an existing cohort, load
+    `isocortex_total_right_brainglobe_flatmap.parquet`, its matching regional
+    profile, and `allen_mouse_25um` v1.2. Use **Atlas Regions**, **Whole Parquet**,
+    **Soma**, and MOs5 (**Secondary motor area, layer 5**, ID `767`) to populate
+    Data. Record its file IDs and row count. Add an existing Label and Tag to
+    matching and nonmatching neurons and select a row for preservation checks.
+    **Expected:** Data contains the MOs5 soma cohort from the simple query.
+13. **Action:** Switch to **Compound Region Query**. Set a condition to
+    **Projection (all non-soma neurites)** > **Termini**, **Either**, **>**, `0`.
+    In **Edit Regions...**, choose TH (**Thalamus**, ID `549`) with **Include
+    child regions**. Set **Result action** to **Add tag to matches in current
+    table**, enter `TH termini` in **Annotation text**, and click **Tag Matches
+    in Current Table**. Inspect Data, then repeat the same action.
+    **Expected:** Search scope automatically becomes **Current Table** and is
+    locked for annotation. All original rows stay in Data, including nonmatches.
+    Matches gain `TH termini` once; their existing Labels and Tags remain.
+    Nonmatches, row selection, colors, visibility, groups, notes, and scene
+    membership are retained. **Table view: Label** reveals the annotation
+    columns; an existing Full view is retained. The status reports matched and
+    retained cohort counts. Save/reopen the project to check tag persistence.
+14. **Action:** Change **Result action** to **Set Label for matches in current
+    table**, enter a Label, and click **Label Matches in Current Table**. Try a
+    query with no matches, a blank annotation, an empty table, cancellation, and
+    a table membership change during a running query.
+    **Expected:** Label mode replaces only matched neurons' Labels; Tags and
+    other metadata remain. No matches leave the table unchanged. Blank text and
+    empty cohorts do not launch a query. Cancelled or stale-context results
+    change no rows. Changed table membership discards the annotation result and
+    asks for a new run; it cannot label a different cohort accidentally. Action,
+    text, and input IDs are captured before work starts. Choosing **Replace table
+    with matches** re-enables scope selection and restores the filtering action.
 
 **Manual verification**
 
@@ -2771,7 +2808,12 @@ path as the existing simple Atlas, Custom, and Mask queries.
   cancellation, stale or incompatible sidecars, atlas changes, empty-table
   handling, and regression checks for every existing query mode, was not run.
   Stage 3 also has headless model, worker, scope, table-handoff, and
-  existing-mode regression coverage.
+  existing-mode regression coverage. The annotation workflow in steps 12–14
+  was added on 2026-10-27 and is **Not run** manually. Automated Qt checks cover
+  a simple soma query followed by tag/Label queries, duplicate display IDs,
+  cohort restriction, nonmatch and metadata preservation, repeated tags,
+  zero matches, empty inputs, cancellation, changed membership, and table-state
+  persistence.
 
 ### UC-022: Adjust Clustermap Contrast and Compare Color Scales
 
@@ -2924,6 +2966,629 @@ colors, and atlas resolution scaling remain unchanged.
   MOs, a Custom MOs1/MOp1 layer-1 group, and the brain outline were inspected
   after transpose and roll. The complete button-driven workflow above remains
   unrun; details are recorded in the poster workflow's Step 8.
+
+### UC-024: Report Cohort Neurite Coverage by Anatomical Region
+
+**Capability**
+
+The collapsible **Region Report** in **Regions** summarizes neurite coverage,
+cable length, and reconstructed childless non-soma termini for a selected
+cohort. Its anatomical tree contains only regions with positive neurite node
+count or cable length in the cohort, together with their grouping ancestors.
+Expanded branches show individual direct-region contributions. Collapsing a
+branch combines its direct label and retained descendants, deduplicating
+neurons by `file_id`. Regions with only soma contributions do not appear.
+
+| Column | Meaning |
+| --- | --- |
+| Region | Atlas region name and acronym |
+| Neurons present | Distinct cohort `file_id` values with positive neurite node count or cable length |
+| Cohort present (%) | Neurons present divided by the entire selected cohort, times 100 |
+| Total cable (mm) | Summed neurite cable length in micrometres, divided by 1,000 |
+| Mean cable per cohort neuron (mm) | Total cable divided by the entire cohort, including zero contributions |
+| Neurons with termini (%) | Distinct cohort neurons with at least one reconstructed terminus, divided by the entire cohort, times 100 |
+| Total termini | Summed childless non-soma nodes |
+
+All non-soma source node types contribute to these measurements. The report
+does not separate axonal and dendritic compartments. Region `0` appears as
+**Outside / unmapped**, independently of the atlas root.
+
+Selecting report rows previews the union of their matching cohort neurons.
+**Tag Neurons in Data** appends a separate **Region: acronym** tag for each
+selected region that a neuron actually contributes to. Parent rows cover
+retained descendants; **[direct]** rows cover their direct label only. Split
+rows include the laterality in the tag, for example **Region: CP
+(contralateral)**. This uses report membership by `file_id`, including
+cable-only intersections, and preserves existing Labels, Groups, Tags, Notes,
+colors, visibility, and Data row selection. Reapplying the same tag does not
+create duplicates. Report selection alone does not change annotations.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet` and its compatible
+  `allen_mouse_25um` atlas, version `1.2`.
+- Keep `isocortex_total_right_brainglobe_flatmap.region_profile.parquet` beside
+  the source, or complete **Build Regional Profile** first. The profile is
+  validated against the source and loaded atlas before report generation.
+- Populate **Data** > **Selected Neurons**, for example with an Atlas Regions
+  query. Include neurons with overlapping regional projections, neurons with
+  contralateral contributions, and neurons that do not contribute to at least
+  one represented region. Note the table's unique `file_id` cohort size.
+- For an independent numerical check, sum the profile's `compartment = neurite`
+  rows restricted to the same `file_id` cohort. Determine region presence from
+  `node_count > 0 OR cable_length_um > 0`. Count termini-positive neurons from
+  `terminus_count > 0`. Resolve grouping ancestors from atlas structure paths.
+
+**Steps and expected results**
+
+1. **Action:** Open **Regions** and expand **Region Report**. Set **Cohort** to
+   **Data table** and leave **Split by laterality** unchecked.
+   **Expected:** The report updates in the background and names the cohort
+   size. It shows the seven columns above and initially sorts **Cohort present
+   (%)** descending within anatomical siblings. All branches start expanded.
+   Grouping ancestors with no direct contribution show no separate direct row;
+   no unrelated or soma-only regions appear.
+2. **Action:** Compare a direct-region row with the independently restricted
+   profile rows. Include a region crossed by an edge without a sampled node.
+   **Expected:** Counts use distinct `file_id`, cable includes cable-only
+   intersections, and both percentage denominators and the mean denominator
+   are the entire cohort. A neuron absent from the region contributes zero.
+   Counts and percentages sort numerically when their column headers are used.
+3. **Action:** Collapse an anatomical branch containing several represented
+   child regions. Expand it again, and try **Collapse All** and **Expand All**.
+   **Expected:** A collapsed row shows combined measurements over the region's
+   direct label and retained descendants. A neuron present in multiple children
+   is counted once. Expanded grouping rows have blank numeric cells; a parent
+   with its own contribution also has a **[direct]** child, keeping visible
+   direct contributions separate from subtree totals. Outside/unmapped stays
+   separate from the atlas root.
+4. **Action:** Enable **Split by laterality**, then disable it.
+   **Expected:** A **Laterality** column appears and separates soma-relative
+   ipsilateral, contralateral, midline, and unknown contributions that actually
+   exist. Each side retains the full cohort denominator. Disabling the option
+   recombines sides and deduplicates neurons present on multiple sides.
+5. **Action:** Expand **Exclude Regions**, search for a represented child
+   region, and check it. Then exclude a parent and an overlapping child.
+   **Expected:** The familiar clustering hierarchy picker offers exclusion
+   only, without inclusion, dilation, or soma eligibility controls. Selected
+   regions and their descendants contribute no cable, presence, or termini.
+   Remaining parent totals are recomputed. Overlapping exclusions remove each
+   contribution once. The cohort and all denominators stay unchanged. Excluded
+   branches remain in the picker so they can be unchecked.
+6. **Action:** In **Data**, select a smaller set of rows. Return to the report
+   and choose **Selected rows**. Change the selected rows, then clear selection.
+   **Expected:** The report follows the selected `file_id` cohort, independently
+   of Regions query scope. With no selected rows it clears and asks for a row
+   selection. It never falls back to the full table. Table membership changes
+   similarly update **Data table** reports; color-only edits do not regenerate
+   measurements. Neuron tables, colors, and rendering are unchanged by reporting.
+7. **Action:** Exclude every represented region, including Outside/unmapped
+   if present. Clear the exclusions, and click **Refresh Report**.
+   **Expected:** Complete exclusion produces an empty report with the original
+   cohort size. Clearing exclusions restores contributions. A cohort with only
+   soma nodes likewise has no neurite rows, without a division-by-zero failure.
+8. **Action:** Try a missing or incompatible profile, then use **Build Regional
+   Profile**. Change the source, atlas, or cohort while a report is running.
+   **Expected:** Missing/incompatible inputs show an actionable report status
+   and no stale measurements. A completed build refreshes the report. Older
+   background results are discarded after context changes. A cohort containing
+   file IDs absent from the profile produces an explicit error. Closing the
+   plugin cancels pending report work.
+9. **Action:** Switch napari between its dark and light themes while the
+   populated report is open.
+   **Expected:** Region labels and numeric cells stay readable on every row.
+   Row backgrounds follow the active theme, including after switching themes.
+10. **Action:** Select multiple report rows using the platform's multi-selection
+    keys. Check the matching-neuron preview, then click **Tag Neurons in Data**.
+    **Expected:** Data opens with **Table view** set to **Label**, revealing
+    **Tags**; an existing **Full** view is retained. Each matching neuron gets
+    only the tags for the selected rows it contributes to. Neurons outside the
+    report cohort and non-contributors retain their previous metadata. Existing
+    Labels and Tags are preserved. Clicking the action again does not duplicate
+    tags. Save and reopen a project or enhanced Parquet to check tag persistence.
+11. **Action:** Repeat tagging with a collapsed parent, a **[direct]** row,
+    laterality-specific rows, active exclusions, and a **Selected rows** cohort.
+    Change the cohort after selecting report rows, before applying tags.
+    **Expected:** Tag membership agrees with **Neurons present** for each row,
+    respects exclusions and laterality, and distinguishes direct labels from
+    descendants. Selecting a parent and child adds both tags to shared neurons
+    without duplicate tags. Children hidden by a collapsed ancestor are not
+    applied. Tagging retains Data row selection, so it does not change a
+    **Selected rows** cohort. A changed cohort invalidates the report selection
+    and disables tagging until current rows are selected again.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-27
+- Notes: The complete interactive napari workflow above has not been exercised.
+  Automated tests cover cohort denominators, duplicate display identifiers,
+  direct and descendant aggregation, cable-only/node-only presence, laterality,
+  unmapped regions, overlapping exclusions, and empty or missing cohorts. Qt
+  tests cover table columns, numeric sorting, expand/collapse, exclusion-only
+  controls, cohort changes, stale results, and background report execution.
+  A backend audit on 2026-10-27 used all 18,621 neurons in the named profile:
+  combined and laterality-split reports both preserved 1,818,485,456.545 µm of
+  cable and 4,729,228 termini. A scripted napari-widget screenshot was inspected;
+  this does not establish completion of the manual workflow above.
+  Row-to-neuron tagging and metadata preservation were added on 2026-10-27;
+  their complete manual workflow remains Not run.
+
+### UC-025: Cluster MOs Neurons by Regional Neurite Profiles
+
+**Capability**
+
+**Regions** > **Regional-Profile Clustering** clusters neurons by their regional
+non-soma neurite profiles. Each row is one `file_id`; `neuron_id` is never the
+identity. Each feature is a retained region/group and laterality bucket.
+Absent contributions are zero. The initial modes are independent:
+
+| Measurement | Feature values | Distance | Linkage |
+| --- | --- | --- | --- |
+| Neurite cable distribution | Summed `cable_length_um` | Cosine | Average |
+| Regions reached | Binary presence: positive node count **or** cable length | Jaccard | Average |
+| Reconstructed terminus distribution | Summed `terminus_count` | Cosine | Average |
+
+Anatomical grouping uses direct atlas IDs or the outermost collapsed Region
+Report branches. Each retained direct region contributes to one group only;
+uncollapsed regions keep their own direct feature. Parent and child totals
+are never included twice. Grouping choices are applied consistently across
+laterality. Exclusions remove selected regions, their direct labels, and all
+descendants without removing neurons from the input cohort. Region zero is
+outside/unmapped, independent of the atlas root, and can also be excluded.
+
+All measurements cover **neurites**, not a biological axon/dendrite partition.
+Termini are reconstructed childless non-soma nodes from the complete source
+graphs. Zero-feature neurons are excluded from distance computation, remain
+unassigned, and are listed by `file_id` in **Zero-Feature Neurons (Excluded)**.
+Labels and tags are never used as clustering inputs. Random forests, combined
+measurement weights, and automatic biological class labels are outside this
+first pass.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet`, its matching
+  `.region_profile.parquet` sidecar, and `allen_mouse_25um` version `1.2`.
+  Build a compatible profile using UC-021 if necessary.
+- In **Regions**, use **Atlas Regions**, **Whole Parquet**, **Soma** node types,
+  and MOs (**Secondary motor area**, atlas ID `993`) with **Include child
+  regions** to populate Data with an MOs soma cohort. Record the exact `file_id`
+  membership. A backend-only audit of the named sidecar found 1,898 such neurons;
+  this count is not a record of passing the manual UI workflow.
+- Keep separately obtained IT-like/PT-like annotations keyed by `file_id`,
+  with their source and annotation method recorded. Hold them aside for the
+  initial clustering run; enter them in Data's Label field only afterward.
+  Use only the available annotated subset for overlay inspection and record
+  the number of unlabelled neurons.
+
+**Steps and expected results**
+
+1. **Action:** Expand **Regional-Profile Clustering**. Set **Cohort scope** to
+   **Current table**, **Measurement** to **Neurite cable distribution**,
+   **Anatomical grouping** to **Direct atlas regions**, **Laterality** to
+   **Separate sides (including midline / unknown)**, and **Requested clusters**
+   to `5`. Leave the annotation overlay at **None**.
+   **Expected:** Ipsilateral and contralateral features are distinct, with
+   midline/unknown retained when present. The next-run cohort and pairwise
+   memory estimate are visible. The working estimate covers distance/feature
+   buffers and an isolated linkage process; existing app/atlas memory is
+   additional. No class labels are requested or inferred.
+2. **Action:** In this section's **Exclude Regions**, search for MOs and check
+   it, then click **Run Regional Clustering**.
+   **Expected:** The profile is validated against source and atlas. MOs and its
+   descendants contribute no features, including the direct MOs label. Other
+   projections remain. Progress runs in the background. Memory is checked
+   before allocating condensed distances; jobs over **Working memory limit**
+   fail with an actionable message. A successful run records the full input
+   cohort, used features, exclusions, source/atlas identities, metric, linkage,
+   requested cluster count, and zero-feature IDs.
+3. **Action:** Inspect **Zero-Feature Neurons (Excluded)** and the completed
+   heatmap. Toggle **Normalize heatmap rows (display only)**.
+   **Expected:** All excluded IDs are listed, never silently assigned a cluster.
+   The heatmap contains nonzero neurons in linkage leaf order, with a cluster
+   strip and region/laterality columns. Normalization changes only the display
+   to within-neuron fractions; stored cable/terminus vectors and assignments
+   are unchanged. Binary reached features stay binary. Too few nonzero neurons
+   for the requested count produce an explicit error with the zero list retained.
+4. **Action:** Choose **Cluster 1** in **Inspect cluster** or click its heatmap
+   rows, then choose another cluster.
+   **Expected:** Its neurons are selected by `file_id` in Data, row filters are
+   cleared so members can be exposed, and Region Report switches to **Selected
+   rows** with the same exclusions. The current heatmap retains the completed
+   input snapshot. Changing selection only changes the next-run cohort when
+   **Cohort scope** is **Selected rows**. Named assignments appear in Data's
+   existing assignment registry and cluster columns, including unassigned zeros.
+5. **Action:** Enter a descriptive group name and click **Save Neuron Group...**.
+   Save a JSON file. Also use **Save Clustering Result...** to save an NPZ.
+   **Expected:** JSON contains the selected cluster's `file_id` membership and
+   clustering provenance. Data's Group field is set for current matching rows;
+   Labels, Tags, Notes, and table membership are retained. NPZ contains raw
+   nonzero feature rows, file IDs, assignments, linkage, leaf order, and JSON
+   provenance, including zero-feature IDs and the full original cohort. The NPZ
+   can be read with `numpy.load(..., allow_pickle=False)`; no pickle is needed.
+   Save/reopen a project to verify assignment settings, feature definitions,
+   cohorts, unassigned IDs, and Group metadata persist. Runtime heatmaps can be
+   regenerated from the recorded configuration; project assignment storage
+   does not embed the complete runtime matrix.
+6. **Action:** Return to Region Report, collapse anatomical branches to the
+   desired groups, and choose **Collapsed Region Report groups** for a new run.
+   Try a parent and previously collapsed child, then exclude a child region.
+   **Expected:** The outermost collapsed group takes precedence. Each retained
+   direct contribution is allocated once; excluded children disappear from
+   group totals. A direct-parent label and its descendants are combined only
+   when that parent is a chosen grouping root. If no branches are collapsed,
+   the grouping is direct. Feature definitions record their exact direct IDs.
+7. **Action:** Run **Regions reached** and **Reconstructed terminus distribution**
+   separately with the same cohort and settings. Include a cable-only regional
+   intersection in an independent spot check.
+   **Expected:** Reached is binary Jaccard and counts cable-only intersections.
+   Termini uses reconstructed counts and cosine. Both use average linkage, and
+   feature-zero exclusions can differ by mode. Each run has a separate named
+   assignment with its own definitions; no measurement weighting is applied.
+8. **Action:** Select a smaller Data cohort and run using **Selected rows**.
+   Exercise **Cancel Clustering** during distance computation and linkage.
+   Change the cohort or loaded source/atlas during a run.
+   **Expected:** Input membership is captured by `file_id`. Cancellation stops
+   the job, terminates active linkage work, cleans temporary files, and publishes
+   no partial assignment. Cohort changes during a run cancel that snapshot;
+   source/atlas changes discard stale results. Earlier saved assignments remain.
+9. **Action:** After completing an unlabelled run, enter the separately obtained
+   IT-like/PT-like annotations in **Data** > **Table view: Label** > **Label**,
+   then choose **Overlay Data annotations: Label** and **Refresh Overlay**.
+   **Expected:** A categorical strip and cluster-by-annotation count table
+   support inspecting agreement and unlabelled coverage. Raw feature vectors,
+   distances, cluster assignments, and input settings are unchanged. No IT/PT
+   labels were used to select features, optimize clusters, or name biological
+   classes automatically. Agreement is a **consistency check**, not independent
+   biological validation. Record annotation provenance and any manual choices
+   of grouping, exclusions, mode, or cluster count made after viewing labels.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-27
+- Notes: The MOs workflow and IT-like/PT-like overlay have not been exercised
+  manually in napari. Synthetic backend and Qt checks do not establish manual
+  verification or biological validation. Backend-only five-cluster runs over the
+  named 1,898-neuron MOs soma cohort with MOs excluded found 1,142 cable features
+  and zero zero-feature neurons, 1,160 reached features and zero zero-feature
+  neurons, and 1,051 terminus features with one zero-feature neuron. The default
+  separate-laterality working estimates were about 165–169 MiB, below the
+  512 MiB default limit. All three average-linkage runs completed and exported
+  their raw features and provenance. These are backend measurements, not class-agreement
+  results. Focused automated checks cover aggregation, identity, zero filling,
+  intersection semantics, grouping, exclusions, distances, zero neurons,
+  cancellation, memory guards, persistence, and post hoc overlay isolation.
+
+### UC-026: Filter Data Rows by Labels and Tags
+
+**Capability**
+
+The **Label** and **Tag** dropdowns above Data's neuron table show rows matching
+existing annotations. Each selector offers all values, an unannotated option,
+and the table's distinct values with cohort counts. Matching is exact and
+case-sensitive. Label, Tag, Cluster, and Manual Heatmap filters combine with
+AND. Filtering preserves `file_id` membership, annotations, and scene state.
+The Tag selector accepts several checked names. **Tag matching** supports any,
+all, or exactly those names; **Tag count** uses the neuron's complete distinct
+tag set. **Tag Tools** deletes exact names or applies colors within an explicit
+scope. Deletion retains other fields and supports one-level undo. Automatic
+colors distinguish complete tag combinations; single-color application can
+color all matching neurons together.
+
+**Prerequisites**
+
+- Populate Data using the simple MOs5 soma query in UC-021, or another repeatable
+  query. Record the cohort IDs and size. Include at least one unlabelled,
+  untagged neuron, shared and distinct Labels, and neurons with several Tags.
+- Use UC-021 to tag thalamic-terminus matches `TH termini`, or add known Tags
+  through **Table view: Label**. Include a second tag to check exact membership.
+- For combination checks, retain an existing named cluster assignment and a
+  manual neuron heatmap with known memberships.
+
+**Steps and expected results**
+
+1. **Action:** Open Data and inspect **Label** and **Tag** above the table.
+   **Expected:** **All labels** and **All tags** initially show the whole cohort
+   permitted by any existing row filters. Values are sorted naturally, so Rank 2
+   precedes Rank 10. Option counts refer to the full cohort, independently of
+   current filters. **Showing N of M neurons** distinguishes displayed rows
+   from table membership. The selectors remain available in every Table view.
+2. **Action:** Choose **Tag: TH termini**, then a known **Label**.
+   **Expected:** Only rows with that exact tag and Label are shown. A neuron
+   carrying several Tags matches any individually selected tag it contains.
+   Partial names and different capitalization do not match. An empty
+   intersection displays zero rows and retains the cohort. Sorting the table
+   does not expose nonmatches or hide matching file IDs.
+3. **Action:** Also choose a Cluster and Manual Heatmap filter, then click
+   **Clear Label/Tag Filters**.
+   **Expected:** All active filters intersect. Clearing Label/Tag restores
+   **All labels** and **All tags** while retaining the Cluster and Manual Heatmap
+   choices. Clearing the other filters restores the full table.
+4. **Action:** Choose **No label** and/or **No tags**. Annotate a displayed
+   neuron through an inline cell edit, compound-query action, or Region Report.
+   Remove or change the last occurrence of a selected annotation.
+   **Expected:** Options, counts, and displayed rows update after the edit.
+   A selected annotation with no remaining matches stays selected with count
+   zero; the filter never silently broadens to all neurons. New annotations
+   become available without reloading the data.
+5. **Action:** Filter by Tag, highlight the displayed rows using Cmd+A or
+   Ctrl+A, and run an analysis with **Selected rows** scope.
+   **Expected:** Only visible highlighted `file_id` values are selected for the
+   operation. Region Report's Selected rows scope follows visible selection
+   changes. A **Current Table** scope still uses the entire retained cohort.
+6. **Action:** Generate a replacement table with a simple query or click
+   **Clear Table**. Restore a project containing Labels and Tags.
+   **Expected:** Replacement and clear actions reset Label/Tag choices. Restored
+   annotations populate the selectors. Existing annotations persist through the
+   usual project/table-state mechanism; filter choices are view controls.
+7. **Action:** In Regional-Profile Clustering, select a cluster while Label or
+   Tag filtering is active.
+   **Expected:** Inspection clears row filters so all current-table cluster
+   members can be selected and passed to Region Report.
+8. **Action:** Check `TH termini` and a second existing tag in the Tag popup.
+   Switch **Tag matching** between **All checked tags**, **Any checked tag**,
+   and **Exactly these tags**. Try **Tag count: Exactly one tag** and **Two or
+   more tags**, with and without named tags checked.
+   **Expected:** All requires every checked tag and permits extra tags; Any
+   requires at least one; Exactly requires the complete tag set to equal the
+   checked set. Tag count counts all distinct names, including unchecked ones.
+   Choosing one checked tag with Exactly finds neurons carrying only that tag.
+   Mouse clicks keep the popup open; Space toggles keyboard-focused choices.
+   All tags and No tags are mutually exclusive with checked tag names.
+9. **Action:** Expand **Tag Tools**, check a tag name, and inspect the deletion
+   preview. Choose **Tag action scope: Displayed rows**, then **Delete Checked
+   Tags**. Repeat with **Selected rows** and **Entire table** on suitable data.
+   **Expected:** Only checked exact names are removed within the chosen scope.
+   Entire table includes filtered-out rows, while Selected rows uses visible
+   highlighted neurons. Other tags, Labels, Groups, Notes, colors, scene state,
+   and membership remain. A tag named `TH termini ipsilateral` is unaffected
+   when only `TH termini` is deleted. The status reports removed assignments
+   and affected neurons; filters with no remaining matches stay selected.
+10. **Action:** Add a new tag after deletion and click **Undo Tag Deletion**.
+    Then replace or clear the table, or restore a project, and inspect undo.
+    **Expected:** Undo restores the last deleted names for surviving file IDs
+    without removing newer tags or duplicating names. Replacement, clear, and
+    project restore reset this undo history, so it cannot affect another source.
+11. **Action:** With several overlapping tag sets and at least one untagged
+    neuron, choose an action scope and click **Color by Tag Combination**.
+    Inspect the legend and rendered neurons. Then filter to a chosen single
+    tag or conjunction and use **Set Color...** to apply one chosen color.
+    Cancel the color dialog once, and test a scope with no rows.
+    **Expected:** Identical complete tag sets have identical colors, regardless
+    of tag order. The palette distinguishes up to 256 tagged combinations
+    before repeating, which the completion status reports when applicable;
+    untagged neurons are gray. The legend describes the last application and
+    its counts. The palette uses the full cohort so changing scope does not
+    reshuffle group colors. Set Color changes only the scope, including all
+    tag combinations within it. Color updates follow existing neuron rendering
+    propagation, while other metadata is retained. Cancel or an empty scope
+    changes nothing. Reapply automatic colors after changing tags.
+12. **Action:** Save and reopen a project or enhanced Parquet after deleting
+    tags and applying colors.
+    **Expected:** The edited tags and per-neuron colors persist. Transient
+    search choices, deletion undo history, and the last-applied legend are view
+    state and are not required to reconstruct the saved neuron metadata.
+
+**Manual verification**
+
+- Status: Not run
+- Last verified: Never
+- Added: 2026-10-27
+- Notes: Automated checks cover exact matching, empty annotations, combined
+  filters, natural sorting, duplicate display identifiers, updates and removal,
+  zero-match choices, cohort preservation, visible selection, and resets.
+  Checks also cover any/all/exact matching, distinct tag cardinality, popup
+  interactions, scoped deletion and undo, exact removal, combination colors,
+  color scope, cancellation, and table-state persistence.
+  The complete manual napari workflow above has not been exercised.
+
+### UC-027: Define Live Neuron Sets and Compare Their Spatial Regions
+
+**Capability**
+
+Create named neuron sets from query-generated Tags and Label/Tag filter rules.
+Sets update with annotation edits and Data cohort changes. The Sets view shows
+each name, current neuron count, and live rule. Inspect members using existing
+Selected rows workflows, generate set heatmaps, and compare both shared neuron
+membership and spatial overlap of thresholded blurred heatmap regions.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet` and its matching atlas.
+  Populate Data with the MOs5 soma cohort described in UC-021; record the exact
+  source path, atlas name/resolution, cohort count, and tested `file_id` values.
+- Follow UC-021 or UC-024 to add query-derived Tags, such as `TH termini` and a
+  second regional-query tag. These are annotation rules; compartment labels
+  alone do not establish biological identity (see AGENTS.md).
+- For a controlled membership check, start with three distinct current-table
+  file IDs and record them as A, B, C. In **Table view: Label**, give A the Tags
+  `set-check-TH, set-check-CP`, B `set-check-TH`, and C `set-check-CP`.
+  Ensure no other cohort row has these two test tags. Preserve existing tags
+  when adding the test names. These controlled tags test the set logic, while
+  the region-query tags exercise the intended scientific workflow.
+
+**Steps and expected results**
+
+1. **Action:** In Data, choose **Table view: Sets**. Clear Label/Tag filters,
+   check `set-check-TH` in **Tag**, type `TH set` in **Set name**, and click
+   **Create Set from Filters**. Repeat for `set-check-CP`, naming it `CP set`.
+   **Expected:** Two set rows each show 2 neurons and their saved rules. A
+   belongs to both sets, B only to TH, C only to CP. Set counts evaluate the
+   entire Data cohort regardless of Cluster, Manual Heatmap, or Set filters.
+   Empty or duplicate set names produce a message without replacing a set.
+2. **Action:** Check both test tags. Try **Tag matching: All checked tags**,
+   **Any checked tag**, and **Exactly these tags**. Then choose only TH and
+   check CP under **Exclude tags**. Create a third set from that rule.
+   **Expected:** All gives A; Any gives A/B/C; Exactly gives only neurons whose
+   complete tag set equals the two checked names (A only if it has no other
+   tags). TH with CP excluded gives B. **Tag count** and Label restrictions
+   are saved too. Unchecked exclusions leave membership unrestricted.
+3. **Action:** Select `TH set`, click **Show Members**, and use an existing
+   analysis with **Selected rows** scope.
+   **Expected:** Annotation, Cluster, and Manual Heatmap filters are cleared;
+   the Set filter shows TH. A/B are visible and selected. All original cohort
+   rows remain in Data. Ordinary row filters can further narrow this view;
+   they do not alter the set rule.
+4. **Action:** Use **Load Rule into Filters** to inspect a set's rule. Edit
+   filters/name and use **Update Set from Filters**. Use **Delete Set** on the
+   temporary third set. Add TH to C, then remove it again.
+   **Expected:** Updating retains the set identifier. Deletion removes only
+   its definition. TH's count changes 2 → 3 → 2 without recreating it. A set
+   with no current members remains defined with count zero; its heatmap action
+   reports that no members are available.
+5. **Action:** Select each of TH and CP and click **Create Set Heatmap**. In
+   **Tools → Heatmap Sources**, select the two generated `Set: … Heatmap`
+   layers, choose **Create mode: Separate layers**, set **Gaussian sigma
+   (voxels): 1.00**, then click **Create Blurred Layer**.
+   **Expected:** Background heatmap creation uses all current set members,
+   independently of selected/hidden rows. Each heatmap and derived blurred
+   layer records the set name, rule, identifier, and creation-time file IDs.
+   Existing heatmap work blocks a competing request with a status message.
+6. **Action:** In **Histogram**, select each blurred layer in turn. Expand
+   **Mask Creation**, use **Separate layers**, click **Use Otsu Lower** (or
+   specify a positive **Lower bound**), leave **Use upper bound** unchecked,
+   and click **Create Mask Layer**. Record the exact thresholds and sigma.
+   **Expected:** Separate masks represent the two sets' spatial regions. The
+   displayed mask extent depends on sigma and threshold; these settings must
+   accompany any interpretation of the overlap result.
+7. **Action:** In **Tools → Neuron Set Overlap**, choose TH as **Set A**, CP as
+   **Set B**, and the corresponding masks under **Region**. Click **Compare
+   Sets**.
+   **Expected:** Neurons: A=2, B=2, intersection=1, union=3, A only=1, B only=1,
+   directional coverage=50%, Jaccard=33.33%, Dice=50%. Spatial voxels are
+   calculated independently from the masks: intersection counts voxels in both,
+   union counts voxels in either, Jaccard=intersection/union, and
+   Dice=2×intersection/(A+B). Sigma and both threshold ranges are shown.
+   **Membership only** works without masks. Empty denominators display N/A.
+8. **Action:** With both masks selected, click **Create Intersection Mask**.
+   **Expected:** A new yellow Labels layer named `Intersection: … ∩ …`
+   contains label 1 only where both masks are nonzero and label 0 elsewhere.
+   Its voxel count equals the reported spatial intersection, and it retains
+   the source spatial transform. The originals remain unchanged. Repeated
+   creation produces distinct layer names. The button is disabled until two
+   region masks are selected; a prior **Compare Sets** click is unnecessary.
+   Disjoint masks produce an empty mask and an explicit empty-intersection
+   status. The new mask is available in Regions mask queries and records both
+   source masks, set memberships, sigma, and thresholds. Query source exclusion
+   uses the union of source neurons that contributed to the two masks.
+   To check querying, open **Regions**, choose **Query source: Mask Layer**,
+   select the intersection, set **Search scope: Whole Parquet** and the desired
+   **Node types**, then click **Find Neurons in Selected Mask Layers**. Repeat
+   with **Current Table**. Results contain each matching `file_id` once, obey
+   source exclusion and node-type choices, and appear sorted by `file_id`.
+   Mask preparation and searching run in the background. A progress bar shows
+   the current phase and the status reports elapsed time and matches. Pan the
+   viewer while searching to check responsiveness. Click **Cancel Query**;
+   cancellation must leave Data unchanged. Repeat without cancelling to obtain
+   the final sorted cohort. Closing the widget cancels its active mask search;
+   changing a mask, the loaded source/atlas, or the Current Table cohort must
+   not allow an outdated result to replace Data. Broad masks should complete
+   without creating a temporary candidate table or index. Record the
+   source/cohort size and any storage failure when exercising the full dataset.
+9. **Action:** Add TH to C after creating the masks, then compare again. Also
+   test a region with a different shape or spatial transform.
+   **Expected:** Current neuron membership is reported; stale spatial results
+   display N/A with instructions to recreate the heatmap, blur, and mask.
+   Different atlas/grid/transform inputs are rejected. A combined mask from
+   different sets is not offered as a region belonging to either single set.
+   **Create Intersection Mask** rejects the same stale or incompatible inputs
+   without adding a layer.
+10. **Action:** Restore the initial annotations, regenerate if needed, save a
+   project, close and reload it. Also export/reload enhanced Parquet.
+   **Expected:** Set rules/names/identifiers survive both formats and resume
+   live evaluation. Projects additionally restore the mask arrays and their
+   source set snapshots, sigma, thresholds, and spatial transforms. Enhanced
+   Parquet preserves definitions and annotations; layer arrays are project
+   content. Removing rows changes live counts; clearing Data leaves rules
+   available with zero members. Loading a different source resets definitions.
+   Intersection masks also retain their arrays, spatial transforms, and both
+   source masks' provenance after a project reload.
+
+**Manual verification**
+
+- Status: **Not run**
+- Date recorded: **2026-11-03**
+- Updated: **2026-11-05** (bounded mask search with progress and cancellation)
+- Notes: Automated checks cover live include/exclude rules, full `file_id`
+  identity, empty/overlapping sets, table inspection and selection, heatmap →
+  blur → mask provenance, stale-mask and grid checks, and project/enhanced
+  Parquet persistence. Intersection checks cover exact shared voxels, empty
+  intersections, source preservation, query eligibility, and disabled/stale
+  input behavior. Direct Arrow scans are checked against a point-by-point
+  oracle, including batch boundaries, duplicate display IDs, upper voxel
+  boundaries, nonfinite coordinates, filters, missing statistics, and cleanup.
+  Real Qt checks cover responsiveness, progress, cancellation, late results,
+  changed inputs, and closing an active search. The supplied full-data TIFF
+  query (728,703,227 source nodes, Whole Parquet, any node, source exclusion
+  off) completed in 25.6 s at 792 MiB peak process RSS with no recorded process
+  output blocks or index files. An independent Dataset scan confirmed all
+  9,594 matching file IDs. This was a headless benchmark, not full manual
+  verification in napari. See [validation details](docs/mask_query_validation.md).
+
+
+### UC-028: Register a Loaded TIF as an Atlas Query Mask
+
+**Capability**
+
+Register an existing 3D Image or Labels layer for Regions mask queries. This
+allows a saved TIF to be reused after restarting napari. Positive voxel values
+are inside; zero and negative values are outside. Registration updates the
+layer's mask metadata and retains its data and appearance without creating an
+additional volume. Projects preserve the registration and original layer type.
+
+**Prerequisites**
+
+- Load a compatible neuron Parquet and atlas. For the supplied
+  `isocortex_total_right_brainglobe_flatmap.parquet` and
+  `Intersection Mask Blurred Set HB+MB Heatmap ∩ Mask Blurred Set TH Heatmap.tif`,
+  use `allen_mouse_25um` and the native `(528, 320, 456)` voxel grid.
+- Load the TIF into napari as a single 3D Image or Labels layer. The mask must
+  already be registered to the atlas anatomically and have an identity layer
+  transform. Matching array shape alone does not establish anatomical alignment.
+- For failure checks, have a 2D image, a differently sized volume, and a copy
+  with a nonidentity scale or translation available.
+
+**Steps and expected results**
+
+1. **Action:** Highlight the loaded TIF in napari's layer list. Open **Regions**,
+   choose **Query source: Mask Layer**, and click **Use Active Layer as Mask**.
+   **Expected:** The same layer appears checked in the mask selector. A status
+   confirms registration. No additional layer or volume is created. All positive
+   values, including integer labels greater than one, belong to the query mask.
+2. **Action:** Inspect the mask summary, then choose **Search scope: Whole
+   Parquet**, **Node types: All node types**, and click **Find Neurons in Selected
+   Mask Layers**. Repeat with **Current Table** and another node-type selection.
+   **Expected:** The existing cancellable background search handles the imported
+   mask. Source-neuron exclusions cannot be inferred from a standalone TIF;
+   the summary states this when no source identities are recorded. Known source
+   metadata on an existing generated mask is preserved when registering it.
+3. **Action:** Click **Use Active Layer as Mask** again for the same layer.
+   **Expected:** Registration is repeatable, without duplicating the layer or
+   altering its data. Only the chosen layer is checked for the next mask query.
+4. **Action:** Try registering with no atlas or no active layer. Try a Points
+   layer, a 2D/4D image, an incorrect grid shape, a transformed volume, or a layer
+   recording a different atlas.
+   **Expected:** A specific error appears and the incompatible layer is not
+   registered. The grid error directs the user to match atlas resolution and
+   reset transforms. No automatic resampling or anatomical registration occurs.
+   The registration button is disabled during an active query/profile build.
+5. **Action:** Save a project containing the imported mask, close, and reload it.
+   **Expected:** The mask is available for Regions queries without registering
+   it again. Image masks retain their Image type and original floating-point
+   values; Labels masks retain their Labels type. The standalone TIF itself
+   does not acquire plugin metadata or recover neuron-set provenance.
+
+**Manual verification**
+
+- Status: **Not run**
+- Date recorded: **2026-11-05**
+- Notes: Real Qt tests exercise loaded Image/Labels TIFF registration, querying,
+  source-provenance preservation, grid/type/atlas rejection, repeat registration,
+  and float-image project persistence. The complete manual workflow remains to
+  be exercised in napari.
 
 ## Use-Case Template
 

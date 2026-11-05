@@ -855,7 +855,11 @@ def _is_app_created_layer(layer: Any) -> bool:
 def _layer_kind(layer: Any) -> str:
     metadata = getattr(layer, "metadata", None)
     class_name = layer.__class__.__name__.lower()
-    if isinstance(metadata, Mapping) and metadata.get("mask_query_source"):
+    if (
+        isinstance(metadata, Mapping)
+        and metadata.get("mask_query_source")
+        and not metadata.get("mask_imported")
+    ):
         return "labels"
     if "labels" in class_name:
         return "labels"
@@ -1030,6 +1034,8 @@ def _layer_display_metadata(layer: Any) -> dict[str, Any]:
         "opacity",
         "scale",
         "translate",
+        "rotate",
+        "shear",
         "blending",
         "rendering",
         "gamma",
@@ -1038,6 +1044,10 @@ def _layer_display_metadata(layer: Any) -> dict[str, Any]:
     ):
         if hasattr(layer, attr_name):
             display[attr_name] = getattr(layer, attr_name)
+
+    affine = getattr(layer, "affine", None)
+    if affine is not None:
+        display["affine"] = getattr(affine, "affine_matrix", affine)
 
     colormap = getattr(layer, "colormap", None)
     if colormap is not None:
