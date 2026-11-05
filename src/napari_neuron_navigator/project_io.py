@@ -855,7 +855,11 @@ def _is_app_created_layer(layer: Any) -> bool:
 def _layer_kind(layer: Any) -> str:
     metadata = getattr(layer, "metadata", None)
     class_name = layer.__class__.__name__.lower()
-    if isinstance(metadata, Mapping) and metadata.get("mask_query_source"):
+    if (
+        isinstance(metadata, Mapping)
+        and metadata.get("mask_query_source")
+        and not metadata.get("mask_imported")
+    ):
         return "labels"
     if "labels" in class_name:
         return "labels"

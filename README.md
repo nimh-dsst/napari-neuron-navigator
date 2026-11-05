@@ -173,6 +173,16 @@ heatmaps and masks. Sigma and thresholds are shown with the result.
 **Create Intersection Mask** adds a separate binary mask containing only the
 voxels shared by the selected regions. It can be used in Regions mask queries
 and saved in a project with both source masks' provenance.
+Mask searches run in the background with a progress bar and **Cancel Query**.
+They read Parquet in bounded batches without a temporary candidate table or
+spatial index. Cancellation leaves Data unchanged. See the
+[real-data validation](docs/mask_query_validation.md) for measured time and memory.
+To use an existing TIF, load it as an Image or Labels layer, select that layer,
+then choose **Regions → Query source: Mask Layer → Use Active Layer as Mask**.
+The volume must already match the loaded atlas's native grid; positive values
+are inside the mask. Registration persists in projects. Standalone TIFs do not
+restore source-neuron or set membership. See
+[UC-028](USE_CASES.md#uc-028-register-a-loaded-tif-as-an-atlas-query-mask).
 See [UC-027](USE_CASES.md#uc-027-define-live-neuron-sets-and-compare-their-spatial-regions).
 
 Compound queries read a compact `source.region_profile.parquet` sidecar. Use

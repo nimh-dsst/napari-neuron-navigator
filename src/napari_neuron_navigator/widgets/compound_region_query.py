@@ -331,7 +331,7 @@ class RegionPickerDialog(QDialog):
         ids = () if selection is None else selection.region_ids
         self._selector.set_selected_ids(ids)
         self._selector.set_include_children_enabled(
-            False if selection is None else selection.include_descendants
+            True if selection is None else selection.include_descendants
         )
 
     def selection(

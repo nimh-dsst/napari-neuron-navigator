@@ -3474,6 +3474,20 @@ membership and spatial overlap of thresholded blurred heatmap regions.
    status. The new mask is available in Regions mask queries and records both
    source masks, set memberships, sigma, and thresholds. Query source exclusion
    uses the union of source neurons that contributed to the two masks.
+   To check querying, open **Regions**, choose **Query source: Mask Layer**,
+   select the intersection, set **Search scope: Whole Parquet** and the desired
+   **Node types**, then click **Find Neurons in Selected Mask Layers**. Repeat
+   with **Current Table**. Results contain each matching `file_id` once, obey
+   source exclusion and node-type choices, and appear sorted by `file_id`.
+   Mask preparation and searching run in the background. A progress bar shows
+   the current phase and the status reports elapsed time and matches. Pan the
+   viewer while searching to check responsiveness. Click **Cancel Query**;
+   cancellation must leave Data unchanged. Repeat without cancelling to obtain
+   the final sorted cohort. Closing the widget cancels its active mask search;
+   changing a mask, the loaded source/atlas, or the Current Table cohort must
+   not allow an outdated result to replace Data. Broad masks should complete
+   without creating a temporary candidate table or index. Record the
+   source/cohort size and any storage failure when exercising the full dataset.
 9. **Action:** Add TH to C after creating the masks, then compare again. Also
    test a region with a different shape or spatial transform.
    **Expected:** Current neuron membership is reported; stale spatial results
@@ -3497,12 +3511,84 @@ membership and spatial overlap of thresholded blurred heatmap regions.
 
 - Status: **Not run**
 - Date recorded: **2026-11-03**
+- Updated: **2026-11-05** (bounded mask search with progress and cancellation)
 - Notes: Automated checks cover live include/exclude rules, full `file_id`
   identity, empty/overlapping sets, table inspection and selection, heatmap →
   blur → mask provenance, stale-mask and grid checks, and project/enhanced
   Parquet persistence. Intersection checks cover exact shared voxels, empty
   intersections, source preservation, query eligibility, and disabled/stale
-  input behavior. The complete napari workflow remains to be exercised.
+  input behavior. Direct Arrow scans are checked against a point-by-point
+  oracle, including batch boundaries, duplicate display IDs, upper voxel
+  boundaries, nonfinite coordinates, filters, missing statistics, and cleanup.
+  Real Qt checks cover responsiveness, progress, cancellation, late results,
+  changed inputs, and closing an active search. The supplied full-data TIFF
+  query (728,703,227 source nodes, Whole Parquet, any node, source exclusion
+  off) completed in 25.6 s at 792 MiB peak process RSS with no recorded process
+  output blocks or index files. An independent Dataset scan confirmed all
+  9,594 matching file IDs. This was a headless benchmark, not full manual
+  verification in napari. See [validation details](docs/mask_query_validation.md).
+
+
+### UC-028: Register a Loaded TIF as an Atlas Query Mask
+
+**Capability**
+
+Register an existing 3D Image or Labels layer for Regions mask queries. This
+allows a saved TIF to be reused after restarting napari. Positive voxel values
+are inside; zero and negative values are outside. Registration updates the
+layer's mask metadata and retains its data and appearance without creating an
+additional volume. Projects preserve the registration and original layer type.
+
+**Prerequisites**
+
+- Load a compatible neuron Parquet and atlas. For the supplied
+  `isocortex_total_right_brainglobe_flatmap.parquet` and
+  `Intersection Mask Blurred Set HB+MB Heatmap ∩ Mask Blurred Set TH Heatmap.tif`,
+  use `allen_mouse_25um` and the native `(528, 320, 456)` voxel grid.
+- Load the TIF into napari as a single 3D Image or Labels layer. The mask must
+  already be registered to the atlas anatomically and have an identity layer
+  transform. Matching array shape alone does not establish anatomical alignment.
+- For failure checks, have a 2D image, a differently sized volume, and a copy
+  with a nonidentity scale or translation available.
+
+**Steps and expected results**
+
+1. **Action:** Highlight the loaded TIF in napari's layer list. Open **Regions**,
+   choose **Query source: Mask Layer**, and click **Use Active Layer as Mask**.
+   **Expected:** The same layer appears checked in the mask selector. A status
+   confirms registration. No additional layer or volume is created. All positive
+   values, including integer labels greater than one, belong to the query mask.
+2. **Action:** Inspect the mask summary, then choose **Search scope: Whole
+   Parquet**, **Node types: All node types**, and click **Find Neurons in Selected
+   Mask Layers**. Repeat with **Current Table** and another node-type selection.
+   **Expected:** The existing cancellable background search handles the imported
+   mask. Source-neuron exclusions cannot be inferred from a standalone TIF;
+   the summary states this when no source identities are recorded. Known source
+   metadata on an existing generated mask is preserved when registering it.
+3. **Action:** Click **Use Active Layer as Mask** again for the same layer.
+   **Expected:** Registration is repeatable, without duplicating the layer or
+   altering its data. Only the chosen layer is checked for the next mask query.
+4. **Action:** Try registering with no atlas or no active layer. Try a Points
+   layer, a 2D/4D image, an incorrect grid shape, a transformed volume, or a layer
+   recording a different atlas.
+   **Expected:** A specific error appears and the incompatible layer is not
+   registered. The grid error directs the user to match atlas resolution and
+   reset transforms. No automatic resampling or anatomical registration occurs.
+   The registration button is disabled during an active query/profile build.
+5. **Action:** Save a project containing the imported mask, close, and reload it.
+   **Expected:** The mask is available for Regions queries without registering
+   it again. Image masks retain their Image type and original floating-point
+   values; Labels masks retain their Labels type. The standalone TIF itself
+   does not acquire plugin metadata or recover neuron-set provenance.
+
+**Manual verification**
+
+- Status: **Not run**
+- Date recorded: **2026-11-05**
+- Notes: Real Qt tests exercise loaded Image/Labels TIFF registration, querying,
+  source-provenance preservation, grid/type/atlas rejection, repeat registration,
+  and float-image project persistence. The complete manual workflow remains to
+  be exercised in napari.
 
 ## Use-Case Template
 

@@ -13,9 +13,10 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from .atlas_utils import mask_to_swc_xyz_bounds, swc_coords_xyz_to_atlas_voxels
 from .swc import NodeType, normalize_node_types
 from .terminals import TERMINUS_NODE_TYPES, TerminusCoverage, query_termini
+
+_MASK_QUERY_BATCH_SIZE = 65_536
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -629,78 +630,25 @@ class NeuronDatabase:
         file_ids: list[object] | tuple[object, ...] | None = None,
         exclude_file_ids: list[object] | tuple[object, ...] | None = None,
         node_types: list[int] | tuple[int, ...] | None = None,
+        *,
+        progress_callback=None,
+        cancel_check=None,
     ) -> pd.DataFrame:
-        """Get neurons whose nodes fall inside a binary atlas-space mask."""
-        mask = np.asarray(mask_volume) > 0
-        if mask.ndim != 3:
-            raise ValueError(f"Expected a 3D mask volume, got shape {mask.shape}")
+        """Search masks directly from Parquet without eager DuckDB results."""
+        from .analysis.mask_query import query_neurons_in_masks
 
-        atlas_shape = tuple(np.asarray(atlas.annotation).shape)
-        if mask.shape != atlas_shape:
-            raise ValueError(
-                f"Mask shape {mask.shape} does not match atlas shape {atlas_shape}"
-            )
-
-        bounds = mask_to_swc_xyz_bounds(mask, atlas)
-        if bounds is None:
-            return self._empty_neuron_result()
-
-        lower_xyz, upper_xyz = bounds
-        where_parts = [
-            "x >= ?",
-            "x <= ?",
-            "y >= ?",
-            "y <= ?",
-            "z >= ?",
-            "z <= ?",
-        ]
-        params: list[object] = [
-            float(lower_xyz[0]),
-            float(upper_xyz[0]),
-            float(lower_xyz[1]),
-            float(upper_xyz[1]),
-            float(lower_xyz[2]),
-            float(upper_xyz[2]),
-        ]
-        effective_node_types = self._resolve_node_type_filter(
-            node_types,
-            soma_only,
+        return query_neurons_in_masks(
+            self.parquet_path,
+            [mask_volume],
+            atlas_shape=tuple(atlas.annotation.shape),
+            resolution_um=atlas.resolution,
+            file_ids=file_ids,
+            exclude_file_ids=exclude_file_ids,
+            node_types=self._resolve_node_type_filter(node_types, soma_only),
+            batch_size=_MASK_QUERY_BATCH_SIZE,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
         )
-        if not self._append_node_type_filter(
-            where_parts,
-            params,
-            effective_node_types,
-        ):
-            return self._empty_neuron_result()
-        if not self._append_file_id_filter(where_parts, params, file_ids):
-            return self._empty_neuron_result()
-        self._append_file_id_exclusion(where_parts, params, exclude_file_ids)
-
-        query = f"""
-            SELECT file_id, neuron_id, subject, x, y, z
-            FROM neurons
-            WHERE {" AND ".join(where_parts)}
-            ORDER BY file_id
-        """
-        candidates = self.conn.execute(query, params).fetchdf()
-        if candidates.empty:
-            return self._empty_neuron_result()
-
-        coords = candidates[["x", "y", "z"]].to_numpy(dtype=float, copy=False)
-        voxel_coords = swc_coords_xyz_to_atlas_voxels(coords, atlas)
-        in_bounds = np.all(
-            (voxel_coords >= 0) & (voxel_coords < np.asarray(mask.shape)),
-            axis=1,
-        )
-        hits = np.zeros(len(candidates), dtype=bool)
-        valid = voxel_coords[in_bounds]
-        if len(valid) > 0:
-            hits[in_bounds] = mask[valid[:, 0], valid[:, 1], valid[:, 2]]
-
-        matched = candidates.loc[hits, ["file_id", "neuron_id", "subject"]]
-        if matched.empty:
-            return self._empty_neuron_result()
-        return matched.drop_duplicates().sort_values("file_id").reset_index(drop=True)
 
     def get_region_neuron_counts(self) -> pd.DataFrame:
         """Get neuron counts per region.

@@ -305,6 +305,85 @@ def test_get_neurons_by_mask_supports_any_node_and_soma_only(tmp_path: Path) -> 
     assert excluded_any_node["file_id"].tolist() == ["file_b"]
 
 
+def test_mask_query_reads_large_candidates_without_sql(tmp_path):
+    """The mask scan must bypass eager SQL even on a DuckDB-backed database."""
+    source = tmp_path / "large.parquet"
+    with duckdb.connect() as connection:
+        connection.execute("""
+            COPY (
+                SELECT
+                    'file_' || lpad((i % 64)::VARCHAR, 4, '0') AS file_id,
+                    'same_display_id' AS neuron_id,
+                    'subject_' || (i % 64)::VARCHAR AS subject,
+                    i AS node_id, -1 AS parent_id, 2 AS type,
+                    25.0 AS x, 25.0 AS y, 25.0 AS z
+                FROM range(1000000) t(i)
+            ) TO ? (FORMAT PARQUET, ROW_GROUP_SIZE 16384)
+        """, [str(source)])
+    atlas = FakeAtlas()
+    mask = np.ones(atlas.annotation.shape, dtype=np.uint8)
+    with NeuronDatabase(source) as db:
+        connection, db.conn = db.conn, None
+        try:
+            result = db.get_neurons_by_mask(mask, atlas)
+        finally:
+            db.conn = connection
+        assert connection.execute("SELECT 42").fetchone() == (42,)
+    assert result["file_id"].tolist() == [f"file_{i:04}" for i in range(64)]
+    assert result["neuron_id"].unique().tolist() == ["same_display_id"]
+    assert result["subject"].nunique() == 64
+
+
+def test_mask_query_matches_later_batches_and_keeps_file_ids_separate(tmp_path, monkeypatch):
+    import napari_neuron_navigator.db as db_module
+
+    monkeypatch.setattr(db_module, "_MASK_QUERY_BATCH_SIZE", 2)
+    source = tmp_path / "interleaved.parquet"
+    ids = ["b/shared", "a/shared", "no_hit", "b/shared", "a/shared", "b/shared"]
+    pd.DataFrame({
+        "file_id": ids,
+        "neuron_id": ["shared"] * len(ids),
+        "subject": [file_id.split("/")[0] for file_id in ids],
+        "type": [1, 1, 1, 2, 2, 2],
+        "x": [25., 25., 25., 50., 0., 50.],
+        "y": [25., 25., 25., 50., 0., 50.],
+        "z": [25., 25., 25., 50., 0., 50.],
+    }).to_parquet(source, index=False)
+    atlas = FakeAtlas()
+    mask = np.zeros(atlas.annotation.shape, dtype=np.uint8)
+    mask[0, 0, 0] = mask[2, 2, 2] = 1
+    with NeuronDatabase(source) as db:
+        result = db.get_neurons_by_mask(mask, atlas)
+        assert result.to_dict("records") == [
+            {"file_id": "a/shared", "neuron_id": "shared", "subject": "a"},
+            {"file_id": "b/shared", "neuron_id": "shared", "subject": "b"},
+        ]
+        assert db.get_neurons_by_mask(mask, atlas, soma_only=True).empty
+        assert db.get_neurons_by_mask(mask, atlas, file_ids=[]).empty
+        assert db.get_neurons_by_mask(
+            mask, atlas, file_ids=["a/shared", "b/shared"],
+            exclude_file_ids=["b/shared"], node_types=[2],
+        )["file_id"].tolist() == ["a/shared"]
+
+
+def test_mask_query_releases_reader_on_membership_error(tmp_path, monkeypatch):
+    source = tmp_path / "neurons.parquet"
+    pd.DataFrame({
+        "file_id": ["a"], "neuron_id": ["a"], "subject": ["a"],
+        "x": [25.], "y": [25.], "z": [25.],
+    }).to_parquet(source, index=False)
+    atlas = FakeAtlas()
+    mask = np.ones(atlas.annotation.shape, dtype=np.uint8)
+    def fail_membership(stage, completed, _total):
+        if stage.startswith("Searching nodes") and completed:
+            raise ValueError("test membership failure")
+
+    with NeuronDatabase(source) as db:
+        with pytest.raises(ValueError, match="test membership failure"):
+            db.get_neurons_by_mask(mask, atlas, progress_callback=fail_membership)
+        assert db.get_neurons_by_mask(mask, atlas)["file_id"].tolist() == ["a"]
+
+
 def test_get_neurons_by_heatmap_mask_uses_swc_grid_for_soma_membership(
     tmp_path: Path,
 ) -> None:

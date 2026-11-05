@@ -432,6 +432,82 @@ class RegionalClusteringWorker(QObject):
             self.done.emit()
 
 
+class MaskQueryWorker(QObject):
+    """Scan native-grid masks with bounded Arrow batches in a background thread."""
+
+    finished = Signal(object)
+    progress = Signal(str, int, int)
+    cancelled = Signal(str)
+    error = Signal(str)
+    done = Signal()
+
+    def __init__(
+        self,
+        *,
+        source_path,
+        volumes,
+        atlas_shape,
+        resolution_um,
+        file_ids=None,
+        exclude_file_ids=None,
+        node_types=None,
+    ):
+        super().__init__()
+        self.settings = {
+            "parquet_path": source_path,
+            "volumes": volumes,
+            "atlas_shape": atlas_shape,
+            "resolution_um": resolution_um,
+            "file_ids": file_ids,
+            "exclude_file_ids": exclude_file_ids,
+            "node_types": node_types,
+        }
+        self._cancel_event = Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def run(self):
+        from .analysis.mask_query import MaskQueryCancelled, query_neurons_in_masks
+
+        last_progress, phase = 0.0, None
+
+        def progress(message, completed, total):
+            nonlocal last_progress, phase
+            now = perf_counter()
+            current_phase = message.split(";", 1)[0]
+            if (
+                current_phase != phase
+                or now - last_progress >= 0.1
+                or completed == total
+            ):
+                self.progress.emit(message, completed, total)
+                last_progress, phase = now, current_phase
+
+        try:
+            result = query_neurons_in_masks(
+                **self.settings,
+                cancel_check=self._cancel_event.is_set,
+                progress_callback=progress,
+            )
+            if self._cancel_event.is_set():
+                raise MaskQueryCancelled(
+                    "Mask search cancelled; the Data table was not changed."
+                )
+            if result.attrs.get("empty_mask"):
+                raise ValueError(
+                    "Selected mask layer selection is empty and cannot be queried."
+                )
+            self.finished.emit(result)
+        except MaskQueryCancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            logger.exception("Mask search failed")
+            self.error.emit(str(exc))
+        finally:
+            self.done.emit()
+
+
 class RegionalQueryWorker(QObject):
     """Validate a regional profile and execute one immutable query snapshot."""
 

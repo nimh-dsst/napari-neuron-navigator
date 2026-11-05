@@ -3162,6 +3162,18 @@ def test_mask_source_exclusion_defaults_to_enabled_without_checkbox() -> None:
     assert NeuronViewerWidget._mask_source_exclusion_enabled(widget) is True
 
 
+def _start_and_complete_mask_request(widget, result, *, soma_only=False):
+    widget._atlas.resolution = (1, 1, 1)
+    widget._launch_mask_query = MagicMock()
+    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=soma_only)
+    snapshot = widget._launch_mask_query.call_args.args[0]
+    widget._regional_query_snapshot = snapshot
+    widget._set_regional_query_busy = MagicMock()
+    widget._mask_query_is_current = types.MethodType(NeuronViewerWidget._mask_query_is_current, widget)
+    NeuronViewerWidget._on_mask_query_finished(widget, result)
+    return snapshot
+
+
 def test_query_neurons_by_mask_uses_current_layer_data_and_excludes_sources() -> None:
     result = pd.DataFrame(
         {
@@ -3195,22 +3207,17 @@ def test_query_neurons_by_mask_uses_current_layer_data_and_excludes_sources() ->
     )
     _bind_region_query_scope_helpers(widget)
 
-    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=False)
-
-    args, kwargs = db.get_neurons_by_mask.call_args
-    np.testing.assert_array_equal(args[0], mask_data > 0)
-    assert args[1] is widget._atlas
-    assert kwargs == {
-        "soma_only": False,
-        "file_ids": None,
-        "exclude_file_ids": ["n1", "n2"],
-        "node_types": None,
-    }
+    snapshot = _start_and_complete_mask_request(widget, result)
+    db.get_neurons_by_mask.assert_not_called()
+    assert snapshot["layers"][0].data is mask_data
+    assert snapshot["input_file_ids"] is None
+    assert snapshot["exclude_file_ids"] == ("n1", "n2")
+    assert snapshot["node_types"] is None
     widget._populate_neuron_table.assert_called_once_with(
         result,
         preserve_existing=False,
     )
-    assert widget._regions_status_label.text == (
+    assert widget._regions_status_label.text.startswith(
         "Found 1 neuron(s) with any node in 1 selected mask layer(s) "
         "within whole parquet: Mask A; excluded 2 source neurons"
     )
@@ -3252,22 +3259,17 @@ def test_query_neurons_by_mask_soma_uses_soma_only_and_status_text() -> None:
     )
     _bind_region_query_scope_helpers(widget)
 
-    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=True)
-
-    args, kwargs = db.get_neurons_by_mask.call_args
-    np.testing.assert_array_equal(args[0], mask_data > 0)
-    assert args[1] is widget._atlas
-    assert kwargs == {
-        "soma_only": True,
-        "file_ids": None,
-        "exclude_file_ids": None,
-        "node_types": (1,),
-    }
+    snapshot = _start_and_complete_mask_request(widget, result, soma_only=True)
+    db.get_neurons_by_mask.assert_not_called()
+    assert snapshot["layers"][0].data is mask_data
+    assert snapshot["input_file_ids"] is None
+    assert snapshot["exclude_file_ids"] == ()
+    assert snapshot["node_types"] == (1,)
     widget._populate_neuron_table.assert_called_once_with(
         result,
         preserve_existing=False,
     )
-    assert widget._regions_status_label.text == (
+    assert widget._regions_status_label.text.startswith(
         "Found 1 neuron(s) with soma in 1 selected mask layer(s) "
         "within whole parquet: Mask Soma"
     )
@@ -3299,12 +3301,11 @@ def test_query_neurons_by_mask_includes_sources_when_checkbox_unchecked() -> Non
     )
     _bind_region_query_scope_helpers(widget)
 
-    NeuronViewerWidget._query_neurons_by_mask(widget, soma_only=False)
-
-    _args, kwargs = db.get_neurons_by_mask.call_args
-    assert kwargs["exclude_file_ids"] is None
-    assert kwargs["node_types"] is None
-    assert widget._regions_status_label.text == (
+    snapshot = _start_and_complete_mask_request(widget, result)
+    db.get_neurons_by_mask.assert_not_called()
+    assert snapshot["exclude_file_ids"] == ()
+    assert snapshot["node_types"] is None
+    assert widget._regions_status_label.text.startswith(
         "Found 2 neuron(s) with any node in 1 selected mask layer(s) "
         "within whole parquet: Mask A"
     )
@@ -3377,7 +3378,7 @@ def test_update_mask_query_summary_handles_empty_selection_and_missing_sources()
     NeuronViewerWidget._update_mask_query_summary(widget)
 
     assert label.text == (
-        "2 generated mask layer(s) available. "
+        "2 mask layer(s) available. "
         "Select mask layers to see source-neuron count."
     )
 
@@ -3389,7 +3390,7 @@ def test_update_mask_query_summary_handles_empty_selection_and_missing_sources()
     widget._generated_mask_layers = lambda: []
     NeuronViewerWidget._update_mask_query_summary(widget)
 
-    assert label.text == "No generated mask layers are available."
+    assert label.text == "No mask layers are available. Load a TIF and click Use Active Layer as Mask."
 
 
 def test_on_region_query_source_changed_uses_named_pages_and_scope_stacks() -> None:

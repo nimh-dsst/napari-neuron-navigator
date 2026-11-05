@@ -1,4 +1,4 @@
-"""Widget for selecting generated mask layers with checkboxes."""
+"""Widget for selecting generated or imported mask layers with checkboxes."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from qtpy.QtWidgets import (
 
 
 class MaskLayerSelectorWidget(QWidget):
-    """Widget for selecting generated mask layers for querying."""
+    """Widget for selecting registered mask layers for querying."""
 
     selection_changed = Signal(list)
 
@@ -42,7 +42,7 @@ class MaskLayerSelectorWidget(QWidget):
         layout.addLayout(search_layout)
 
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Mask Layer", "Source Heatmaps"])
+        self._tree.setHeaderLabels(["Mask Layer", "Source"])
         self._tree.setColumnWidth(0, 220)
         self._tree.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self._tree)
@@ -129,3 +129,15 @@ class MaskLayerSelectorWidget(QWidget):
             if item.checkState(0) == Qt.Checked:
                 names.append(name)
         return sorted(names)
+
+    def set_selected_layer_names(self, names: list[str]) -> None:
+        """Check exactly the named masks after registering an imported layer."""
+        selected = set(names)
+        blocked = self._tree.blockSignals(True)
+        try:
+            for name, item in self._items_by_name.items():
+                item.setCheckState(0, Qt.Checked if name in selected else Qt.Unchecked)
+        finally:
+            self._tree.blockSignals(blocked)
+        self._update_selection_label()
+        self._emit_selection_changed()
