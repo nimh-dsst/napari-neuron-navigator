@@ -23,14 +23,6 @@ from tests.test_region_profile_stage1 import (
 from tests.test_region_report import report_context as report_context  # noqa: PLC0414
 
 
-@pytest.fixture(scope="module")
-def qt_app():
-    from qtpy.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
 @pytest.fixture
 def report_widget(qt_app, report_context):
     module = importlib.import_module("napari_neuron_navigator.widgets.region_report")
@@ -282,8 +274,10 @@ def test_unmapped_exclusion_and_clustering_defaults(report_widget):
         editor.deleteLater()
 
 
-def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atlas):
-    import napari
+def test_regions_tab_tracks_actual_data_selection(
+    qt_app, viewer_model, tmp_path, profile_atlas
+):
+    from napari.qt import get_stylesheet
     from qtpy.QtWidgets import QScrollArea
 
     from napari_neuron_navigator.db import NeuronDatabase
@@ -297,7 +291,7 @@ def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atla
     frame = _write_source(source)
     build_region_profile(source, profile_atlas)
     database = NeuronDatabase(source)
-    viewer = napari.Viewer(show=False)
+    viewer = viewer_model
     widget = NeuronViewerWidget(viewer)
     try:
         widget._db = database
@@ -377,11 +371,10 @@ def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atla
         scroll = widget._tabs.widget(1).findChild(QScrollArea)
         scroll.ensureWidgetVisible(report_widget)
         qt_app.processEvents()
-        # This widget is shown standalone by the check, so explicitly inherit
-        # the real napari stylesheet it receives when hosted in the viewer.
+        # Apply the same napari themes used when hosted in a viewer window.
         for theme in ("dark", "light"):
             viewer.theme = theme
-            widget.setStyleSheet(viewer.window._qt_window.styleSheet())
+            widget.setStyleSheet(get_stylesheet(theme))
             qt_app.processEvents()
             scroll.ensureWidgetVisible(report_widget)
             qt_app.processEvents()
@@ -399,7 +392,6 @@ def test_regions_tab_tracks_actual_data_selection(qt_app, tmp_path, profile_atla
         widget._on_neuron_viewer_destroyed()
         widget.close()
         widget.deleteLater()
-        viewer.close()
         qt_app.processEvents()
         database.close()
 

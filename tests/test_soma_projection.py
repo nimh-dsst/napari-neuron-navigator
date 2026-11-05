@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
-import os
+import subprocess
 import sys
+import textwrap
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -18,8 +19,6 @@ from napari_neuron_navigator.neuron_table_ops import (
     distinct_colors_for_file_ids,
 )
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 _PATCHED_MODULE_NAMES = [
     "napari",
     "napari.utils",
@@ -28,16 +27,14 @@ _PATCHED_MODULE_NAMES = [
     "qtpy.QtCore",
     "qtpy.QtWidgets",
     "napari_neuron_navigator.widgets",
-    "napari_neuron_navigator.widgets.analysis_tab",
-    "napari_neuron_navigator.widgets.custom_region_selector",
-    "napari_neuron_navigator.widgets.mask_layer_selector",
-    "napari_neuron_navigator.widgets.neuron_table",
-    "napari_neuron_navigator.widgets.node_type_selector",
-    "napari_neuron_navigator.widgets.region_selector",
-    "napari_neuron_navigator.widgets.reference_layers",
-    "napari_neuron_navigator.widgets.neuron_viewer",
-    "napari_neuron_navigator.widgets.slice_projection",
 ]
+# Imports under the Qt stubs can load transitive widget dependencies. Preserve
+# the whole package so cached classes cannot retain fake Qt bases or layouts.
+_PATCHED_MODULE_NAMES.extend(
+    name
+    for name in sys.modules
+    if name.startswith("napari_neuron_navigator.widgets.")
+)
 _ORIGINAL_MODULES = {name: sys.modules.get(name) for name in _PATCHED_MODULE_NAMES}
 
 
@@ -285,18 +282,64 @@ widgets_package.__path__ = [
 ]
 sys.modules["napari_neuron_navigator.widgets"] = widgets_package
 
-NeuronViewerWidget = importlib.import_module(
-    "napari_neuron_navigator.widgets.neuron_viewer"
-).NeuronViewerWidget
-SomaSliceProjector = importlib.import_module(
-    "napari_neuron_navigator.widgets.slice_projection"
-).SomaSliceProjector
+try:
+    NeuronViewerWidget = importlib.import_module(
+        "napari_neuron_navigator.widgets.neuron_viewer"
+    ).NeuronViewerWidget
+    SomaSliceProjector = importlib.import_module(
+        "napari_neuron_navigator.widgets.slice_projection"
+    ).SomaSliceProjector
+finally:
+    for _name in tuple(sys.modules):
+        if (
+            _name.startswith("napari_neuron_navigator.widgets.")
+            and _name not in _ORIGINAL_MODULES
+        ):
+            sys.modules.pop(_name, None)
+    for _name, _module in _ORIGINAL_MODULES.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
 
-for _name, _module in _ORIGINAL_MODULES.items():
-    if _module is None:
-        sys.modules.pop(_name, None)
-    else:
-        sys.modules[_name] = _module
+
+@pytest.mark.parametrize("preload_widgets", [False, True])
+def test_stubbed_import_restores_widget_dependencies(preload_widgets):
+    script = textwrap.dedent(f"""
+        import importlib
+        import sys
+
+        if {preload_widgets!r}:
+            importlib.import_module("napari_neuron_navigator.widgets")
+        before = {{
+            name: module for name, module in sys.modules.items()
+            if name == "napari_neuron_navigator.widgets"
+            or name.startswith("napari_neuron_navigator.widgets.")
+        }}
+        importlib.import_module("tests.test_soma_projection")
+        after = {{
+            name: module for name, module in sys.modules.items()
+            if name == "napari_neuron_navigator.widgets"
+            or name.startswith("napari_neuron_navigator.widgets.")
+        }}
+        assert after == before, (set(after) - set(before), set(before) - set(after))
+
+        from qtpy.QtWidgets import QVBoxLayout, QWidget
+        from napari_neuron_navigator.widgets import collapsible_section
+        from napari_neuron_navigator.widgets.termini_section import TerminiSectionWidget
+
+        assert collapsible_section.QVBoxLayout is QVBoxLayout
+        assert issubclass(collapsible_section.CollapsibleSection, QWidget)
+        assert issubclass(TerminiSectionWidget, QWidget)
+    """)
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 class _DummySignal:

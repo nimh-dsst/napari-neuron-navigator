@@ -14,7 +14,6 @@ from tests.region_profile_stage0_fixtures import morphology_fixture_frame
 from tests.test_region_profile_stage1 import (
     profile_atlas as profile_atlas,  # noqa: PLC0414
 )
-from tests.test_region_report_widget import qt_app as qt_app  # noqa: PLC0414
 
 
 def _wait(app, owner):
@@ -28,9 +27,7 @@ def _wait(app, owner):
 
 
 @pytest.fixture
-def query_owner(qt_app, profile_atlas, tmp_path, monkeypatch):
-    import napari
-
+def query_owner(qt_app, viewer_model, profile_atlas, tmp_path, monkeypatch):
     from napari_neuron_navigator.db import NeuronDatabase
     from napari_neuron_navigator.widgets.compound_region_query import (
         CONDITION_TERMINUS_COUNT,
@@ -51,7 +48,7 @@ def query_owner(qt_app, profile_atlas, tmp_path, monkeypatch):
     pd.concat([frame, outside], ignore_index=True).to_parquet(source, index=False)
     build_region_profile(source, profile_atlas)
     database = NeuronDatabase(source)
-    viewer = napari.Viewer(show=False)
+    viewer = viewer_model
     owner = NeuronViewerWidget(viewer)
     try:
         owner._db, owner._atlas = database, profile_atlas
@@ -98,7 +95,6 @@ def query_owner(qt_app, profile_atlas, tmp_path, monkeypatch):
         owner._on_neuron_viewer_destroyed()
         owner.close()
         owner.deleteLater()
-        viewer.close()
         qt_app.processEvents()
         database.close()
 
@@ -268,6 +264,7 @@ def test_query_tags_populate_data_filters_and_themed_controls(
     query_owner, qt_app, tmp_path
 ):
     import numpy as np
+    from napari.qt import get_stylesheet
     from qtpy.QtWidgets import QScrollArea
 
     owner = query_owner
@@ -322,7 +319,7 @@ def test_query_tags_populate_data_filters_and_themed_controls(
     scroll = owner._tabs.widget(0).findChild(QScrollArea)
     for theme in ("dark", "light"):
         owner.viewer.theme = theme
-        owner.setStyleSheet(owner.viewer.window._qt_window.styleSheet())
+        owner.setStyleSheet(get_stylesheet(theme))
         qt_app.processEvents()
         scroll.ensureWidgetVisible(table)
         qt_app.processEvents()

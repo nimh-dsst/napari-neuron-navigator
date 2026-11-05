@@ -22,7 +22,6 @@ from tests.test_region_profile_stage1 import (
     profile_atlas as profile_atlas,  # noqa: PLC0414
 )
 from tests.test_region_report import report_context as report_context  # noqa: PLC0414
-from tests.test_region_report_widget import qt_app as qt_app  # noqa: PLC0414
 
 
 @pytest.fixture
@@ -216,9 +215,8 @@ def test_cancel_discards_completion_already_queued_for_publication(regional_widg
 
 
 def test_napari_assignment_report_and_saved_group_handoff(
-    qt_app, profile_atlas, tmp_path, monkeypatch
+    qt_app, viewer_model, profile_atlas, tmp_path, monkeypatch
 ):
-    import napari
     from qtpy.QtWidgets import QScrollArea
 
     from napari_neuron_navigator.db import NeuronDatabase
@@ -229,7 +227,7 @@ def test_napari_assignment_report_and_saved_group_handoff(
     frame = _write_source(source)
     build_region_profile(source, profile_atlas)
     database = NeuronDatabase(source)
-    viewer = napari.Viewer(show=False)
+    viewer = viewer_model
     owner = NeuronViewerWidget(viewer)
     try:
         owner._db, owner._atlas = database, profile_atlas
@@ -300,6 +298,5 @@ def test_napari_assignment_report_and_saved_group_handoff(
         owner._on_neuron_viewer_destroyed()
         owner.close()
         owner.deleteLater()
-        viewer.close()
         qt_app.processEvents()
         database.close()
