@@ -58,6 +58,68 @@ def real_table_widget(monkeypatch):
     app.processEvents()
 
 
+@pytest.mark.parametrize(
+    "file_ids",
+    [
+        [],
+        ["subject-a/shared", "subject-b/shared"],
+        [f"subject-{index}/shared" for index in range(20)],
+    ],
+)
+def test_populate_notifies_once_with_the_complete_cohort(real_table_widget, file_ids):
+    from qtpy.QtWidgets import QApplication
+
+    _module, widget = real_table_widget
+    widget.populate(["previous/shared"])
+    widget.select_file_ids(["previous/shared"])
+    QApplication.processEvents()
+    states = []
+    selections = []
+    widget.state_changed.connect(
+        lambda: states.append(
+            (widget.file_ids(), {key: entry.to_state() for key, entry in widget._entries.items()})
+        )
+    )
+    widget.selection_changed.connect(
+        lambda selected: selections.append((selected, widget.file_ids()))
+    )
+
+    widget.populate(file_ids)
+    QApplication.processEvents()
+
+    assert len(states) == 1
+    assert states == [
+        (widget.file_ids(), {key: entry.to_state() for key, entry in widget._entries.items()})
+    ]
+    assert set(states[0][0]) == set(file_ids)
+    assert set(states[0][1]) == set(file_ids)
+    assert selections == [([], widget.file_ids())]
+    assert widget.get_selected_file_ids() == []
+
+
+@pytest.mark.parametrize("sorting_enabled", [False, True])
+@pytest.mark.parametrize("signals_blocked", [False, True])
+def test_populate_restores_table_state_after_error(
+    real_table_widget, monkeypatch, sorting_enabled, signals_blocked
+):
+    _module, widget = real_table_widget
+    widget._table.setSortingEnabled(sorting_enabled)
+    widget._table.blockSignals(signals_blocked)
+    notifications = []
+    widget.state_changed.connect(lambda: notifications.append(True))
+
+    def fail_to_populate_row(*_args):
+        raise RuntimeError("Cannot populate row")
+
+    monkeypatch.setattr(widget, "_populate_row", fail_to_populate_row)
+    with pytest.raises(RuntimeError, match="Cannot populate row"):
+        widget.populate(["subject-a/shared", "subject-b/shared"])
+
+    assert widget._table.isSortingEnabled() == sorting_enabled
+    assert widget._table.signalsBlocked() == signals_blocked
+    assert notifications == []
+
+
 @pytest.mark.parametrize("descending", [False, True])
 def test_label_sort_after_annotation_preserves_neuron_metadata(
     real_table_widget, descending

@@ -803,31 +803,15 @@ class NeuronTableWidget(QWidget):
         """
         self._reset_tag_actions()
         self.clear_annotation_filters()
-        sorting_enabled = self._table.isSortingEnabled()
-        self._table.setSortingEnabled(False)
-
-        self._table.setRowCount(0)
-        self._entries.clear()
-        # A newly loaded Parquet may replace the assignment registry before
-        # the table membership is populated.  Rebuild the dynamic columns here
-        # so stale assignment columns from the previous dataset cannot linger.
-        self._configure_cluster_columns()
-        self._configure_header_resize_modes()
-
-        n = len(file_ids)
-        colors = neuron_palette(n)
-
-        self._table.setRowCount(n)
-
+        colors = neuron_palette(len(file_ids))
+        entries = []
         for row, file_id in enumerate(file_ids):
             color = colors[row] if row < len(colors) else list(GRAY_RGBA)
-            entry = NeuronEntry(file_id=file_id, color=color)
-            self._entries[file_id] = entry
-            self._populate_row(row, entry)
+            entries.append(NeuronEntry(file_id=file_id, color=color))
 
-        self._table.setSortingEnabled(sorting_enabled)
-        self._refresh_preferred_height(visible_row_count=n)
-        self.state_changed.emit()
+        # Bulk replacement rebuilds dynamic columns with cell signals blocked,
+        # then notifies observers once the complete cohort is ready.
+        self._replace_entries(entries)
 
     def _populate_row(self, row: int, entry: NeuronEntry) -> None:
         """Populate a single table row from a NeuronEntry."""
