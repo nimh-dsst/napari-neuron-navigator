@@ -37,6 +37,7 @@ pyqt6 = ">=6.8.1,<7"
 pyqtgraph = ">=0.13"
 pynrrd = ">=1.0"
 openpyxl = ">=3.1"
+truststore = ">=0.10.5,<0.11"
 
 [target.linux-64.dependencies]
 # Linux needs mesa for headless OpenGL

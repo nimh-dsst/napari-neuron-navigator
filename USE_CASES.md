@@ -26,8 +26,8 @@ Unless a use case says otherwise:
 
 | ID | Capability | Manual status |
 | --- | --- | --- |
-| [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Not run |
-| [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Not run |
+| [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Partially run |
+| [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Partially run |
 | [UC-003](#uc-003-prepare-a-whole-neuron-parquet-for-flatmap-viewing) | Append bilateral shaped/square flatmap and depth coordinates to a whole Parquet | Not run |
 | [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Passed |
 | [UC-005](#uc-005-view-selected-allen-isocortex-layers-as-a-flatmap-projection-or-stack) | View selected Allen-layer node counts as one projection or a compact stack | Not run |
@@ -72,6 +72,12 @@ the packaged atlas archives from its
 The plugin downloads from that BrainGlobe repository rather than directly from
 the Allen Institute during this workflow.
 
+Atlas downloads verify HTTPS using the operating system's certificate store
+through `truststore`, so institution-managed trusted certificates are available
+inside the Pixi environment. Connection failures report the certificate,
+network, or HTTP error. A connection error alone does not establish that the
+remote server is down.
+
 These files are not bundled with the plugin because the volumetric images and
 meshes are large and users may need different resolutions. The plugin needs the
 selected atlas locally to place registered SWC morphologies and point data in a
@@ -114,7 +120,9 @@ configuration; see BrainGlobe's
    **Expected:** The plugin starts the download through BrainGlobe. The Atlas
    controls are disabled during the operation, status text identifies the
    current phase, and the progress bar reports download progress before showing
-   that the atlas is being installed in the local cache.
+   that the atlas is being installed in the local cache. If the server does
+   not supply a total size, the progress bar is indeterminate and the status
+   reports received MiB until installation begins.
 5. **Action:** Wait for the download and installation to finish.
    **Expected:** The Atlas controls are enabled again, the progress indicator
    closes, and the status identifies the loaded atlas and its number of
@@ -131,10 +139,26 @@ locally.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: The uncached-atlas warning and confirmation prompt are tracked in
-  `TODO.md`.
+- Status: Partially run
+- Last verified: 2026-11-09
+- Last attempted: 2026-11-09
+- Notes: During the manual uncached-atlas loading check, the user reported
+  `Atlas: Error - GIN server is down`. The download/install path did not
+  complete. This records the displayed error, not an independently verified
+  server outage. The user subsequently confirmed that both `allen_mouse_25um`
+  and `allen_mouse_10um` loaded successfully from cache. Confirmation/cancellation
+  behavior, download/install, progress/control recovery details, and cache reuse
+  after restarting napari remain unverified in this run.
+  Investigation reproduced an underlying `SSLCertVerificationError`
+  (`self-signed certificate in certificate chain`), which BrainGlobe 2.3.0
+  replaced with the generic server-down message. System curl reached GIN with
+  HTTP 200. After switching atlas transport to native certificate trust, a
+  headless fresh download of `allen_mouse_50um_v1.2` succeeded in an isolated
+  temporary cache: 69,141,078 archive bytes, shape `(264, 160, 228)`, 840
+  structures, and 28.4 seconds for download/install/load. Reference and
+  annotation shapes matched; a cached reload succeeded with network access
+  forbidden. The user's existing atlas cache was not modified by this check.
+  This technical validation does not replace the pending manual napari retry.
 
 ### UC-002: Convert SWC Files to Parquet
 
@@ -174,8 +198,8 @@ a partial output from being published.
 
 **Prerequisites**
 
-- Complete UC-001 for `allen_mouse_25um` so the atlas needed by this test is
-  available locally.
+- Have `allen_mouse_25um` available locally and confirm that it loads from
+  cache in UC-001. A fresh download is unnecessary when it is already cached.
 - Use valid SWC files registered to the Allen CCF in micrometers.
 - To test the optional chained preprocessing, prepare a lookup directory whose
   shaped, square, and depth NRRDs have the same spatial grid and transform.
@@ -251,9 +275,23 @@ an error instead of reporting successful conversion.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: None
+- Status: Partially run
+- Last verified: 2026-11-09
+- Notes: The user completed the directory-conversion/load check and confirmed
+  that three neurons appeared in the Data table. The test was instructed with
+  `allen_mouse_25um`, conversion resolution `25`, hemisphere alignment `None`,
+  and chained flatmap preprocessing disabled. The instructed output was
+  `/private/tmp/nn-manual-tests-2026-11-09/directory.parquet`.
+  Selected-file conversion, picker/save cancellation, chained flatmap
+  preprocessing/cancellation, and invalid-input behavior remain unverified.
+  Inputs prepared for the 2026-11-09 manual run at
+  `/private/tmp/nn-manual-tests-2026-11-09/swc_batch/`, using the layout above.
+  `cell_a.swc` and `nested/cell_c.SWC` copy the committed
+  `tests/data/hemisphere/1119749665_17545_3134-X21894-Y19320_reg.swc` fixture;
+  `cell_b.swc` copies its `_reg_right.swc` counterpart. These are controlled
+  ingestion fixtures with three distinct filenames/file IDs, not three
+  biologically distinct neurons. Save outputs in the parent
+  `/private/tmp/nn-manual-tests-2026-11-09/` directory.
 
 ### UC-003: Prepare a Whole Neuron Parquet for Flatmap Viewing
 

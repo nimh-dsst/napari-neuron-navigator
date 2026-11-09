@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from napari_neuron_navigator.analysis.clustering import (
     ClusterExclusionRule,
@@ -256,9 +257,11 @@ def test_atlas_load_worker_reports_cached_load(monkeypatch, tmp_path):
     assert errors == []
 
 
+@pytest.mark.parametrize("unknown_total", [False, True])
 def test_atlas_load_worker_reports_cache_miss_and_download_progress(
     monkeypatch,
     tmp_path,
+    unknown_total,
 ):
     """Cache misses should show download destination and byte progress."""
     workers = _import_workers_module()
@@ -270,8 +273,9 @@ def test_atlas_load_worker_reports_cache_miss_and_download_progress(
 
     def fake_load(atlas_name, **kwargs):
         calls.append((atlas_name, kwargs))
-        kwargs["fn_update"](25, 100)
-        kwargs["fn_update"](100, 100)
+        mib = 1024 * 1024
+        kwargs["fn_update"](25 * mib, 0 if unknown_total else 100 * mib)
+        kwargs["fn_update"](100 * mib, 100 * mib)
         return atlas
 
     monkeypatch.setattr(workers, "load_brainglobe_atlas", fake_load)
@@ -298,27 +302,35 @@ def test_atlas_load_worker_reports_cache_miss_and_download_progress(
         for status in statuses
     )
     assert any("Installing allen_mouse_25um" in status for status in statuses)
-    assert (0, 100, 25) in progress
+    if unknown_total:
+        assert any("25.0 MiB received" in status for status in statuses)
+    else:
+        assert (0, 100, 25) in progress
     assert (0, 100, 100) in progress
     assert (0, 0, 0) in progress
     assert finished == [atlas]
     assert errors == []
 
 
-def test_load_brainglobe_atlas_disables_latest_check(monkeypatch, tmp_path):
-    """BrainGlobe loads should avoid the remote latest-version check."""
+def test_load_brainglobe_atlas_uses_cache_without_network(monkeypatch, tmp_path):
+    """An existing cache must bypass every remote check and download."""
     workers = _import_workers_module()
+    import napari_neuron_navigator.atlas_download as downloads
+
     calls = []
     atlas = object()
+    atlas_dir = tmp_path / "allen_mouse_25um_v1.2"
+    atlas_dir.mkdir()
 
-    class FakeBrainGlobeAtlas:
-        def __new__(cls, *args, **kwargs):
-            calls.append((args, kwargs))
-            return atlas
+    def load_cached(name, directory):
+        calls.append((name, directory))
+        return atlas
 
-    fake_module = types.ModuleType("brainglobe_atlasapi")
-    fake_module.BrainGlobeAtlas = FakeBrainGlobeAtlas
-    monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", fake_module)
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("Cached atlases must load offline")
+
+    monkeypatch.setattr(workers, "load_cached_brainglobe_atlas", load_cached)
+    monkeypatch.setattr(downloads, "download_brainglobe_atlas", unexpected_download)
 
     result = workers.load_brainglobe_atlas(
         "allen_mouse_25um",
@@ -329,15 +341,47 @@ def test_load_brainglobe_atlas_disables_latest_check(monkeypatch, tmp_path):
     )
 
     assert result is atlas
+    assert calls == [("allen_mouse_25um", atlas_dir)]
+
+
+def test_load_brainglobe_atlas_downloads_missing_cache(monkeypatch, tmp_path):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.atlas_download as downloads
+
+    atlas_dir = tmp_path / "allen_mouse_50um_v1.2"
+    atlas = object()
+    calls = []
+
+    def progress(*_args):
+        pass
+
+    def download(name, **kwargs):
+        calls.append((name, kwargs))
+        return atlas_dir
+
+    def load_cached(name, directory):
+        assert name == "allen_mouse_50um"
+        assert directory == atlas_dir
+        return atlas
+
+    monkeypatch.setattr(downloads, "download_brainglobe_atlas", download)
+    monkeypatch.setattr(workers, "load_cached_brainglobe_atlas", load_cached)
+    assert (
+        workers.load_brainglobe_atlas(
+            "allen_mouse_50um",
+            brainglobe_dir=tmp_path,
+            interm_download_dir=tmp_path / "downloads",
+            fn_update=progress,
+        )
+        is atlas
+    )
     assert calls == [
         (
-            ("allen_mouse_25um",),
+            "allen_mouse_50um",
             {
                 "brainglobe_dir": tmp_path,
-                "interm_download_dir": tmp_path,
-                "check_latest": False,
-                "config_dir": tmp_path / "config.conf",
-                "fn_update": calls[0][1]["fn_update"],
+                "interm_download_dir": tmp_path / "downloads",
+                "fn_update": progress,
             },
         )
     ]
