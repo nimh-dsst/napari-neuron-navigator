@@ -3,6 +3,10 @@
 A napari plugin for navigating, visualizing, and analyzing neuronal morphology
 data from SWC and Parquet files.
 
+[Documentation](https://nimh-dsst.github.io/napari-neuron-navigator/) ·
+[PDF](https://nimh-dsst.github.io/napari-neuron-navigator/napari-neuron-navigator.pdf) ·
+[Build the docs](docs/README.md)
+
 ## Prerequisites
 
 The development environment requires Python 3.11 or 3.12 and napari 0.9.x;

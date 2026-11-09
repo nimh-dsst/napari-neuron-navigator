@@ -51,14 +51,24 @@ ruff = ">=0.1"
 python = "3.11.*"
 
 [feature.docs.dependencies]
+python = ">=3.11,<3.13"
+sphinx = ">=8.1.3,<8.2"
+pydata-sphinx-theme = ">=0.19.0,<0.20"
+sphinx-copybutton = ">=0.5.2,<0.6"
+sphinx-design = ">=0.6.1,<0.7"
+myst-parser = ">=4,<6"
 weasyprint = "*"
 pygments = "*"
 markdown-it-py = ">=4.2.0,<5"
 
 [feature.docs.tasks]
+docs-pdf = { cmd = "python scripts/markdown_to_pdf.py docs/source/index.md docs/_build/pdf/napari-neuron-navigator.pdf", default-environment = "docs" }
+docs-build = { cmd = "sphinx-build -E -a -W --keep-going -n -b html docs/source docs/_build/html", depends-on = ["docs-pdf"], default-environment = "docs" }
+docs-serve = { cmd = "python -m http.server --bind 127.0.0.1 --directory docs/_build/html 8000", depends-on = ["docs-build"], default-environment = "docs" }
+markdown-pdf = { cmd = "python scripts/markdown_to_pdf.py", default-environment = "docs" }
 cpd2-pdf = { cmd = "python scripts/markdown_to_pdf.py docs/cpd2_workflow.md docs/_build/cpd2_workflow.pdf", default-environment = "docs" }
 
 [environments]
 default = ["dev"]
 ci = { features = ["ci"], solve-group = "default" }
-docs = { features = ["docs"], solve-group = "default" }
+docs = { features = ["docs"], no-default-feature = true }
