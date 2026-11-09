@@ -3496,23 +3496,67 @@ membership and spatial overlap of thresholded blurred heatmap regions.
    different sets is not offered as a region belonging to either single set.
    **Create Intersection Mask** rejects the same stale or incompatible inputs
    without adding a layer.
-10. **Action:** Restore the initial annotations, regenerate if needed, save a
-   project, close and reload it. Also export/reload enhanced Parquet.
-   **Expected:** Set rules/names/identifiers survive both formats and resume
-   live evaluation. Projects additionally restore the mask arrays and their
-   source set snapshots, sigma, thresholds, and spatial transforms. Enhanced
-   Parquet preserves definitions and annotations; layer arrays are project
-   content. Removing rows changes live counts; clearing Data leaves rules
-   available with zero members. Loading a different source resets definitions.
-   Intersection masks also retain their arrays, spatial transforms, and both
-   source masks' provenance after a project reload.
+10. **Action:** Restore the initial A/B/C annotations and regenerate stale masks
+    if needed. Record the complete Data cohort count, A/B/C's full `file_id`
+    values, Labels and Tags, and every set's name, rule, and count. Keep a
+    zero-member set as a boundary check. Filter Data to TH and select A, then
+    click **Save Project As...** and choose a new project directory. Also test
+    saving immediately after editing a Tags cell, without pressing Enter first;
+    retain the initial TH/CP test tags when adding an extra tag. Close napari,
+    start a fresh session, and click **Load Project...** to select the project.
+    **Expected:** The entire saved Data cohort reloads, including rows hidden by
+    the filter or unselected at save time. In **Table view: Label**, every
+    recorded Label and Tag is intact, including the last cell edit. A query
+    tag containing a comma, if present, remains one exact name in **Tag**.
+    In **Table view: Sets**, TH and CP each show 2 members immediately after
+    loading; the zero-member set retains its definition and shows 0.
+11. **Action:** Select TH and click **Show Members**, then do the same for CP.
+    In **Tools → Neuron Set Overlap**, choose those sets and **Membership only**
+    under each **Region**, then click **Compare Sets**.
+    **Expected:** TH selects A/B and CP selects A/C, using their full file IDs.
+    Counts are A=2, B=2, Intersection=1, Union=3. Identical display neuron names
+    in different subjects remain separate. The saved rules resume live
+    evaluation; no set needs to be recreated after loading.
+12. **Action:** Remove only `set-check-TH` from B's Tags. Confirm TH changes from
+    2 members to 1, then click **Save Project**, choose **Overwrite**, close
+    napari, and reload the project. Use **Save Project As...** for a second
+    destination and reopen that copy too.
+    **Expected:** Both saved versions preserve the edit: B has no TH tag, TH
+    contains only A, and CP still contains A/C. Tags, rules, and member counts
+    remain correct through both save/reload cycles. Cancelling **Overwrite**
+    leaves the previously saved version intact. Retaining current Data rows or
+    adding Search results must not reapply older saved tags or Labels to rows
+    already in Data.
+13. **Action:** Export using **Export Enhanced Parquet...**, load that file with
+    **Load...**, and populate Data with the recorded cohort. Also inspect the
+    set heatmaps, masks, and intersection mask in the reloaded project.
+    **Expected:** Enhanced Parquet preserves exact annotations and set
+    definitions; populating Data restores their live counts. Projects also
+    preserve layer arrays, creation-time source set snapshots, sigma,
+    thresholds, and spatial transforms. Later membership edits do not rewrite
+    those snapshots: stale spatial comparisons still require regeneration.
+    Removing rows changes live counts; clearing Data leaves definitions with
+    zero members. Loading a different source resets definitions. Older projects
+    without saved sets open with no sets and do not inherit the previous
+    session's definitions.
 
 **Manual verification**
 
 - Status: **Not run**
 - Date recorded: **2026-11-03**
-- Updated: **2026-11-05** (bounded mask search with progress and cancellation)
-- Notes: Automated checks cover live include/exclude rules, full `file_id`
+- Updated: **2026-11-06** (explicit project annotation and membership round trips)
+- Notes: On 2026-11-06, real Qt project tests added exact annotation/member
+  comparisons across fresh-viewer loads, filtered saves, overwrite and Save As,
+  active cell edits, and post-load append/retain operations. A scripted napari
+  check with a four-row synthetic Data cohort verified tags, live set counts,
+  and Show Members across three fresh processes, including a saved edit. This
+  does not complete the full manual workflow above. Save-resource checks also
+  exercise a 500,000-node external sort, per-export memory/thread limits,
+  temporary-file cleanup, and continued use of the same viewer after a failed
+  save. A standalone export of 17 neurons (1,166,902 nodes) from the canonical
+  source completed with the new budget; it is not a full-cohort GUI check.
+  Automated checks also
+  cover live include/exclude rules, full `file_id`
   identity, empty/overlapping sets, table inspection and selection, heatmap →
   blur → mask provenance, stale-mask and grid checks, and project/enhanced
   Parquet persistence. Intersection checks cover exact shared voxels, empty

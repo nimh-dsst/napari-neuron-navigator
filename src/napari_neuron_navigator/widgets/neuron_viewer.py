@@ -8424,7 +8424,7 @@ class NeuronViewerWidget(QWidget):
             self._neuron_table.populate(result["file_id"].tolist())
 
         saved_state_applier = getattr(self, "_apply_saved_table_state_to_table", None)
-        if callable(saved_state_applier):
+        if callable(saved_state_applier) and not preserve_existing:
             saved_state_applier()
         self._discard_scene_display_state(self._current_table_file_ids())
         self._neuron_table.set_added_file_ids(self._current_scene_file_ids())
@@ -8451,7 +8451,7 @@ class NeuronViewerWidget(QWidget):
     def _add_search_file_ids_to_table(self, file_ids: list[str]) -> None:
         """Append available Search results without replacing Data-table state."""
         summary = self._neuron_table.append_file_ids(file_ids)
-        self._apply_saved_table_state_to_table()
+        self._apply_saved_table_state_to_table(file_ids=summary.added_file_ids)
         self._discard_scene_display_state(self._current_table_file_ids())
         self._neuron_table.set_added_file_ids(self._current_scene_file_ids())
         self._sync_neuron_table_heatmap_membership()
@@ -8480,7 +8480,7 @@ class NeuronViewerWidget(QWidget):
             dict.fromkeys([*reference_ids, *(file_id for file_id, _ in ranked_hits)])
         )
         append_summary = self._neuron_table.append_file_ids(ordered_ids)
-        self._apply_saved_table_state_to_table()
+        self._apply_saved_table_state_to_table(file_ids=append_summary.added_file_ids)
 
         updates = {
             file_id: NeuronMetadataUpdate(
@@ -8757,11 +8757,31 @@ class NeuronViewerWidget(QWidget):
             search_tab.set_search_heatmap_busy(False)
         self._update_selected_neuron_heatmap_controls()
 
-    def _apply_saved_table_state_to_table(self) -> None:
-        """Apply enhanced parquet or project table state to current table rows."""
+    def _apply_saved_table_state_to_table(
+        self, *, file_ids: tuple[object, ...] | None = None
+    ) -> None:
+        """Restore saved rows, optionally initializing only newly appended IDs."""
         table_state = getattr(self, "_saved_table_state", None)
         if not isinstance(table_state, dict) or not table_state.get("entries"):
             return
+        if file_ids is not None:
+            requested = {str(file_id) for file_id in file_ids}
+            raw_entries = table_state["entries"]
+            if isinstance(raw_entries, Mapping):
+                raw_entries = raw_entries.values()
+            entries = [
+                entry
+                for entry in raw_entries
+                if isinstance(entry, Mapping) and str(entry.get("file_id")) in requested
+            ]
+            if not entries:
+                return
+            # The shared registry owns current labels and runtime results.
+            # Restore row state without reloading it or importing legacy
+            # cluster labels that the user may have deleted since loading.
+            table_state = {
+                "entries": [{**entry, "cluster_id": None} for entry in entries],
+            }
         applier = getattr(self._neuron_table, "apply_state", None)
         if callable(applier):
             applier(table_state, preserve_membership=True)

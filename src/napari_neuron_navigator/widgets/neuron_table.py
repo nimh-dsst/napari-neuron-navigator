@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from qtpy.QtCore import QItemSelection, QItemSelectionModel, Qt, QTimer, Signal
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
+    QAbstractItemDelegate,
     QAbstractItemView,
     QCheckBox,
     QColorDialog,
@@ -1170,6 +1171,15 @@ class NeuronTableWidget(QWidget):
 
     def export_state(self) -> dict[str, object]:
         """Return all table rows and per-neuron UI state as JSON-safe data."""
+        # A save button need not take keyboard focus (notably on macOS).
+        # Finish the active cell edit before taking the annotation snapshot.
+        if self._table.state() == QAbstractItemView.EditingState:
+            editor = self._table.indexWidget(self._table.currentIndex())
+            if editor is None:
+                editor = self._table.focusWidget()
+            if editor is not None:
+                self._table.commitData(editor)
+                self._table.closeEditor(editor, QAbstractItemDelegate.NoHint)
         cluster_map = self.get_cluster_map()
         for file_id, entry in self._entries.items():
             entry.cluster_id = cluster_map.get(file_id)
@@ -1273,6 +1283,9 @@ class NeuronTableWidget(QWidget):
 
         row_map = self._file_id_to_row_map()
         sorting_enabled = self._table.isSortingEnabled()
+        # Restored tags are already parsed. Feeding their display text through
+        # itemChanged would split literal commas in individual saved tag names.
+        signals_blocked = self._table.blockSignals(True)
         self._table.setSortingEnabled(False)
         try:
             for file_id, entry in list(self._entries.items()):
@@ -1322,6 +1335,7 @@ class NeuronTableWidget(QWidget):
                     self._set_heatmap_cell(row, entry.heatmap_layer_names)
         finally:
             self._table.setSortingEnabled(sorting_enabled)
+            self._table.blockSignals(signals_blocked)
 
         self.visibility_changed.emit(self.get_visibility_map())
         self.colors_changed.emit(self.get_full_color_map())

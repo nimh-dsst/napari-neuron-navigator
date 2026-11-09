@@ -10,6 +10,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
@@ -46,6 +47,11 @@ _TEXT_ENHANCED_COLUMNS = (
     "neuron_notes",
 )
 _SOURCE_FILE_ID_INLINE_LIMIT = 10_000
+# Project saving shares a process with napari's potentially large layer arrays.
+# DuckDB's machine-wide defaults leave too little memory for the viewer when
+# sorting millions of selected nodes, so constrain this connection explicitly.
+_PROJECT_EXPORT_MEMORY_LIMIT = "512MiB"
+_PROJECT_EXPORT_THREADS = 2
 _ProgressCallback = Callable[[str, int, int], None]
 
 logger = logging.getLogger(__name__)
@@ -683,30 +689,42 @@ def export_filtered_project_neuron_parquet(
         if write_target.exists():
             write_target.unlink()
 
-    conn = duckdb.connect()
-    try:
-        conn.register(
-            "selected_neurons",
-            _selected_rows_arrow_table(
-                selected_rows,
-                assignment_columns=assignment_columns,
-            ),
+    # Large ORDER BY operations must spill within this save's own staging
+    # directory instead of competing for most RAM or sharing a cwd .tmp folder
+    # with other DuckDB connections in the viewer. Close before removing spills.
+    with TemporaryDirectory(
+        prefix=".nn-project-export-", dir=output.parent
+    ) as spill_dir:
+        conn = duckdb.connect(
+            config={
+                "memory_limit": _PROJECT_EXPORT_MEMORY_LIMIT,
+                "threads": _PROJECT_EXPORT_THREADS,
+                "temp_directory": spill_dir,
+            }
         )
-        conn.execute(
-            f"""
-            COPY (
-                SELECT {", ".join(select_parts)}
-                FROM read_parquet('{_duckdb_path(source_path)}') AS src
-                INNER JOIN selected_neurons AS sel
-                    ON CAST(src.{_quote_identifier("file_id")} AS VARCHAR) = sel.file_id
-                ORDER BY {", ".join(order_parts)}
+        try:
+            conn.register(
+                "selected_neurons",
+                _selected_rows_arrow_table(
+                    selected_rows,
+                    assignment_columns=assignment_columns,
+                ),
             )
-            TO '{_duckdb_path(write_target)}'
-            (FORMAT PARQUET, COMPRESSION 'SNAPPY')
-            """
-        )
-    finally:
-        conn.close()
+            conn.execute(
+                f"""
+                COPY (
+                    SELECT {", ".join(select_parts)}
+                    FROM read_parquet('{_duckdb_path(source_path)}') AS src
+                    INNER JOIN selected_neurons AS sel
+                        ON CAST(src.{_quote_identifier("file_id")} AS VARCHAR) = sel.file_id
+                    ORDER BY {", ".join(order_parts)}
+                )
+                TO '{_duckdb_path(write_target)}'
+                (FORMAT PARQUET, COMPRESSION 'SNAPPY', ROW_GROUP_SIZE 65536)
+                """
+            )
+        finally:
+            conn.close()
 
     export_table_state = _table_state_with_resolved_columns(
         table_state_payload,

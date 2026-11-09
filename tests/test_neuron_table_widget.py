@@ -660,6 +660,11 @@ class _DummyTable:
     def rowCount(self) -> int:
         return len(self._file_ids)
 
+    def state(self):
+        from qtpy.QtWidgets import QAbstractItemView
+
+        return QAbstractItemView.NoState
+
     def columnCount(self) -> int:
         return self._column_count
 

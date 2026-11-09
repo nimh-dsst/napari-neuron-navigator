@@ -4670,7 +4670,9 @@ def test_populate_neuron_table_does_not_require_subject_column() -> None:
 def test_add_and_annotate_search_appends_references_then_ranked_hits() -> None:
     from napari_neuron_navigator.analysis.search import SearchAnnotationRequest
 
-    append_summary = types.SimpleNamespace(added_count=3, already_present_count=0)
+    append_summary = types.SimpleNamespace(
+        added_count=3, already_present_count=0, added_file_ids=("r1", "h1", "h2")
+    )
     metadata_summary = types.SimpleNamespace(updated_count=3)
     table = types.SimpleNamespace(
         append_file_ids=MagicMock(return_value=append_summary),
@@ -4699,7 +4701,9 @@ def test_add_and_annotate_search_appends_references_then_ranked_hits() -> None:
     NeuronViewerWidget._annotate_search_in_table(widget, request)
 
     table.append_file_ids.assert_called_once_with(["r1", "h1", "h2"])
-    widget._apply_saved_table_state_to_table.assert_called_once_with()
+    widget._apply_saved_table_state_to_table.assert_called_once_with(
+        file_ids=("r1", "h1", "h2")
+    )
     updates = table.apply_metadata_updates.call_args.args[0]
     assert list(updates) == ["r1", "h1", "h2"]
     assert updates["r1"].label is None

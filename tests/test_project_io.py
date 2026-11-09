@@ -460,6 +460,121 @@ def test_save_project_bundle_writes_only_current_table_neurons(tmp_path: Path) -
     assert not list(tmp_path.glob(".saved.nnproj.*.staging"))
 
 
+def test_filtered_project_export_limits_its_own_connection_and_cleans_spills(
+    tmp_path, monkeypatch
+):
+    source, output = tmp_path / "source.parquet", tmp_path / "filtered.parquet"
+    _write_three_neuron_source_parquet(source)
+    connect = project_io_module.duckdb.connect
+    settings = []
+
+    def track_connection(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        settings.append(
+            conn.execute(
+                "SELECT current_setting('memory_limit'), current_setting('threads'), "
+                "current_setting('temp_directory')"
+            ).fetchone()
+        )
+        return conn
+
+    # Resource policy must not mutate a viewer's already-open database.
+    viewer_db = connect(config={"memory_limit": "1GiB", "threads": 1})
+    try:
+        monkeypatch.setattr(project_io_module.duckdb, "connect", track_connection)
+        export_filtered_project_neuron_parquet(
+            source, output, table_state=_subset_table_state()
+        )
+        assert len(settings) == 1
+        memory_limit, threads, spill_dir = settings[0]
+        assert memory_limit == "512.0 MiB"
+        assert threads == 2
+        assert Path(spill_dir).parent == tmp_path
+        assert Path(spill_dir).name.startswith(".nn-project-export-")
+        assert not Path(spill_dir).exists()
+        assert viewer_db.execute(
+            "SELECT current_setting('memory_limit'), current_setting('threads')"
+        ).fetchone() == ("1.0 GiB", 1)
+    finally:
+        viewer_db.close()
+
+
+def test_filtered_project_export_spills_large_sort_without_losing_order(
+    tmp_path, monkeypatch
+):
+    source, output = tmp_path / "source.parquet", tmp_path / "filtered.parquet"
+    profile_path = tmp_path / "export-profile.json"
+    connect = project_io_module.duckdb.connect
+    count = 500_000
+    with connect(config={"memory_limit": "64MiB", "threads": 1}) as builder:
+        builder.execute(f"""
+            COPY (
+                SELECT CASE WHEN i % 2 = 0 THEN 'a/shared' ELSE 'b/shared' END AS file_id,
+                    {count} - i AS node_id, 'shared' AS neuron_id,
+                    repeat(md5(CAST(i AS VARCHAR)), 4) AS payload
+                FROM range({count}) AS rows(i)
+            ) TO '{project_io_module._duckdb_path(source)}' (FORMAT PARQUET)
+        """)
+
+    def profile_connection(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.execute(
+            f"SET profiling_output = '{project_io_module._duckdb_path(profile_path)}'"
+        )
+        conn.execute("SET enable_profiling = 'json'")
+        return conn
+
+    monkeypatch.setattr(project_io_module, "_PROJECT_EXPORT_MEMORY_LIMIT", "64MiB")
+    monkeypatch.setattr(project_io_module, "_PROJECT_EXPORT_THREADS", 1)
+    monkeypatch.setattr(project_io_module.duckdb, "connect", profile_connection)
+    export_filtered_project_neuron_parquet(
+        source,
+        output,
+        table_state={
+            "entries": [
+                {"file_id": "b/shared", "tags": ["B"]},
+                {"file_id": "a/shared", "tags": ["A"]},
+            ]
+        },
+    )
+    profile = json.loads(profile_path.read_text())
+    assert (
+        profile["system_peak_temp_dir_size"] > 0
+    )  # Actually exercised external sorting.
+    # Profiling can include a transient buffer beyond the configured budget.
+    assert profile["system_peak_buffer_memory"] <= 65 * 1024**2
+    assert not list(tmp_path.glob(".nn-project-export-*"))
+    saved = pq.read_table(output, columns=["file_id", "node_id"]).to_pandas()
+    assert len(saved) == count
+    assert saved.file_id.iloc[: count // 2].eq("b/shared").all()
+    assert saved.file_id.iloc[count // 2 :].eq("a/shared").all()
+    assert saved.node_id.iloc[: count // 2].is_monotonic_increasing
+    assert saved.node_id.iloc[count // 2 :].is_monotonic_increasing
+
+
+def test_project_export_memory_error_preserves_previous_bundle(tmp_path, monkeypatch):
+    source, bundle_path = tmp_path / "source.parquet", tmp_path / "saved.nnproj"
+    _write_three_neuron_source_parquet(source)
+    save_project_bundle(
+        bundle_path, source_parquet_path=source, table_state=_subset_table_state()
+    )
+    manifest_before = (bundle_path / "manifest.json").read_bytes()
+    data_before = (bundle_path / "data/source_neurons.parquet").read_bytes()
+    # Force a real DuckDB allocation failure, instead of exhausting this process.
+    monkeypatch.setattr(project_io_module, "_PROJECT_EXPORT_MEMORY_LIMIT", "1KiB")
+    with pytest.raises(project_io_module.duckdb.OutOfMemoryException):
+        save_project_bundle(
+            bundle_path,
+            source_parquet_path=source,
+            table_state=_subset_table_state(),
+            overwrite=True,
+        )
+    assert (bundle_path / "manifest.json").read_bytes() == manifest_before
+    assert (bundle_path / "data/source_neurons.parquet").read_bytes() == data_before
+    assert is_recognized_project_bundle(bundle_path)
+    assert not list(tmp_path.glob(".saved.nnproj.*.staging"))
+
+
 def test_save_project_bundle_rejects_existing_destination_without_changes(
     tmp_path: Path,
 ) -> None:
