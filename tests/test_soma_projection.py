@@ -540,6 +540,12 @@ class _DummyMutableComboBox:
             return None
         return self.items[self.current_index][1]
 
+    def findData(self, data) -> int:
+        return next(
+            (index for index, (_text, value) in enumerate(self.items) if value == data),
+            -1,
+        )
+
     def currentText(self) -> str:
         if self.current_index < 0 or self.current_index >= len(self.items):
             return ""
@@ -1598,6 +1604,69 @@ def test_data_tab_offers_all_supported_atlas_resolutions() -> None:
         "allen_mouse_50um",
         "allen_mouse_100um",
     )
+
+
+@pytest.mark.parametrize("resolution", [10, 25, 50, 100])
+def test_conversion_resolution_defaults_to_loaded_atlas(resolution):
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    widget._convert_resolution_combo = _DummyMutableComboBox()
+    for supported in (10, 25, 50, 100):
+        widget._convert_resolution_combo.addItem(str(supported), supported)
+    widget._atlas = types.SimpleNamespace(resolution=(resolution,) * 3)
+    # A choice in the atlas selector has not necessarily been loaded yet.
+    widget._atlas_combo = _DummyComboBox("allen_mouse_25um")
+
+    widget._sync_conversion_resolution_to_atlas()
+
+    assert widget._convert_resolution_combo.currentData() == resolution
+
+
+def test_conversion_resolution_preserves_choice_without_loaded_atlas():
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    widget._convert_resolution_combo = _DummyMutableComboBox()
+    widget._convert_resolution_combo.addItem("50", 50)
+    widget._atlas = None
+
+    widget._sync_conversion_resolution_to_atlas()
+
+    assert widget._convert_resolution_combo.currentData() == 50
+
+
+@pytest.mark.parametrize("resolution", [10, 25])
+def test_conversion_resolution_reaches_worker_and_uses_loaded_atlas(
+    monkeypatch, resolution
+):
+    worker_factory = MagicMock()
+    fake_workers = types.ModuleType("napari_neuron_navigator.workers")
+    fake_workers.ConvertWorker = worker_factory
+    monkeypatch.setitem(sys.modules, "napari_neuron_navigator.workers", fake_workers)
+    thread = MagicMock()
+    monkeypatch.setitem(
+        NeuronViewerWidget._start_conversion.__globals__, "QThread", lambda: thread
+    )
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    widget._atlas = types.SimpleNamespace(
+        atlas_name="allen_mouse_25um", resolution=(25, 25, 25)
+    )
+    widget._atlas_combo = _DummyComboBox("allen_mouse_100um")
+    widget._convert_resolution_combo = _DummyMutableComboBox()
+    widget._convert_resolution_combo.addItem(str(resolution), resolution)
+    widget._convert_hemisphere_combo = types.SimpleNamespace(
+        currentData=lambda: None, setEnabled=lambda _enabled: None
+    )
+    widget._convert_progress = _DummyProgressBar()
+    widget._convert_status_label = _DummyStatusLabel()
+
+    widget._start_conversion(["cell_a.swc"], "output.parquet", source_mode="files")
+
+    assert worker_factory.call_args.args[2] == resolution
+    assert worker_factory.call_args.kwargs["atlas_name"] == "allen_mouse_25um"
+    assert worker_factory.call_args.kwargs["cached_atlas"] is widget._atlas
+    assert worker_factory.call_args.kwargs["use_cached_annotation"] is (
+        resolution == 25
+    )
+    assert widget._convert_resolution_combo.enabled is False
+    thread.start.assert_called_once()
 
 
 def test_selected_neurons_starts_with_adaptive_height_toggle() -> None:

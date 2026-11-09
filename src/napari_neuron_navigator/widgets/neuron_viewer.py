@@ -98,6 +98,7 @@ from ..project_io import (
     read_enhanced_parquet_metadata,
     save_project_bundle,
 )
+from ..region import RESOLUTIONS
 from ..region_appearance import RegionAppearanceStore
 from ..swc import NodeType
 from .analysis_tab import AnalysisTabWidget
@@ -1801,10 +1802,16 @@ class NeuronViewerWidget(QWidget):
 
         res_row = QHBoxLayout()
         res_row.addWidget(QLabel("Resolution (μm):"))
-        self._convert_resolution_spin = QSpinBox()
-        self._convert_resolution_spin.setRange(10, 100)
-        self._convert_resolution_spin.setValue(25)
-        res_row.addWidget(self._convert_resolution_spin)
+        self._convert_resolution_combo = QComboBox()
+        for resolution in RESOLUTIONS:
+            self._convert_resolution_combo.addItem(str(resolution), resolution)
+        self._convert_resolution_combo.setCurrentText("25")
+        self._convert_resolution_combo.setToolTip(
+            "Atlas voxel size used to assign brain regions to SWC nodes. "
+            "Defaults to the loaded atlas resolution."
+        )
+        self._sync_conversion_resolution_to_atlas()
+        res_row.addWidget(self._convert_resolution_combo)
         convert_layout.addLayout(res_row)
 
         hemisphere_row = QHBoxLayout()
@@ -3876,9 +3883,29 @@ class NeuronViewerWidget(QWidget):
         self._update_mask_sigma_units_label()
         self._update_point_import_controls()
 
+    def _sync_conversion_resolution_to_atlas(self) -> None:
+        """Default SWC annotation resolution to the successfully loaded atlas."""
+        combo = getattr(self, "_convert_resolution_combo", None)
+        atlas = getattr(self, "_atlas", None)
+        if combo is None or atlas is None:
+            return
+        try:
+            resolution = np.asarray(atlas.resolution, dtype=float)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if resolution.shape != (3,):
+            return
+        for supported in RESOLUTIONS:
+            if np.allclose(resolution, supported):
+                index = combo.findData(supported)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                return
+
     def _apply_loaded_atlas(self, atlas, atlas_name: str) -> None:
         """Store a loaded atlas and refresh atlas-dependent UI."""
         self._atlas = atlas
+        self._sync_conversion_resolution_to_atlas()
 
         selectors = []
         for attr_name in (
@@ -10726,7 +10753,7 @@ class NeuronViewerWidget(QWidget):
         for name in (
             "_convert_dir_btn",
             "_convert_files_btn",
-            "_convert_resolution_spin",
+            "_convert_resolution_combo",
             "_convert_hemisphere_combo",
             "_convert_add_flatmap_cb",
             "_convert_lookup_dir_btn",
@@ -10927,9 +10954,11 @@ class NeuronViewerWidget(QWidget):
             show_warning("An SWC conversion is already running.")
             return
 
-        resolution = self._convert_resolution_spin.value()
+        resolution = int(self._convert_resolution_combo.currentData())
         hemisphere = self._convert_hemisphere_combo.currentData()
-        atlas_name = self._atlas_combo.currentText()
+        atlas_name = str(
+            getattr(self._atlas, "atlas_name", "") or self._atlas_combo.currentText()
+        )
         add_flatmaps_control = getattr(self, "_convert_add_flatmap_cb", None)
         add_flatmaps = bool(
             add_flatmaps_control is not None and add_flatmaps_control.isChecked()

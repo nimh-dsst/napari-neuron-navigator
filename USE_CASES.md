@@ -26,7 +26,7 @@ Unless a use case says otherwise:
 
 | ID | Capability | Manual status |
 | --- | --- | --- |
-| [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Partially run |
+| [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Passed |
 | [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Partially run |
 | [UC-003](#uc-003-prepare-a-whole-neuron-parquet-for-flatmap-viewing) | Append bilateral shaped/square flatmap and depth coordinates to a whole Parquet | Not run |
 | [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Passed |
@@ -139,16 +139,15 @@ locally.
 
 **Manual verification**
 
-- Status: Partially run
+- Status: Passed
 - Last verified: 2026-11-09
 - Last attempted: 2026-11-09
-- Notes: During the manual uncached-atlas loading check, the user reported
+- Notes: The user confirmed that UC-001 passes manual testing after the native
+  certificate-trust fix. Cached loading of both `allen_mouse_25um` and
+  `allen_mouse_10um` was also explicitly confirmed.
+  During the earlier manual uncached-atlas loading check, the user reported
   `Atlas: Error - GIN server is down`. The download/install path did not
-  complete. This records the displayed error, not an independently verified
-  server outage. The user subsequently confirmed that both `allen_mouse_25um`
-  and `allen_mouse_10um` loaded successfully from cache. Confirmation/cancellation
-  behavior, download/install, progress/control recovery details, and cache reuse
-  after restarting napari remain unverified in this run.
+  complete on that attempt.
   Investigation reproduced an underlying `SSLCertVerificationError`
   (`self-signed certificate in certificate chain`), which BrainGlobe 2.3.0
   replaced with the generic server-down message. System curl reached GIN with
@@ -158,7 +157,7 @@ locally.
   structures, and 28.4 seconds for download/install/load. Reference and
   annotation shapes matched; a cached reload succeeded with network access
   forbidden. The user's existing atlas cache was not modified by this check.
-  This technical validation does not replace the pending manual napari retry.
+  The Passed status records the user's subsequent manual confirmation.
 
 ### UC-002: Convert SWC Files to Parquet
 
@@ -179,8 +178,13 @@ produce one Parquet file, but they differ in which SWCs are included:
 | **From Directory...** | Every file with an `.swc` extension, including uppercase variants such as `.SWC`, in the selected folder and all of its subfolders | A folder represents the complete dataset to convert |
 | **From Files...** | Only the files explicitly selected in the multi-file picker; other SWCs in the same folder or its subfolders are not discovered automatically | Only a particular group or subset of SWCs should be converted |
 
-`Resolution (μm)` selects the Allen atlas resolution used to annotate node
-coordinates with brain regions. `Hemisphere alignment` controls whether source
+`Resolution (μm)` is a dropdown offering only `10`, `25`, `50`, and `100`.
+It selects the Allen atlas resolution used to annotate node coordinates with
+brain regions. Each successful atlas load, including startup loading from
+cache, sets the dropdown to the loaded atlas's resolution. Before any atlas
+loads, it defaults to `25`. The user can choose another supported resolution
+for conversion; selecting an atlas without loading it does not change the
+default. `Hemisphere alignment` controls whether source
 coordinates are kept as-is (`None`) or morphologies on the opposite side are
 reflected into a common `Left` or `Right` hemisphere. The atlas resolution and
 the coordinate space of the SWCs must match for region annotations and
@@ -224,10 +228,14 @@ a partial output from being published.
    columns**, **Lookup directory...**, `Lookup resolution`, **Cancel
    conversion**, a status area, and a progress indicator that is initially
    hidden.
-2. **Action:** Set `Resolution (μm)` to `25` and `Hemisphere alignment` to
-   `None`.
-   **Expected:** Conversion will use the 25 μm Allen annotation while preserving
-   the SWC coordinates.
+2. **Action:** Load `allen_mouse_25um` through **Atlas**, then inspect
+   `Resolution (μm)` under **Convert SWC to Parquet**. Set `Hemisphere alignment`
+   to `None`. Repeat the resolution-default check when loading another cached
+   supported atlas, then restore `allen_mouse_25um` for conversion.
+   **Expected:** The dropdown automatically matches each loaded atlas and offers
+   only `10`, `25`, `50`, and `100`. After restoring the 25 μm atlas, conversion
+   will use its annotation while preserving the SWC coordinates. A different
+   supported resolution can still be selected explicitly.
 3. **Action:** Click **From Directory...**, select `swc_batch`, and save the
    output as `directory.parquet` when **Save Parquet File** opens.
    **Expected:** The plugin recursively searches the selected folder, discovers
@@ -284,6 +292,9 @@ an error instead of reporting successful conversion.
   `/private/tmp/nn-manual-tests-2026-11-09/directory.parquet`.
   Selected-file conversion, picker/save cancellation, chained flatmap
   preprocessing/cancellation, and invalid-input behavior remain unverified.
+  The supported-resolution dropdown and loaded-atlas default synchronization
+  were added after the confirmed directory conversion; their manual checks
+  remain pending.
   Inputs prepared for the 2026-11-09 manual run at
   `/private/tmp/nn-manual-tests-2026-11-09/swc_batch/`, using the layout above.
   `cell_a.swc` and `nested/cell_c.SWC` copy the committed
