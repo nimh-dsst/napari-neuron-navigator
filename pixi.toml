@@ -14,7 +14,6 @@ test-cov = "pytest -v --cov=napari_neuron_navigator --cov-report=xml"
 test-region-profile = { cmd = "pytest -v --tb=long tests/test_region_profile_stage0.py tests/test_region_profile_stage1.py tests/test_region_query_stage2.py", env = { PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1" } }
 build = "python scripts/cleanup_legacy_install.py && pip install -e . --no-deps"
 napari = { cmd = "napari", depends-on = ["build"] }
-download-cpd2 = "python scripts/download_cpd2.py"
 download-test-data = "python scripts/download_test_data.py"
 
 [dependencies]
@@ -66,7 +65,6 @@ docs-pdf = { cmd = "python scripts/markdown_to_pdf.py docs/source/index.md docs/
 docs-build = { cmd = "sphinx-build -E -a -W --keep-going -n -b html docs/source docs/_build/html", depends-on = ["docs-pdf"], default-environment = "docs" }
 docs-serve = { cmd = "python -m http.server --bind 127.0.0.1 --directory docs/_build/html 8000", depends-on = ["docs-build"], default-environment = "docs" }
 markdown-pdf = { cmd = "python scripts/markdown_to_pdf.py", default-environment = "docs" }
-cpd2-pdf = { cmd = "python scripts/markdown_to_pdf.py docs/cpd2_workflow.md docs/_build/cpd2_workflow.pdf", default-environment = "docs" }
 
 [environments]
 default = ["dev"]

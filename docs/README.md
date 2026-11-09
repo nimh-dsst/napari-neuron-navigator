@@ -48,18 +48,6 @@ Use ordinary Markdown headings, links, lists, and fenced code blocks in content
 shared with the PDF converter. Sphinx/MyST directives and roles are available
 for HTML pages but are not interpreted by the standalone converter.
 
-The existing CPD2 PDF task remains available:
-
-```bash
-pixi run -e docs cpd2-pdf
-```
-
-The task converts `docs/cpd2_workflow.md` and writes:
-
-```text
-docs/_build/cpd2_workflow.pdf
-```
-
 All generated HTML and PDFs stay under the gitignored `docs/_build/` directory.
 
 ## Publishing

@@ -35,8 +35,6 @@ Windows, macOS on Apple Silicon, and Linux.
 
 - [Repository README](https://github.com/nimh-dsst/napari-neuron-navigator/blob/main/README.md):
   installation, capabilities, and development commands.
-- [CPD2 workflow](https://github.com/nimh-dsst/napari-neuron-navigator/blob/main/docs/cpd2_workflow.md):
-  a detailed data-processing walkthrough.
 - [Use cases](https://github.com/nimh-dsst/napari-neuron-navigator/blob/main/USE_CASES.md):
   repeatable workflows and their manual verification status.
 
