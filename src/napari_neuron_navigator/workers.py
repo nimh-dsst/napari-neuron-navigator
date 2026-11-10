@@ -1308,18 +1308,16 @@ class ConvertWorker(QObject):
                 0,
                 total,
             )
-            conversion_output_path = self._output_path
-            if self._flatmap_lookup_dir is not None:
-                self._output_path.parent.mkdir(parents=True, exist_ok=True)
-                descriptor, staged_name = tempfile.mkstemp(
-                    prefix=f".{self._output_path.stem}.swc-",
-                    suffix=".parquet",
-                    dir=self._output_path.parent,
-                )
-                os.close(descriptor)
-                staged_conversion_path = Path(staged_name)
-                staged_conversion_path.unlink()
-                conversion_output_path = staged_conversion_path
+            self._output_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, staged_name = tempfile.mkstemp(
+                prefix=f".{self._output_path.stem}.swc-",
+                suffix=".parquet",
+                dir=self._output_path.parent,
+            )
+            os.close(descriptor)
+            staged_conversion_path = Path(staged_name)
+            staged_conversion_path.unlink()
+            conversion_output_path = staged_conversion_path
             batch_start = perf_counter()
             cached_midline, cached_annotation_volume, cached_region_lookup = (
                 self._cached_atlas_conversion_inputs()
@@ -1370,9 +1368,9 @@ class ConvertWorker(QObject):
             if summary.processed_files == 0:
                 raise ValueError("No SWC files were successfully processed")
 
+            self._check_cancelled()
             total = summary.discovered_files
             if self._flatmap_lookup_dir is not None:
-                self._check_cancelled()
                 from .flatmap_parquet import augment_neuron_parquet_with_flatmaps
                 from .flatmap_profiles import discover_flatmap_lookup_set
 
@@ -1397,9 +1395,10 @@ class ConvertWorker(QObject):
                     progress_callback=self._report_progress,
                     cancel_callback=lambda: self._cancel_requested,
                 )
-            # Returning from the final writer is the atomic publication
-            # boundary. A later cancel request must not turn success into an
-            # error after the destination already exists.
+            else:
+                os.replace(conversion_output_path, self._output_path)
+            # The destination has now been atomically published. A later cancel
+            # request must not turn success into an error.
             self.progress.emit("Finalizing Parquet...", total, total)
             logger.debug(
                 "swc_conversion_worker_finished source_mode=%s elapsed_s=%.6f",

@@ -1405,14 +1405,9 @@ class FlatmapProjectionWidget(QWidget):
         self._notify_flatmap_correlation_source_changed()
 
     def _invalidate_flatmap_grid_layers(self) -> None:
-        """Remove render state that belongs to a previous style/cache grid."""
-        self._remove_projection_layer(create=False)
-        self._remove_soma_layer()
-        self._clear_named_region_layers(_REGION_LABELS_LAYER_NAME)
-        self._clear_region_surface_layers()
-        self._clear_region_outline_layers()
-        self._region_labels_layer = None
-        self._reset_flatmap_render_state()
+        """Retire a previous grid without freeing live GPU layers in a Qt signal."""
+        self._defer_flatmap_grid_layer_removal()
+        self._clear_display_axis_annotations()
 
     def _reset_flatmap_render_state(self) -> None:
         """Forget the latest projection without performing any layer mutation."""
@@ -1508,7 +1503,10 @@ class FlatmapProjectionWidget(QWidget):
 
     def _defer_flatmap_grid_layer_removal(self) -> None:
         """Retire a stale grid without deleting live GPU resources inline."""
-        soma_layer = self._cached_soma_layer()
+        soma_layer = self._cached_soma_layer() or self._find_layer_by_name(
+            _SOMA_POINTS_LAYER_NAME,
+            create=False,
+        )
         targets = (
             self._current_flatmap_render_layers() + self._current_cached_region_layers()
         )

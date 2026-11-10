@@ -675,14 +675,14 @@ def _run_serial_batch_conversion(
     try:
         for file_index, swc_path in enumerate(swc_files, start=1):
             file_start = perf_counter()
-            try:
-                if progress_callback is not None:
-                    progress_callback(
-                        f"Processing {swc_path.name}...",
-                        summary.processed_files + summary.failed_files,
-                        total_files,
-                    )
+            if progress_callback is not None:
+                progress_callback(
+                    f"Processing {swc_path.name}...",
+                    summary.processed_files + summary.failed_files,
+                    total_files,
+                )
 
+            try:
                 logger.debug(
                     (
                         "swc_conversion_file_start source_mode=%s index=%d "

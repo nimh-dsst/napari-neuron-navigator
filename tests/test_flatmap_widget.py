@@ -5725,6 +5725,68 @@ def test_cached_flat_region_outlines_use_only_materialized_cache_arrays(
     np.testing.assert_allclose(widget._viewer.layers[0].edge_color, expected_visp)
 
 
+@pytest.mark.parametrize("selector", ["style", "source"])
+@pytest.mark.parametrize("tracked_soma", [False, True])
+def test_grid_selector_changes_defer_live_layer_removal(
+    monkeypatch, selector, tracked_soma
+) -> None:
+    """Dropdown signals must not destroy visible GPU layers or the main scene."""
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    main_layer = widget._viewer.add_image(np.ones((2, 2)), name="Atlas reference")
+    display = _DummyViewer()
+    widget._display_viewer_provider = lambda **_kwargs: display
+    names = [
+        module._HEATMAP_LAYER_NAME,
+        module._REGION_LABELS_LAYER_NAME,
+        f"{module._REGION_SURFACES_LAYER_NAME}: MOs5",
+        f"{module._REGION_OUTLINES_LAYER_NAME}: MOs5",
+        module._SOMA_POINTS_LAYER_NAME,
+    ]
+    old_layers = [display.add_image(np.ones((2, 2, 2)), name=name) for name in names]
+    widget._projection_layer, widget._region_labels_layer = old_layers[:2]
+    widget._region_surfaces_layers = [old_layers[2]]
+    widget._region_outlines_layers = [old_layers[3]]
+    widget._soma_layer = old_layers[4] if tracked_soma else None
+    widget._last_summary = object()
+    widget._active_cache_profile = None
+    queued = []
+    widget._queue_gui_callback = queued.append
+    widget._update_expected_filename_label = lambda: None
+    widget._refresh_cache_profiles = lambda: None
+    widget._notify_flatmap_correlation_source_changed = lambda: None
+    widget._projection_source_combo = _DummyDataCombo(module._PROJECTION_SOURCE_RECOMPUTE)
+    widget._update_style_choices_for_source = lambda _source: None
+    widget._set_cache_grid_locked = lambda _locked: None
+    widget._update_cached_region_controls = lambda: None
+
+    if selector == "style":
+        widget._on_flatmap_style_changed()
+    else:
+        widget._on_projection_source_changed()
+
+    assert display.layers == old_layers
+    assert all(layer.visible is False for layer in old_layers)
+    assert widget._projection_layer is None
+    assert widget._region_labels_layer is None
+    assert widget._region_surfaces_layers == []
+    assert widget._region_outlines_layers == []
+    assert widget._soma_layer is None
+    assert widget._last_summary is None
+    assert len(queued) == 1
+    assert widget._viewer.layers == [main_layer]
+    assert main_layer.visible is True
+
+    # A subsequent projection may create a layer with the same name before the
+    # queued callback runs. Only the retired layer identities may be removed.
+    replacement = display.add_image(np.ones((2, 2, 2)), name=names[0])
+    queued[0]()
+
+    assert display.layers == [replacement]
+    assert replacement.visible is True
+    assert widget._viewer.layers == [main_layer]
+
+
 def test_flat_region_overlays_are_retired_with_the_grid(monkeypatch) -> None:
     module = _load_flatmap_widget_module(monkeypatch)
     widget = _widget(module)
