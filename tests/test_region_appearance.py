@@ -160,6 +160,32 @@ def test_palette_file_round_trip(tmp_path) -> None:
     assert load_region_palette(path) == source
 
 
+@pytest.mark.parametrize("existing_file", [False, True])
+def test_empty_palette_export_does_not_create_or_overwrite_files(
+    tmp_path, existing_file: bool
+) -> None:
+    path = tmp_path / "regions.json"
+    original = None
+    if existing_file:
+        save_region_palette(
+            path,
+            RegionAppearanceStore(
+                overrides={2: RegionAppearanceOverride(fill_opacity=0.5)}
+            ),
+        )
+        original = path.read_bytes()
+
+    with pytest.raises(ValueError, match="no appearance overrides"):
+        save_region_palette(
+            path, RegionAppearanceStore(atlas_name="allen_mouse_25um")
+        )
+
+    if existing_file:
+        assert path.read_bytes() == original
+    else:
+        assert not path.exists()
+
+
 def test_empty_override_removes_existing_entry() -> None:
     store = RegionAppearanceStore(
         overrides={1: RegionAppearanceOverride(fill_visible=False)}

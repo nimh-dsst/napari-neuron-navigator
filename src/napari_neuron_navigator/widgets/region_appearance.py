@@ -600,6 +600,14 @@ class RegionAppearanceEditor(QWidget):
         )
 
     def _export_palette(self) -> None:
+        applied = self._applied_store()
+        if not applied.region_ids:
+            show_warning(
+                "No applied region appearance overrides to export. "
+                "Customize region colors, visibility, or opacity, then click "
+                "Apply before exporting. Staged edits are not included."
+            )
+            return
         default_name = f"{self._identity[0] or 'atlas'}_region_palette.json"
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -613,7 +621,7 @@ class RegionAppearanceEditor(QWidget):
         if output.suffix.lower() != ".json":
             output = output.with_suffix(".json")
         try:
-            save_region_palette(output, self._applied_store())
+            save_region_palette(output, applied)
         except Exception as exc:
             show_warning(f"Could not export region palette: {exc}")
             return

@@ -492,6 +492,8 @@ def prepare_region_palette_import(
 
 def save_region_palette(path: str | Path, store: RegionAppearanceStore) -> Path:
     """Write one reusable, human-readable region palette JSON file."""
+    if not store.region_ids:
+        raise ValueError("Cannot export a region palette with no appearance overrides.")
     output_path = Path(path)
     output_path.write_text(
         json.dumps(store.to_palette_dict(), indent=2, sort_keys=True) + "\n",

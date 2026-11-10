@@ -39,7 +39,7 @@ Unless a use case says otherwise:
 | [UC-011](#uc-011-view-a-depth-free-2d-flatmap-and-per-neuron-vector-traces) | View a plain flatmap with no depth axis as a 2D heatmap or per-neuron vector traces, and place somas in the current render's space | Not run |
 | [UC-012](#uc-012-balance-cortical-depth-against-flat-map-position-when-clustering-somas) | Cluster somas with an isotropic flatmap metric and an explicit cortical-depth weight | Partially run |
 | [UC-013](#uc-013-overlay-cached-brain-regions-on-a-2d-flat-map) | Overlay cached region fills and outlines on depth-free flatmap renders | Not run |
-| [UC-014](#uc-014-control-and-share-region-appearance-across-ccfv3-and-flatmap-views) | Assign, stage, share, save, and restore region colors and visibility across CCFv3 and flatmap overlays | Not run |
+| [UC-014](#uc-014-control-and-share-region-appearance-across-ccfv3-and-flatmap-views) | Assign, stage, share, save, and restore region colors and visibility across CCFv3 and flatmap overlays | Partially run |
 | [UC-015](#uc-015-compare-cluster-assignments-in-an-interactive-board) | Compare flatmap and CCFv3 cluster mappings side by side in a linked grid | Not run |
 | [UC-016](#uc-016-compare-multiple-flatmap-windows-side-by-side) | Compare several independently navigable flatmap viewers side by side | Partially run |
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
@@ -2080,18 +2080,37 @@ visible at a given 2D pixel; the 3D layer continues to preserve depth planes.
     **Expected:** The new project restores its applied palette and newly created
     overlays use it. The older project opens normally with an empty palette and
     atlas-color defaults.
+12. **Action:** In a fresh session, load the atlas, select `MOp` in **Atlas
+    Regions**, and click **Export Applied Palette...** before changing any
+    appearance settings. Then select the `MOp` row in **Region Appearance**,
+    click **Assign Distinct Colors**, and try exporting again before clicking
+    **Apply**. Finally, click **Apply** and export.
+    **Expected:** Both export attempts before **Apply** show a warning that
+    there are no applied overrides to export and explain that staged edits
+    must be applied first. No Save dialog opens, no file is created or
+    overwritten, and staged edits remain available. After **Apply**, the Save
+    dialog opens normally and the exported JSON contains a nonempty
+    `overrides` object for `MOp`.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
+- Status: Partially run — empty palette export warnings and palette export/import
+  checks passed; the full appearance workflow remains unverified.
+- Last verified: 2026-11-10
 - Notes: Added on 2026-08-20. Automated tests cover ancestry resolution,
   explicit atlas-color breaks, transparent combined-label entries, per-region
   mesh and flatmap styling, retained descendant IDs and inherited/overridden
   colors in a 2D Labels layer, in-place restyling without cache/NRRD work,
   palette JSON and project round trips, import filtering, and old-project
-  compatibility. Qt-dependent interaction and visual co-registration still
-  require this manual napari run.
+  compatibility. Updated on 2026-11-10 to cover empty palette export warnings;
+  automated tests also check that empty exports cannot create or overwrite a
+  file. On 2026-11-10, the user confirmed the manual palette checks: empty and
+  staged-only palettes show a warning without opening the Save dialog; staged
+  colors remain available; applying enables an export with nonempty overrides;
+  removing the only override with **Inherit** and **Apply** restores the warning;
+  and importing the saved palette with **Merge** and **Apply** restores its color
+  and permits export again. Full CCFv3/flatmap visual checks, import edge cases,
+  and project round trips still require manual verification.
 
 ### UC-015: Compare Cluster Assignments in an Interactive Board
 
