@@ -569,15 +569,19 @@ projecting meshes, or converting region coordinates while viewing.
    region layers use the matching profile grid and remain aligned, including
    when the queried neurons occupy only a small part of the global flatmap.
 7. **Action:** Load a Parquet or atlas that is incompatible with every cached
-   profile, or remove one referenced array and then reopen the cache. When
-   testing a second directory, keep a valid cache and heatmap active first.
+   profile, or prepare a separate cache copy with one referenced array omitted
+   and select it through **Choose Cache Directory...**. Keep a valid cache and
+   heatmap active while testing the invalid candidate directory.
    **Expected:** The plugin reports the exact lookup, atlas, grid, missing-file,
    or validation mismatch. A failed candidate directory does not replace the
    active cache or clear its heatmap. It never starts NRRD recomputation
    automatically.
 8. **Action:** Explicitly choose **Recompute from NRRDs**.
    **Expected:** The legacy runtime lookup workflow becomes available only for
-   this explicit fallback choice.
+   this explicit fallback choice. The status reports
+   `NRRD recomputation is selected explicitly.`, single-hemisphere style
+   choices become available, and the cache grid controls unlock. With
+   **3D Heatmap** selected, **Y bins** and **Depth bin** are editable.
 9. **Action:** After a projection appears, use the flatmap window's
    operating-system close control. Verify that the main layers, order,
    visibility, active selection, dimensions, and camera never changed, then
@@ -597,10 +601,12 @@ projecting meshes, or converting region coordinates while viewing.
     Screen and use the same close control.
     **Expected:** The main window remains fullscreen and responsive. The
     flatmap window opens populated, disappears without a ghost window, and can
-    be reused. Dismissal produces no native crash or operating-system crash
-    report. The plugin retains the macOS hide guard and binds the owning canvas
-    for flatmap layer removal; it performs no private slicer, status-thread,
-    viewer-registry, or model cleanup.
+    be reused. Closing a fullscreen flatmap first exits Full Screen, keeping its
+    content intact during the native transition, then hides the window and
+    clears its transient layers. Dismissal produces no native crash or
+    operating-system crash report. The plugin retains the macOS hide guard and
+    binds the owning canvas for flatmap layer removal; it performs no private
+    slicer, status-thread, viewer-registry, or model cleanup.
 
 **Manual verification**
 
@@ -671,8 +677,57 @@ projecting meshes, or converting region coordinates while viewing.
   the new-window region actions work while the older window remains open.
   The crash and new-window regression are manually resolved; the remaining
   UC-004 checks keep this use case partially run.
-  Repeated cache selection and the remaining compatibility/window checks are
-  pending.
+  Repeated cache selection and projection failure/cancellation are pending.
+  The invalid-cache fixture was prepared on 2026-11-10 at
+  `/private/tmp/nn-manual-tests-2026-11-09/invalid_region_cache_uc004`, using the
+  working `region_profile_cache` manifest and hardlinks to its other 25 arrays.
+  The shaped `occupancy-linear-bins.npy` array is omitted. Local validation
+  reports `Cache array is missing`, and the working manifest's SHA-256 is
+  unchanged. The user confirmed that opening this candidate fails while
+  everything else stays unchanged: the active valid cache, visible heatmap,
+  and region overlays remain usable and napari stays responsive. The invalid
+  candidate does not replace the working cache.
+  The user confirmed that explicitly selecting **Recompute from NRRDs** clears
+  the active projection, reports `NRRD recomputation is selected explicitly.`,
+  enables single-hemisphere style choices, and unlocks **Y bins** and **Depth
+  bin** with **3D Heatmap** selected. This verifies the fallback controls;
+  a runtime NRRD projection was not part of this check.
+  An automated pre-check for step 9 detected that native macOS dismissal cleared
+  the retained viewer without first binding its OpenGL canvas when the main
+  window's context was current. The close handler now binds the closing viewer
+  before clearing its layers, including when closing an older comparison
+  window. A strict desktop check using the real UC-003/004 artifacts passed
+  three close/reopen cycles with canvas reuse, restored region overlays, and
+  unchanged main layers. On 2026-11-10 the user confirmed restarting napari,
+  restoring the cached 3D heatmap and regions, and completing three normal
+  close/reopen cycles using the flatmap window's red macOS close control.
+  Each projection reopened populated without a crash or ghost window; the
+  main viewer's layers, visibility, selection, and camera stayed unchanged.
+  The user also confirmed three close/reopen cycles with the main napari
+  window in macOS Full Screen. The main window stayed fullscreen and
+  responsive, and each flatmap reopened populated without a crash or ghost
+  window. **Failed fullscreen-flatmap dismissal on 2026-11-10:** Closing the
+  flatmap while it is itself fullscreen removes its content but leaves a gray
+  ghost window. The ghost remains until **Project to Flatmap** populates the
+  viewer again. At that point step 10 remained incomplete despite the passing
+  main-window fullscreen cycles. The projection failure/cancellation checks in
+  step 9 also remain pending.
+  **Fullscreen dismissal correction:** A desktop reproduction using the actual
+  cortical Parquet and cache confirmed that Qt reported the window hidden
+  while AppKit still reported it visible after the fullscreen exit animation.
+  The close guard now waits for a spontaneous window-state change confirming
+  the native exit, then queues the hide and owning-canvas layer cleanup after
+  the notification handler returns. A local requested-state change is ignored;
+  repeated close actions do not restart the transition, and reusing the viewer
+  cancels a pending dismissal. The real-data desktop check passed three native
+  fullscreen close/reopen cycles with restored region overlays, unchanged main
+  layers, and no remaining visible native window or fullscreen state. Validation
+  also passed 21 window-management tests and the desktop regression covering six
+  style switches, three normal close/reopen cycles, and three native fullscreen
+  close/reopen cycles. On 2026-11-10 the user confirmed that the corrected
+  fullscreen-flatmap dismissal works on manual retest. The flatmap closes
+  without the gray ghost window and can be populated again with **Project to
+  Flatmap**. Step 10 now passes manual testing.
   Setup for the 2026-11-09 rerun uses the UC-003
   `cortical_input_flatmap.parquet` output, `allen_mouse_25um`, and the real lookup
   directory `/Users/lawrimorejg/repos/atlas-enhancement/data/allen_ccf_25/25-micron/`
@@ -699,8 +754,9 @@ projecting meshes, or converting region coordinates while viewing.
   **Partial manual result:** The revised retain-and-reuse guard was stable when
   reached through the macOS operating-system close control, but invoking the
   same dismissal from the plugin button still caused a native crash. The plugin
-  button and its callback were therefore removed; the complete repeated and
-  fullscreen sequence in steps 9 and 10 remains `Not run`.
+  button and its callback were therefore removed. At that time, the complete
+  repeated and fullscreen sequence in steps 9 and 10 had not been run; the
+  current rerun above records subsequent verification.
   **Superseded historical result:** macOS 26.5.1 arm64 with napari 0.6.6 and
   PyQt6 6.8.1 passed cache build/reopen/parse, shaped/square switching, and the
   former detached-window close/fullscreen checks without a crash or retained

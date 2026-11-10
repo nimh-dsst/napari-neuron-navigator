@@ -164,11 +164,52 @@ class _FlatmapWindowCloseGuard(QObject):
         super().__init__(parent)
         self._viewer = viewer
         self._callback = callback
+        self._pending_fullscreen_hide = None
+        self._fullscreen_hide_queued = False
+
+    def hide_after_fullscreen_exit(self, qt_window, callback) -> bool:
+        """Keep the canvas visible until AppKit finishes leaving its Space."""
+        if self._pending_fullscreen_hide is not None:
+            return True
+        if not qt_window.isFullScreen():
+            return False
+        self._pending_fullscreen_hide = callback
+        try:
+            qt_window.showNormal()
+        except RuntimeError:
+            self.cancel_pending_hide()
+            raise
+        return True
+
+    def cancel_pending_hide(self) -> None:
+        """Do not dismiss a viewer that has since been reused or released."""
+        self._pending_fullscreen_hide = None
+        self._fullscreen_hide_queued = False
 
     def eventFilter(self, watched, event) -> bool:
-        if event.type() != QEvent.Type.Close:
-            return False
-        return bool(self._callback(self._viewer, watched, event))
+        if event.type() == QEvent.Type.Close:
+            return bool(self._callback(self._viewer, watched, event))
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self._pending_fullscreen_hide is not None
+            and not self._fullscreen_hide_queued
+            and event.spontaneous()
+            and not watched.isFullScreen()
+        ):
+            # showNormal() changes Qt's requested state synchronously. Only
+            # the spontaneous event confirms that AppKit finished the native
+            # transition. Hiding sooner leaves a visible, empty native window.
+            callback = self._pending_fullscreen_hide
+            self._fullscreen_hide_queued = True
+
+            def finish_hide():
+                if self._pending_fullscreen_hide is callback:
+                    self.cancel_pending_hide()
+                    callback()
+
+            # Leave the native notification handler before removing GPU layers.
+            QTimer.singleShot(0, finish_hide)
+        return False
 
 
 _SomaSelectionKey = tuple[int, frozenset[int], tuple[object, ...]]
@@ -872,6 +913,7 @@ class NeuronViewerWidget(QWidget):
         if record is None:
             return
         qt_window, guard = record
+        guard.cancel_pending_hide()
         remove = getattr(qt_window, "removeEventFilter", None)
         if callable(remove):
             try:
@@ -910,8 +952,6 @@ class NeuronViewerWidget(QWidget):
             else getattr(getattr(viewer, "window", None), "_qt_window", None)
         )
         hide = getattr(qt_window, "hide", None)
-        is_fullscreen = getattr(qt_window, "isFullScreen", None)
-        show_normal = getattr(qt_window, "showNormal", None)
         if not callable(hide):
             logger.warning(
                 "The macOS flatmap viewer could not be hidden safely; "
@@ -919,10 +959,10 @@ class NeuronViewerWidget(QWidget):
             )
             return False
         try:
-            if callable(is_fullscreen) and callable(show_normal) and is_fullscreen():
-                # Return the hidden window to a normal state so the next
-                # public Viewer.show() does not reopen it in a stale Space.
-                show_normal()
+            if record is not None and record[1].hide_after_fullscreen_exit(
+                qt_window, lambda: self._hide_flatmap_macos_viewer(viewer)
+            ):
+                return True
             hide()
         except RuntimeError:
             return False
@@ -948,6 +988,9 @@ class NeuronViewerWidget(QWidget):
         clear = getattr(layers, "clear", None)
         if callable(clear):
             try:
+                bind_context = getattr(flatmap_tab, "_make_display_context_current", None)
+                if callable(bind_context):
+                    bind_context(viewer)
                 clear()
             except (AttributeError, RuntimeError):
                 logger.debug(
@@ -1077,6 +1120,12 @@ class NeuronViewerWidget(QWidget):
         self._retire_closed_flatmap_viewers()
         viewer = getattr(self, "_flatmap_viewer", None)
         if viewer is not None and not new_window:
+            if create:
+                record = (getattr(self, "_flatmap_close_guards", None) or {}).get(
+                    id(viewer)
+                )
+                if record is not None:
+                    record[1].cancel_pending_hide()
             return viewer
         if not create:
             return viewer

@@ -56,6 +56,8 @@ def test_style_dropdown_keeps_scene_and_binds_cleanup_context():
 
         display.layers.events.removing.connect(assert_deletion_context)
         changes = 0
+        close_cycles = 0
+        fullscreen_cycles = 0
         previous_layers = []
         vertices = np.array([[1, 2, 3], [6, 2, 3], [1, 12, 3], [1, 2, 22]], dtype=float)
         faces = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
@@ -115,10 +117,8 @@ def test_style_dropdown_keeps_scene_and_binds_cleanup_context():
         def open_popup():
             global previous_layers
             if changes == 6:
-                print("Verified six full-plugin style changes and owning-context cleanups", flush=True)
-                # Window dismissal has its own manual test; this child tests
-                # live rendering without invoking secondary-window shutdown.
-                os._exit(0)
+                close_current_window()
+                return
             previous_layers = list(display.layers)
             main.window._qt_window.raise_()
             main.window._qt_window.activateWindow()
@@ -146,11 +146,68 @@ def test_style_dropdown_keeps_scene_and_binds_cleanup_context():
             assert list(main.layers) == [reference]
             assert reference.visible
 
+        def close_current_window():
+            global close_cycles
+            if sys.platform != "darwin" or fullscreen_cycles == 3:
+                print(f"Verified six style changes; macOS close/reopen cycles: {close_cycles}; fullscreen cycles: {fullscreen_cycles}", flush=True)
+                # Final process teardown is separate from the live close/reuse
+                # path tested above.
+                os._exit(0)
+            if close_cycles == 3:
+                display.window._qt_window.showFullScreen()
+                later(1800, close_fullscreen_window)
+                return
+            main.window._qt_viewer.canvas._scene_canvas.set_current()
+            display.window._qt_window.close()
+            assert not display.window._qt_window.isVisible()
+            assert not display.layers
+            assert owner._flatmap_viewer is display
+            assert list(main.layers) == [reference]
+            close_cycles += 1
+            later(200, populate)
+
+        def native_window_value(selector):
+            import ctypes
+
+            objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+            objc.sel_registerName.argtypes = [ctypes.c_char_p]
+            objc.sel_registerName.restype = ctypes.c_void_p
+            send = objc.objc_msgSend
+            send.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            send.restype = ctypes.c_void_p
+            view = int(display.window._qt_window.winId())
+            window = send(view, objc.sel_registerName(b"window"), None)
+            assert window
+            return send(window, objc.sel_registerName(selector.encode()), None)
+
+        def close_fullscreen_window():
+            assert display.window._qt_window.isFullScreen()
+            assert int(native_window_value("styleMask") or 0) & (1 << 14)
+            main.window._qt_viewer.canvas._scene_canvas.set_current()
+            # Match the native red button, including AppKit's animated Space
+            # transition. Qt visibility alone missed a native gray ghost.
+            native_window_value("performClose:")
+            assert display.layers
+            assert display.window._qt_window.isVisible()
+            later(1800, check_fullscreen_closed)
+
+        def check_fullscreen_closed():
+            global fullscreen_cycles
+            assert not display.window._qt_window.isVisible()
+            assert not native_window_value("isVisible"), "Native ghost window remains"
+            assert not (int(native_window_value("styleMask") or 0) & (1 << 14))
+            assert not display.layers
+            assert owner._flatmap_viewer is display
+            assert list(main.layers) == [reference]
+            assert reference.visible
+            fullscreen_cycles += 1
+            later(200, populate)
+
         # Replace only the data-query worker; use the real Project callback,
         # queued layer deletion, viewer factory, rendering, and Qt event loop.
         widget._start_precomputed_heatmap_worker = lambda: later(200, populate)
         later(300, populate)
-        later(60000, lambda: os._exit(2))
+        later(75000, lambda: os._exit(2))
         napari.run()
     """)
     completed = subprocess.run(
