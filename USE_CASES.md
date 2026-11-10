@@ -29,7 +29,7 @@ Unless a use case says otherwise:
 | [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Passed |
 | [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Passed |
 | [UC-003](#uc-003-prepare-a-whole-neuron-parquet-for-flatmap-viewing) | Append bilateral shaped/square flatmap and depth coordinates to a whole Parquet | Passed |
-| [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Failed |
+| [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Partially run |
 | [UC-005](#uc-005-view-selected-allen-isocortex-layers-as-a-flatmap-projection-or-stack) | View selected Allen-layer node counts as one projection or a compact stack | Not run |
 | [UC-006](#uc-006-inspect-and-query-custom-isocortex-layer-regions) | Inspect and query exact terminal regions grouped by Isocortex layer | Not run |
 | [UC-007](#uc-007-refine-and-save-multiple-cluster-assignments) | Preserve a soma clustering and refine selected neurons with a second method | Not run |
@@ -562,10 +562,12 @@ projecting meshes, or converting region coordinates while viewing.
 6. **Action:** Switch between **Both hemispheres, shaped** and **Both
    hemispheres, square** without changing the Parquet or cache directory, then
    project and show the desired cached region layers again.
-   **Expected:** Stale layers from the previous style are cleared. Neurons and
-   newly shown cached region layers use the matching profile grid and remain
-   aligned, including when the queried neurons occupy only a small part of the
-   global flatmap.
+   **Expected:** Choosing a style leaves the current scene visible until
+   **Project to Flatmap** is clicked. Overlay actions are disabled while the
+   controls differ from the displayed scene. Projecting retires the old layers
+   with their owning OpenGL canvas current. Neurons and newly shown cached
+   region layers use the matching profile grid and remain aligned, including
+   when the queried neurons occupy only a small part of the global flatmap.
 7. **Action:** Load a Parquet or atlas that is incompatible with every cached
    profile, or remove one referenced array and then reopen the cache. When
    testing a second directory, keep a valid cache and heatmap active first.
@@ -596,14 +598,14 @@ projecting meshes, or converting region coordinates while viewing.
     **Expected:** The main window remains fullscreen and responsive. The
     flatmap window opens populated, disappears without a ghost window, and can
     be reused. Dismissal produces no native crash or operating-system crash
-    report. The macOS hide guard is the only private Qt integration; no
-    slicer, status-thread, viewer-registry, or model cleanup is performed by the
-    plugin.
+    report. The plugin retains the macOS hide guard and binds the owning canvas
+    for flatmap layer removal; it performs no private slicer, status-thread,
+    viewer-registry, or model cleanup.
 
 **Manual verification**
 
-- Status: Failed
-- Last verified: 2026-11-09
+- Status: Partially run
+- Last verified: 2026-11-10
 - Notes: **Current rerun:** The user confirmed completing the cache build with
   256 Y bins and 25 μm depth bins. The resulting cache is at
   `/private/tmp/nn-manual-tests-2026-11-09/region_profile_cache` (rather than the
@@ -637,15 +639,38 @@ projecting meshes, or converting region coordinates while viewing.
   `python3.12-2026-11-09-164410.ips` records macOS 26.7.1, `EXC_BAD_ACCESS`
   (`SIGSEGV`) on the main thread in `gleRunVertexSubmitImmediate` during a Qt
   backing-store repaint. The style-change handler removed live GPU layers
-  synchronously. Grid invalidation now hides those layers and queues their
-  removal after the signal handler returns, using the existing deferred grid
-  retirement path. Validation after the fix passed 184 related tests and a
+  synchronously. The first fix hid those layers and queued their removal
+  after the signal handler returned. Validation of that attempt passed 184 related tests and a
   desktop Qt/VisPy regression test with six style-dropdown changes and rendered
   labels, surfaces, outlines, and somas. A separate desktop check using this
   run's actual cortical Parquet, atlas, cache, and MOs2/3/MOs5 selection passed
   four style changes with complete heatmap/overlay re-rendering each time; the
-  main viewer's layers and camera were unchanged. These automated rendering
-  checks do not change the manual result: the fix awaits the user's retest.
+  main viewer's layers and camera were unchanged. **Failed retest on
+  2026-11-10:** The user confirmed that choosing the square style still closes
+  napari. Apple report `python3.12-2026-11-10-124254.ips` records the same native
+  OpenGL/backing-store crash. These passing automated checks therefore did not
+  establish a fix.
+  **Current correction:** A full-plugin check using the normal Qt event loop,
+  the production secondary-window factory, and no screenshot readbacks
+  reproduced drawing errors and a native crash. Installed napari 0.9 flushes
+  its layer-deletion GL commands without first making the owning canvas current;
+  another window's context can be active after a popup interaction. Flatmap
+  cleanup now binds the owning VisPy canvas before every immediate or queued
+  removal. Queued cleanup retains the original viewer even if another window
+  becomes active. Style selection keeps the displayed scene intact until an
+  explicit projection, including when the user switches back to the displayed
+  style. This correction passed 190 related tests and a full-plugin desktop
+  regression with six style changes, explicit owning-context assertions, and
+  fatal handling of rendering errors. A strict desktop run with the actual
+  cortical Parquet, atlas, cache, and MOs2/3/MOs5 selection passed four complete
+  style changes and re-projections. The user subsequently confirmed that the
+  crash correction works and that a square flatmap with region overlays is
+  visible. They then reported disabled region buttons after opening a shaped
+  heatmap in a new window while retaining the square window; that regression
+  and its correction are recorded in UC-016. The user has now confirmed that
+  the new-window region actions work while the older window remains open.
+  The crash and new-window regression are manually resolved; the remaining
+  UC-004 checks keep this use case partially run.
   Repeated cache selection and the remaining compatibility/window checks are
   pending.
   Setup for the 2026-11-09 rerun uses the UC-003
@@ -2171,6 +2196,8 @@ viewer.
 
 - Load a neuron Parquet with valid flatmap coordinates. For **Precomputed
   Parquet + Cache**, use a version-3 Parquet produced by UC-003.
+- For the cached-region checks, load a matching atlas and the compatible region
+  cache from UC-004, and select the regions to overlay.
 - Select enough neurons or clusters to make two visibly different projections.
 - Start from a clean napari session with the **Neuron Navigator** plugin open.
 
@@ -2182,7 +2209,7 @@ viewer.
    The main napari viewer is unchanged.
 2. **Action:** Change the selection, style, or render mode, then click **Project
    in New Window**.
-   **Expected:** Changing **Render** does not remove or alter the first viewer.
+   **Expected:** Changing **Render** or **Style** does not remove or alter the first viewer.
    A second populated viewer named **Neuron Navigator Flatmap 2** appears after
    projection. The first viewer, all of its layers, and its camera remain
    unchanged, so the two projections can be arranged side by side.
@@ -2194,6 +2221,11 @@ viewer.
    heatmaps, and the gamma action changes only the selected layers in that
    window. Returning to a window restores its heatmap selection. **Add Soma**
    and cached region actions continue to change only the newest flatmap viewer.
+   With a compatible cache and **3D Heatmap**, **Show Region Labels**, **Show
+   Region Surfaces**, and **Show Region Outlines** become enabled automatically
+   when the new projection finishes, even if older viewers use another style.
+   Check this by keeping a square window with overlays open, choosing shaped,
+   clicking **Project in New Window**, and adding the same regions there.
 4. **Action:** Move the plane slider and camera independently in both flatmap
    viewers.
    **Expected:** Each viewer keeps its own dimensions and camera. Its on-canvas
@@ -2211,9 +2243,27 @@ viewer.
 
 **Manual verification**
 
-- Status: Partially run — render-mode transition and native stability confirmed
-- Last verified: 2026-09-08
-- Notes: Manually confirmed on a MacBook Pro with an M3 chip that changing
+- Status: Partially run
+- Last verified: 2026-11-10
+- Notes: **Resolved regression:** The user confirmed that the style-switch crash
+  is resolved, but initially keeping a square heatmap and its region overlays
+  open, switching to shaped, and choosing **Project in New Window** left the new
+  window's region buttons disabled. They only recovered after closing every
+  flatmap window and changing styles again. Rendering reset the pending-settings
+  flag without refreshing the cached-region buttons, leaving their previous
+  disabled state on screen. The render-ready and viewer-release paths now
+  recompute compatibility for the current viewer and refresh those controls.
+  Regression tests cover both style directions in 2D and 3D and verify that
+  older viewers remain untouched. An automated desktop check with the actual
+  UC-003/004 artifacts opened square, shaped, and square in three simultaneous
+  windows, clicked all three region actions in each, and verified preserved
+  layers, visibility, style metadata, and cameras in older viewers. After the
+  correction, the user confirmed that the same square-to-shaped new-window
+  workflow works: the region buttons enable after rendering and overlays can
+  be added while the older square window stays open. All 194 related tests and
+  the desktop style-change regression passed. The remaining UC-016 checks have
+  not been manually verified in this rerun.
+  **Earlier result (2026-09-08):** Manually confirmed on a MacBook Pro with an M3 chip that changing
   **Render** after creating the initial flatmap window no longer shuts down
   napari. Automated tests cover retaining two populated viewers, active-viewer
   scoping, per-window heatmap selection and gamma changes, independent plane
