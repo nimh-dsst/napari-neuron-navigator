@@ -15,6 +15,7 @@ import sys
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -231,6 +232,7 @@ _POINT_PREVIEW_LABEL_COLUMN = 0
 _POINT_PREVIEW_ORIGIN_COLUMN = 1
 _POINT_PREVIEW_COUNT_COLUMN = 2
 _SCENE_RENDER_MODE_FULL = "full"
+_SCENE_RENDER_MODE_TRACES = "traces"
 _SCENE_RENDER_MODE_SOMA = "soma"
 _REGION_QUERY_SCOPE_WHOLE = "whole"
 _REGION_QUERY_SCOPE_CURRENT = "current"
@@ -250,6 +252,7 @@ _ATLAS_REFERENCE_PROMPT = (
 )
 _DEFAULT_NEURON_RGBA = (0.5, 0.5, 0.5, 1.0)
 _CLUSTER_FILTER_ALL = "all"
+_CLUSTER_FILTER_ALL_CLUSTERS = "all_clusters"
 _CLUSTER_FILTER_UNCLUSTERED = "unclustered"
 _CLUSTER_FILTER_CLUSTER = "cluster"
 _MANUAL_HEATMAP_ALL_LABEL = "All Manual Heatmaps"
@@ -445,7 +448,7 @@ class _ClusterFilterComboBox(QComboBox):
         line_edit = self.lineEdit()
         if line_edit is not None:
             line_edit.setReadOnly(True)
-            line_edit.setText("All")
+            line_edit.setText("All neurons")
         view = self.view()
         viewport = view.viewport()
         if viewport is not None:
@@ -467,12 +470,19 @@ class _ClusterFilterComboBox(QComboBox):
         self._available_cluster_ids = available_ids
         self._has_unclustered_option = bool(include_unclustered)
 
-        selected = selection or ClusterFilterSelection()
+        selected = (
+            selection
+            if selection is not None
+            else ClusterFilterSelection(all_clusters=True)
+        )
         if not selected.is_all:
             selected = ClusterFilterSelection(
                 selected.cluster_ids & available_set,
                 selected.include_unclustered and include_unclustered,
+                all_clusters=selected.all_clusters,
             )
+            if selected.is_all:
+                selected = ClusterFilterSelection(all_clusters=True)
 
         signals_blocked = self.blockSignals(True)
         self._updating = True
@@ -480,9 +490,14 @@ class _ClusterFilterComboBox(QComboBox):
             self.clear()
             all_checked = selected.is_all
             self._add_check_item(
-                "All",
+                "All neurons",
                 _CLUSTER_FILTER_ALL,
                 checked=all_checked,
+            )
+            self._add_check_item(
+                "All clusters",
+                _CLUSTER_FILTER_ALL_CLUSTERS,
+                checked=selected.all_clusters,
             )
             if include_unclustered:
                 self._add_check_item(
@@ -494,7 +509,7 @@ class _ClusterFilterComboBox(QComboBox):
                 self._add_check_item(
                     f"Cluster {cluster_id}",
                     (_CLUSTER_FILTER_CLUSTER, cluster_id),
-                    checked=cluster_id in selected.cluster_ids,
+                    checked=selected.all_clusters or cluster_id in selected.cluster_ids,
                 )
             self.setCurrentIndex(0)
         finally:
@@ -507,11 +522,16 @@ class _ClusterFilterComboBox(QComboBox):
         """Return the currently checked cluster filter."""
         cluster_ids: set[int] = set()
         include_unclustered = False
+        all_clusters = False
         for index in range(self.count()):
             if not self._item_checked(index):
                 continue
             data = self.itemData(index)
-            if data == _CLUSTER_FILTER_UNCLUSTERED:
+            if data == _CLUSTER_FILTER_ALL:
+                return ClusterFilterSelection()
+            if data == _CLUSTER_FILTER_ALL_CLUSTERS:
+                all_clusters = True
+            elif data == _CLUSTER_FILTER_UNCLUSTERED:
                 include_unclustered = True
             elif (
                 isinstance(data, tuple)
@@ -519,7 +539,11 @@ class _ClusterFilterComboBox(QComboBox):
                 and data[0] == _CLUSTER_FILTER_CLUSTER
             ):
                 cluster_ids.add(int(data[1]))
-        return ClusterFilterSelection(frozenset(cluster_ids), include_unclustered)
+        return ClusterFilterSelection(
+            frozenset() if all_clusters else frozenset(cluster_ids),
+            include_unclustered,
+            all_clusters=all_clusters,
+        )
 
     def _add_check_item(
         self,
@@ -592,11 +616,30 @@ class _ClusterFilterComboBox(QComboBox):
         data = self.itemData(index)
         if data == _CLUSTER_FILTER_ALL:
             self._check_all_only()
+        elif data == _CLUSTER_FILTER_ALL_CLUSTERS:
+            checked = not self._item_checked(index)
+            self._set_item_checked(0, False)
+            for row in range(1, self.count()):
+                if self.itemData(row) != _CLUSTER_FILTER_UNCLUSTERED:
+                    self._set_item_checked(row, checked)
+            if not self._has_specific_selection():
+                self._check_all_clusters()
         else:
             self._set_item_checked(index, not self._item_checked(index))
             self._set_item_checked(0, False)
+            if isinstance(data, tuple) and data[0] == _CLUSTER_FILTER_CLUSTER:
+                cluster_rows = [
+                    row
+                    for row in range(self.count())
+                    if isinstance(self.itemData(row), tuple)
+                ]
+                self._set_item_checked(
+                    self.findData(_CLUSTER_FILTER_ALL_CLUSTERS),
+                    bool(cluster_rows)
+                    and all(self._item_checked(row) for row in cluster_rows),
+                )
             if not self._has_specific_selection():
-                self._set_item_checked(0, True)
+                self._check_all_clusters()
 
         self.setCurrentIndex(0)
         self._update_display_text()
@@ -613,6 +656,14 @@ class _ClusterFilterComboBox(QComboBox):
         for index in range(self.count()):
             self._set_item_checked(index, index == 0)
 
+    def _check_all_clusters(self) -> None:
+        for index in range(self.count()):
+            self._set_item_checked(
+                index,
+                self.itemData(index)
+                not in (_CLUSTER_FILTER_ALL, _CLUSTER_FILTER_UNCLUSTERED),
+            )
+
     def _has_specific_selection(self) -> bool:
         return any(self._item_checked(index) for index in range(1, self.count()))
 
@@ -627,7 +678,13 @@ class _ClusterFilterComboBox(QComboBox):
     @staticmethod
     def _selection_text(selection: ClusterFilterSelection) -> str:
         if selection.is_all:
-            return "All"
+            return "All neurons"
+        if selection.all_clusters:
+            return (
+                "All clusters + Unclustered"
+                if selection.include_unclustered
+                else "All clusters"
+            )
 
         cluster_ids = sorted(selection.cluster_ids)
         if not cluster_ids:
@@ -686,6 +743,10 @@ class NeuronViewerWidget(QWidget):
             self._saved_table_state: dict[str, object] = {}
             self._current_project_path: Path | None = None
             self._cluster_assignment_store = ClusterAssignmentStore()
+            self._cluster_filter_by_assignment: dict[
+                str | None, ClusterFilterSelection
+            ] = {}
+            self._cluster_filter_assignment_id: str | None = None
             self._comparison_board_state = ComparisonBoardState()
             self._comparison_data_provider = None
             self._comparison_window = None
@@ -2204,8 +2265,8 @@ class NeuronViewerWidget(QWidget):
         self._remove_selected_btn.clicked.connect(self._remove_selected_neurons)
         neuron_btn_row.addWidget(self._remove_selected_btn)
 
-        self._clear_neurons_btn = QPushButton("Clear All")
-        self._clear_neurons_btn.clicked.connect(self._clear_all_neuron_layers)
+        self._clear_neurons_btn = QPushButton("Clear Layers")
+        self._configure_clear_layers_menu()
         neuron_btn_row.addWidget(self._clear_neurons_btn)
 
         neurons_layout.addLayout(neuron_btn_row)
@@ -2298,6 +2359,22 @@ class NeuronViewerWidget(QWidget):
             self._add_selected_neurons_individual_heatmaps
         )
         self._add_selected_heatmap_btn.setMenu(self._add_selected_heatmap_menu)
+
+    def _configure_clear_layers_menu(self) -> None:
+        """Choose which Data neuron layers to clear from the scene."""
+        self._clear_layers_menu = QMenu(self._clear_neurons_btn)
+        for label, layer_kind in (
+            ("Neuron Traces", "traces"),
+            ("Soma", "soma"),
+            ("Both", "both"),
+        ):
+            action = self._clear_layers_menu.addAction(label)
+            action.triggered.connect(partial(self._clear_scene_layers, layer_kind))
+        self._clear_neurons_btn.setMenu(self._clear_layers_menu)
+        self._clear_neurons_btn.setToolTip(
+            "Clear neuron traces, soma layers, or both from the scene. "
+            "Applies to all rendered neurons, regardless of table selection."
+        )
 
     def _setup_regions_tab(self, parent: QWidget) -> None:
         """Set up the region selection tab."""
@@ -3192,6 +3269,15 @@ class NeuronViewerWidget(QWidget):
     def _load_enhanced_table_state(self, filepath: str | Path) -> int:
         """Read enhanced parquet table metadata without making it mandatory."""
         self._saved_table_state = {}
+        self._cluster_filter_by_assignment = {}
+        self._cluster_filter_assignment_id = None
+        filter_setter = getattr(
+            getattr(self, "_cluster_filter_combo", None), "set_cluster_options", None
+        )
+        if callable(filter_setter):
+            filter_setter(
+                [], include_unclustered=False, selection=ClusterFilterSelection()
+            )
         self._cluster_assignment_store.load_state({})
         refresh_assignments = getattr(
             self,
@@ -8856,6 +8942,8 @@ class NeuronViewerWidget(QWidget):
         data = self._cluster_filter_combo.itemData(idx)
         if data is None:
             return ClusterFilterSelection()
+        if data == _CLUSTER_FILTER_ALL_CLUSTERS:
+            return ClusterFilterSelection(all_clusters=True)
         try:
             return ClusterFilterSelection(frozenset({int(data)}))
         except (TypeError, ValueError):
@@ -8988,13 +9076,36 @@ class NeuronViewerWidget(QWidget):
     def _selected_cluster_from_filter(self) -> int | None:
         """Return the single selected cluster, if the filter is single-cluster."""
         selection = self._selected_cluster_filter()
-        if selection.include_unclustered or len(selection.cluster_ids) != 1:
+        if (
+            selection.all_clusters
+            or selection.include_unclustered
+            or len(selection.cluster_ids) != 1
+        ):
             return None
         return next(iter(selection.cluster_ids))
 
     def _refresh_cluster_filter_controls(self) -> None:
-        """Refresh cluster filter dropdown options from table cluster assignments."""
+        """Restore the active column's filter without borrowing another run's labels."""
         previous = self._selected_cluster_filter()
+        store = getattr(self, "_cluster_assignment_store", None)
+        assignment_id = None if store is None else store.active_assignment_id
+        selections = getattr(self, "_cluster_filter_by_assignment", None)
+        if selections is None:
+            selections = self._cluster_filter_by_assignment = {}
+            self._cluster_filter_assignment_id = assignment_id
+        selections[self._cluster_filter_assignment_id] = previous
+        if store is not None:
+            valid_ids = {
+                None,
+                *(assignment.assignment_id for assignment in store.sets()),
+            }
+            for stale_id in selections.keys() - valid_ids:
+                selections.pop(stale_id)
+        previous = selections.get(
+            assignment_id,
+            ClusterFilterSelection(all_clusters=assignment_id is not None),
+        )
+        self._cluster_filter_assignment_id = assignment_id
         cluster_ids = self._neuron_table.available_cluster_ids()
         has_unclustered = False
         unclustered_getter = getattr(
@@ -9014,8 +9125,10 @@ class NeuronViewerWidget(QWidget):
             self._cluster_filter_combo.blockSignals(True)
             try:
                 self._cluster_filter_combo.clear()
-                self._cluster_filter_combo.addItem("All")
+                self._cluster_filter_combo.addItem("All neurons")
                 self._cluster_filter_combo.setItemData(0, None)
+                self._cluster_filter_combo.addItem("All clusters")
+                self._cluster_filter_combo.setItemData(1, _CLUSTER_FILTER_ALL_CLUSTERS)
                 for cluster_id in cluster_ids:
                     self._cluster_filter_combo.addItem(f"Cluster {cluster_id}")
                     self._cluster_filter_combo.setItemData(
@@ -9030,7 +9143,9 @@ class NeuronViewerWidget(QWidget):
                     idx = self._cluster_filter_combo.findData(selected_cluster)
                     self._cluster_filter_combo.setCurrentIndex(idx if idx >= 0 else 0)
                 else:
-                    self._cluster_filter_combo.setCurrentIndex(0)
+                    self._cluster_filter_combo.setCurrentIndex(
+                        1 if previous.all_clusters else 0
+                    )
             finally:
                 self._cluster_filter_combo.blockSignals(False)
 
@@ -9039,6 +9154,9 @@ class NeuronViewerWidget(QWidget):
     def _on_cluster_filter_changed(self, _selection: object = None) -> None:
         """Filter table rows by selected cluster groups and update action buttons."""
         selection = self._selected_cluster_filter()
+        selections = getattr(self, "_cluster_filter_by_assignment", None)
+        if selections is not None:
+            selections[self._cluster_filter_assignment_id] = selection
         self._apply_neuron_table_filters()
 
         has_filter = not selection.is_all
@@ -9720,10 +9838,17 @@ class NeuronViewerWidget(QWidget):
 
         scene_render_modes = dict(self._scene_render_modes)
         file_ids = sorted(scene_render_modes, key=str)
-        full_file_ids = [
+        trace_file_ids = [
             fid
             for fid in file_ids
-            if scene_render_modes.get(fid) == _SCENE_RENDER_MODE_FULL
+            if scene_render_modes.get(fid)
+            in {_SCENE_RENDER_MODE_FULL, _SCENE_RENDER_MODE_TRACES}
+        ]
+        soma_file_ids = [
+            fid
+            for fid in file_ids
+            if scene_render_modes.get(fid)
+            in {_SCENE_RENDER_MODE_FULL, _SCENE_RENDER_MODE_SOMA}
         ]
         n = len(file_ids)
         depth_state = self._capture_depth_state()
@@ -9746,12 +9871,10 @@ class NeuronViewerWidget(QWidget):
         opacity = self._opacity_slider.value() / 100.0
 
         color_map = self._build_effective_color_map()
-        neuron_colors = []
         render_color_map: dict[object, list[float]] = {}
         for file_id in file_ids:
             fallback_color, _visible = self._base_display_state_for_file_id(file_id)
             color = list(color_map.get(file_id, fallback_color))
-            neuron_colors.append(color)
             render_color_map[file_id] = color
 
         # Scale to match atlas mesh (coordinates are in microns)
@@ -9763,9 +9886,9 @@ class NeuronViewerWidget(QWidget):
         points_df = None
 
         # --- Lines ---
-        if full_file_ids and render_mode in ("Lines", "Both"):
+        if trace_file_ids and render_mode in ("Lines", "Both"):
             # Single batch query for all neurons
-            line_data = self._db.get_neuron_lines_batch(full_file_ids)
+            line_data = self._db.get_neuron_lines_batch(trace_file_ids)
 
             self._render_status_label.setText(
                 f"Building line segments for {n} neurons..."
@@ -9778,7 +9901,7 @@ class NeuronViewerWidget(QWidget):
             rendered_file_ids = []
             segments_per_neuron = []
 
-            for i, file_id in enumerate(full_file_ids):
+            for i, file_id in enumerate(trace_file_ids):
                 if file_id not in line_data:
                     continue
                 color = render_color_map[file_id]
@@ -9833,13 +9956,13 @@ class NeuronViewerWidget(QWidget):
             self._slice_projector.add_neuron_data_batch(projector_batch)
 
         # --- Points ---
-        if full_file_ids and render_mode in ("Points", "Both"):
+        if trace_file_ids and render_mode in ("Points", "Both"):
             self._render_status_label.setText("Querying point data...")
             self._render_progress.setRange(0, 0)  # indeterminate
             QApplication.processEvents()
 
             # Single batch query for all neurons
-            points_df = self._db.get_neurons_for_rendering(full_file_ids)
+            points_df = self._db.get_neurons_for_rendering(trace_file_ids)
 
             if not points_df.empty:
                 self._render_status_label.setText(
@@ -9887,8 +10010,8 @@ class NeuronViewerWidget(QWidget):
                 self._current_neuron_layers.append(layer)
 
         # --- Soma Labels ---
-        soma_df = self._db.get_soma_locations(file_ids)
-        if not soma_df.empty:
+        soma_df = self._db.get_soma_locations(soma_file_ids) if soma_file_ids else None
+        if soma_df is not None and not soma_df.empty:
             soma_coords = soma_df[["x", "y", "z"]].values
             soma_fids = soma_df["file_id"].values.tolist()
             soma_colors = np.array(
@@ -9926,8 +10049,8 @@ class NeuronViewerWidget(QWidget):
             self._current_neuron_layers.append(soma_layer)
 
         soma_projection_batch = self._build_soma_projection_batch(
-            file_ids=file_ids,
-            neuron_colors=neuron_colors,
+            file_ids=soma_file_ids,
+            neuron_colors=[render_color_map[fid] for fid in soma_file_ids],
             points_df=points_df,
         )
         self._soma_slice_projector.set_scale(scale)
@@ -9939,6 +10062,8 @@ class NeuronViewerWidget(QWidget):
         # would otherwise stay visible).
         if self.viewer.dims.ndisplay == 2:
             self._apply_layer_visibility(False)
+        else:
+            self._sync_soma_projection_overlay_state()
 
         # Default to showing the 2D slice projection once neurons are present.
         # This keeps "Show in 2D slices" on across subsequent additions.
@@ -10013,7 +10138,9 @@ class NeuronViewerWidget(QWidget):
         """Build a per-neuron soma-point batch for the 2D projection layer."""
         soma_points_df = None
         if points_df is not None and not points_df.empty and "type" in points_df:
-            soma_points_df = points_df[points_df["type"] == 1]
+            soma_points_df = points_df[
+                (points_df["type"] == 1) & points_df["file_id"].isin(file_ids)
+            ]
 
         color_map = {
             fid: tuple(color[:4]) for fid, color in zip(file_ids, neuron_colors)
@@ -10051,7 +10178,8 @@ class NeuronViewerWidget(QWidget):
         hide_soma_points: bool,
     ) -> None:
         """Hide or restore soma-node entries within the Neuron Points layer."""
-        meta = _layer_metadata(layer)
+        # napari's metadata setter clears the existing dict before updating it.
+        meta = dict(_layer_metadata(layer))
         point_types = np.asarray(meta.get("point_types", []))
         if point_types.size == 0:
             return
@@ -10072,8 +10200,23 @@ class NeuronViewerWidget(QWidget):
         layer.metadata = meta
 
         colors = base_colors.copy()
+        soma_mask = point_types == 1
         if hide_soma_points:
-            colors[point_types == 1, 3] = 0.0
+            colors[soma_mask, 3] = 0.0
+        else:
+            # Clearing Soma also suppresses raw soma markers in trace point
+            # clouds, including after recoloring or rebuilding the scene.
+            scene_modes = getattr(self, "_scene_render_modes", {})
+            traces_only_ids = {
+                fid for fid, mode in scene_modes.items() if mode == _SCENE_RENDER_MODE_TRACES
+            }
+            point_file_ids = meta.get("file_ids_per_point", [])
+            if traces_only_ids and len(point_file_ids) == len(point_types):
+                traces_only = np.array(
+                    [fid in traces_only_ids for fid in point_file_ids],
+                    dtype=bool,
+                )
+                colors[soma_mask & traces_only, 3] = 0.0
         layer.face_color = colors
 
     def _sync_soma_projection_overlay_state(self) -> None:
@@ -10214,7 +10357,7 @@ class NeuronViewerWidget(QWidget):
                     layer.edge_color = np.concatenate(parts)
 
             elif layer.name == "Neuron Points":
-                meta = layer.metadata or {}
+                meta = dict(layer.metadata or {})
                 fids = meta.get("file_ids_per_point", [])
                 if fids:
                     colors = np.array(
@@ -10326,28 +10469,62 @@ class NeuronViewerWidget(QWidget):
         if comparison_window is not None and comparison_window.isVisible():
             comparison_window.refresh_sources()
 
-    def _clear_all_neuron_layers(self, _checked: bool = False) -> None:
-        """Clear all neuron layers from the UI button without preserving scene state."""
-        self._clear_neuron_layers(reset_render_state=True)
+    def _clear_scene_layers(self, layer_kind: str, _checked: bool = False) -> None:
+        """Clear the chosen layer category without changing the Data selection."""
+        depth_state = self._capture_depth_state()
+        self._clear_neuron_layers(layer_kind=layer_kind)
+        self._restore_depth_state(depth_state)
+        description = {
+            "traces": "neuron traces",
+            "soma": "soma layers",
+            "both": "neuron traces and soma layers",
+        }[layer_kind]
+        self._render_status_label.setText(f"Cleared {description}.")
 
-    def _clear_neuron_layers(self, reset_render_state: bool = True) -> None:
-        """Remove all current neuron layers and optionally reset scene state."""
+    def _clear_neuron_layers(
+        self, reset_render_state: bool = True, *, layer_kind: str = "both"
+    ) -> None:
+        """Remove chosen neuron layers and update their per-neuron scene state."""
+        if layer_kind not in {"traces", "soma", "both"}:
+            raise ValueError(f"Unknown neuron layer category: {layer_kind}")
+        clear_traces = layer_kind in {"traces", "both"}
+        clear_soma = layer_kind in {"soma", "both"}
+        retained_layers = []
         for layer in self._current_neuron_layers:
+            is_soma = layer.name == "Soma Labels"
+            if not (clear_soma if is_soma else clear_traces):
+                retained_layers.append(layer)
+                continue
             try:
                 self.viewer.layers.remove(layer)
             except ValueError:
                 pass  # Layer already removed
 
-        self._current_neuron_layers.clear()
+        self._current_neuron_layers[:] = retained_layers
         if reset_render_state:
-            self._scene_render_modes.clear()
             scene_state = getattr(self, "_scene_display_state", None)
-            if scene_state is not None:
-                scene_state.clear()
+            if layer_kind == "both":
+                self._scene_render_modes.clear()
+                if scene_state is not None:
+                    scene_state.clear()
+            else:
+                remaining_mode = (
+                    _SCENE_RENDER_MODE_SOMA if clear_traces else _SCENE_RENDER_MODE_TRACES
+                )
+                for file_id, mode in list(self._scene_render_modes.items()):
+                    if mode == _SCENE_RENDER_MODE_FULL:
+                        self._scene_render_modes[file_id] = remaining_mode
+                    elif mode == layer_kind:
+                        self._scene_render_modes.pop(file_id)
+                        if scene_state is not None:
+                            scene_state.pop(file_id, None)
 
-        # Clear slice projector data
-        self._slice_projector.clear()
-        self._soma_slice_projector.clear()
+        if clear_traces:
+            self._slice_projector.clear()
+        if clear_soma:
+            self._soma_slice_projector.clear()
+        if layer_kind == "soma":
+            self._sync_soma_projection_overlay_state()
         self._neuron_table.set_added_file_ids(self._current_scene_file_ids())
 
     def _toggle_template(self, state: int) -> None:

@@ -1026,6 +1026,11 @@ selected and clustered by voxel correlation without removing other neurons or
 overwriting the soma assignments. One assignment is active at a time for
 filtering, colors, flatmap grouping, and Analysis heatmaps. Projects and
 Enhanced Parquet exports preserve every assignment and its run provenance.
+The Data **Cluster** filter remembers a separate selection for each assignment
+column during the session. A new column defaults to **All clusters**, which
+shows only neurons assigned in that column. **All neurons** includes unassigned
+rows; **Unclustered** can be selected separately or alongside cluster choices.
+Other Label, Tag, Set, and Manual Heatmap filters continue to intersect.
 
 **Prerequisites**
 
@@ -1071,13 +1076,21 @@ Enhanced Parquet exports preserve every assignment and its run provenance.
    selected cohort and its parent Soma Location assignment and cluster. The
    first run uses the selected region and dilation; the repeated run reports
    **All regions (optional)** and uses all finite CCFv3 nodes for those rows.
+   The new active column's **Cluster** filter defaults to **All clusters**,
+   showing every assigned member of the new run rather than reusing the soma
+   column's earlier filter. Blank rows remain in the table but are hidden by
+   this default filter.
 4. **Action:** Switch **Cluster assignment** between **Soma Location 1** and
    **Voxel Correlation 1**.
    **Expected:** The active header, cluster filter, summary, sort target,
    rendered colors, flatmap cluster grouping, and Analysis heatmap cluster
    choices all follow the selected assignment. Switching does not modify any
    saved labels. The voxel assignment's blank rows appear under
-   **Unclustered**.
+   **Unclustered**, or together with assigned rows under **All neurons**.
+   Returning to the soma assignment restores its earlier cluster selection;
+   returning to the voxel assignment restores that column's independent
+   selection. Cluster numbers shared by the two columns never transfer a
+   filter between them.
 5. **Action:** Click **Rename...**, give the voxel assignment a descriptive
    name, and confirm. Then create another selected-row run.
    **Expected:** The table header and selector use the new display name while
@@ -1122,12 +1135,33 @@ Enhanced Parquet exports preserve every assignment and its run provenance.
     Cancelling starts no clustering worker and creates no assignment; the
     repeated confirmation starts the snapshotted run without changing its
     cohort or region filter.
+11. **Action:** In **Data**, choose **Cluster: All clusters** and inspect its
+    checked cluster entries. Uncheck one cluster, restore **All clusters**, and
+    check **Unclustered** alongside it. Then choose **All neurons**. Make
+    different multi-selections in two assignment columns, switch between them,
+    and rename one column. Repeat after deleting the active column or loading
+    a different Parquet/project. If available, test a column with no assigned
+    neurons.
+    **Expected:** All clusters checks every assigned cluster and excludes blank
+    rows unless Unclustered is also checked. Unchecking a cluster restricts
+    the filter to the remaining checked groups. All neurons shows the entire
+    cohort permitted by the other filters. Each column restores its own
+    selection even when renamed. Deleting a column discards only its filter
+    history; the next active column restores its own selection. Loading a
+    source resets this temporary filter history, so restored assignments start
+    at All clusters. A column with no assigned neurons shows zero rows under
+    All clusters and never silently broadens to unassigned neurons. Before any
+    clustering is available, All neurons keeps the unclustered table visible.
 
 **Manual verification**
 
 - Status: Not run
 - Last verified: Never
-- Notes: None
+- Updated: 2026-11-12 (per-column cluster filters and All clusters default)
+- Notes: Automated checks cover assigned-only filtering, independent column
+  selections, the clustering-completion path, mouse multi-selection, renaming,
+  deletion, source reload, empty assignments, and combined row filters. The
+  complete manual workflow has not been exercised in napari.
 
 ### UC-008: Create Combined, Individual, and Enhanced Neuron Heatmaps
 
@@ -3606,9 +3640,16 @@ first pass.
   intersection semantics, grouping, exclusions, distances, zero neurons,
   cancellation, memory guards, persistence, and post hoc overlay isolation.
 
-### UC-026: Filter Data Rows by Labels and Tags
+### UC-026: Tag Selected Data Rows and Filter by Labels and Tags
 
 **Capability**
+
+The **Add tags** field and **Apply to Selected Rows** button append typed tags
+to the visible highlighted rows in Data's neuron table. Enter one tag or several
+comma-separated names; whitespace is trimmed and duplicate names are ignored.
+Existing tags and other row metadata remain. Enter also applies the typed tags.
+This action always uses selected rows, independently of **Tag action scope**.
+After application, the table reveals **Tags** and reports the selected row count.
 
 The **Label** and **Tag** dropdowns above Data's neuron table show rows matching
 existing annotations. Each selector offers all values, an unannotated option,
@@ -3622,15 +3663,28 @@ scope. Deletion retains other fields and supports one-level undo. Automatic
 colors distinguish complete tag combinations; single-color application can
 color all matching neurons together.
 
+**Tag Tools** > **Cluster Membership Tags** lets users choose a saved
+**Clustering column** and check one or more **Clusters**. **Tag Cluster Members**
+adds a separate `<column name>: Cluster <number>` tag to each matching neuron
+within **Tag action scope**. For example, selecting clusters 1 and 3 from
+`Soma Location 1` gives each neuron its own cluster's tag, rather than both
+tags. These are snapshots of membership when applied; changing assignments or
+renaming a column does not rewrite existing tags. Existing annotations remain,
+and reapplying a tag does not duplicate it.
+
 **Prerequisites**
 
 - Populate Data using the simple MOs5 soma query in UC-021, or another repeatable
   query. Record the cohort IDs and size. Include at least one unlabelled,
   untagged neuron, shared and distinct Labels, and neurons with several Tags.
 - Use UC-021 to tag thalamic-terminus matches `TH termini`, or add known Tags
-  through **Table view: Label**. Include a second tag to check exact membership.
+  through **Add tags**. Include a second tag to check exact membership.
 - For combination checks, retain an existing named cluster assignment and a
   manual neuron heatmap with known memberships.
+- For membership tagging, retain two named clustering columns with different
+  assignments for some shared `file_id` values. Record memberships and include
+  at least one neuron unassigned in the chosen column. Counts in **Clusters**
+  refer to members in the current table, before applying the action scope.
 
 **Steps and expected results**
 
@@ -3715,18 +3769,83 @@ color all matching neurons together.
     **Expected:** The edited tags and per-neuron colors persist. Transient
     search choices, deletion undo history, and the last-applied legend are view
     state and are not required to reconstruct the saved neuron metadata.
+13. **Action:** Clear row filters, choose **Table view: Label**, sort by **Tags**,
+    and highlight two rows using the platform's multi-selection modifier.
+    Record their `file_id` values, tags, and other metadata. Enter
+    `Reviewed manually` in **Add tags**, then click **Apply to Selected Rows**.
+    Repeat the same application, then enter `Follow up, Reviewed manually` and
+    press Enter. Repeat with exactly one selected row.
+    **Expected:** Only the visible highlighted rows receive the typed tags.
+    Each name appears once, with existing tags retained. Labels, Groups, Notes,
+    colors, visibility, scene state, membership, sort direction, and selection
+    remain. The status reports the number of selected rows. New names appear
+    in the Tag selector. The input is also available in other Table views;
+    applying tags reveals the Tags column and retains an existing Full view.
+14. **Action:** Select all rows, then apply a Tag filter that hides some of them.
+    Set **Tag action scope: Entire table**, type a new tag, and apply it using
+    **Apply to Selected Rows**. Clear the filters to inspect all rows. Then
+    clear selection, and separately try empty or comma/whitespace-only input
+    with a selection. Test both the button and Enter.
+    **Expected:** Hidden rows receive no new tag even if Qt retains their
+    selection. The action scope for Tag Tools does not broaden this action.
+    Without visible selected rows or a nonempty tag, the button is disabled
+    and Enter changes nothing.
+15. **Action:** Choose **Tag: No tags**, select an untagged row, and apply
+    `Reviewed manually`. Clear the filters, save and reopen a project or
+    enhanced Parquet, and inspect the affected rows.
+    **Expected:** The newly tagged row immediately leaves the No tags view;
+    the filter remains active with updated counts. The typed tags persist
+    through save/reopen. Replacing or clearing the table, or restoring a
+    project, clears the tag input and its completion message.
+16. **Action:** Expand **Tag Tools** > **Cluster Membership Tags**, choose a
+    **Clustering column** that is not the active assignment, and check two
+    **Clusters**. Choose **Tag action scope: Entire table**, inspect the tag
+    names and affected count in the preview, and click **Tag Cluster Members**.
+    Repeat the same action.
+    **Expected:** Each matching `file_id` receives only its own cluster's tag
+    from the chosen column, such as `Soma Location 1: Cluster 3`. Nonmembers,
+    unassigned neurons, and neurons absent from the table receive no tag.
+    Existing tags, Labels, Groups, Notes, colors, visibility, scene state,
+    selection, and sort order remain. The active assignment is unchanged.
+    Duplicate applications add no duplicate names. New tags appear in the Tag
+    selector and the table reveals the Tags column.
+17. **Action:** Apply row filters and repeat with **Displayed rows**, then
+    **Selected rows**. Try no cluster selection, an empty row selection under
+    Selected rows, and clusters with no members in the chosen scope.
+    **Expected:** Only members in the explicit scope receive tags. Selected
+    rows excludes hidden rows even if Qt retains selected indexes. Entire
+    table includes hidden members. Without matching members the action is
+    disabled; it never silently broadens to all clusters or the whole table.
+18. **Action:** Switch **Clustering column**, add another clustering run,
+    rename the chosen column, or remove its last table members. Save and
+    reopen a project or enhanced Parquet after tagging.
+    **Expected:** Switching columns clears checked cluster choices. Adding a
+    new run preserves the chosen source column; renaming retains its identity
+    and updates the preview. Cluster choices and counts follow current table
+    membership, and obsolete choices are removed. Previously applied tags
+    retain their original text and persist through save/reopen. Cluster
+    selections are temporary controls and reset on table replacement or
+    project restore. With no named assignments, the single **Cluster** column
+    is supported; with no assigned members, tagging is disabled.
 
 **Manual verification**
 
 - Status: Not run
 - Last verified: Never
 - Added: 2026-10-27
+- Updated: 2026-11-12 (typed tags and cluster membership tags; manual status remains Not run)
 - Notes: Automated checks cover exact matching, empty annotations, combined
   filters, natural sorting, duplicate display identifiers, updates and removal,
   zero-match choices, cohort preservation, visible selection, and resets.
   Checks also cover any/all/exact matching, distinct tag cardinality, popup
   interactions, scoped deletion and undo, exact removal, combination colors,
   color scope, cancellation, and table-state persistence.
+  Selected-row tagging checks cover sorted row identity, metadata preservation,
+  repeated names, comma-separated input, Enter, empty input/selection, hidden
+  rows, filter refresh, and table-state persistence.
+  Cluster membership checks cover independent saved columns, multiple clusters,
+  all action scopes, unassigned neurons, numeric `file_id` values, zero-valued
+  cluster labels, source changes, snapshots, and metadata preservation.
   The complete manual napari workflow above has not been exercised.
 
 ### UC-027: Define Live Neuron Sets and Compare Their Spatial Regions
@@ -3933,6 +4052,74 @@ additional volume. Projects preserve the registration and original layer type.
   source-provenance preservation, grid/type/atlas rejection, repeat registration,
   and float-image project persistence. The complete manual workflow remains to
   be exercised in napari.
+
+### UC-029: Clear Neuron Traces and Somas Independently
+
+**Capability**
+
+In **Data** > **Selected Neurons**, **Clear Layers** opens a dropdown like
+**Add Heatmap**. Choose **Neuron Traces**, **Soma**, or **Both** to clear that
+category across the main scene, independently of table selection and filters.
+Neuron Traces includes line/point traces and their 2D slice projection. Soma
+includes soma labels/markers and their 2D slice projection; raw soma markers
+within neuron point clouds are also suppressed. Clearing one category retains
+the other category, so somas can be replaced using a new row selection while
+keeping neuron traces. Atlas/reference layers, heatmaps, and Data rows remain.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet`, or another neuron
+  Parquet containing soma nodes and connected traces. Populate Data with at
+  least three known `file_id` values and record their annotations and colors.
+- Load an atlas/reference layer and create a separate heatmap using
+  **Add Heatmap** so their preservation can be checked.
+- Use **Visualization** > **Render Mode** > **Both** to exercise both neuron lines
+  and point clouds. Keep **Show in 2D slices** enabled for projection checks.
+
+**Steps and expected results**
+
+1. **Action:** Select two Data rows and click **Add Full Neurons**. Select a
+   third row and click **Add Soma Only**. Open **Clear Layers**.
+   **Expected:** The scene contains traces and somas for the first two neurons
+   and a soma for the third. The menu lists **Neuron Traces**, **Soma**, and
+   **Both**. Opening or dismissing it alone does not clear anything.
+2. **Action:** Select just one row, or filter the table to a subset, then
+   choose **Clear Layers** > **Neuron Traces**. Check 2D and 3D displays.
+   **Expected:** All Data neuron line/point traces and their slice projection
+   disappear. Soma labels/markers and their slice projection remain. Rows with
+   retained somas still show **Added: Yes**. Table membership, annotations,
+   selection, filters, reference layers, and heatmaps remain.
+3. **Action:** Select just one neuron and click **Add Full Neurons**.
+   **Expected:** That neuron's traces return. Other neurons retain their somas
+   without having their cleared traces restored.
+4. **Action:** Choose **Clear Layers** > **Soma**, inspect 2D and 3D, then
+   change a retained neuron's color and toggle **Show in 2D slices**.
+   **Expected:** Soma labels/markers and soma slice projections disappear,
+   including raw soma-node markers within retained neuron point clouds. Traces
+   remain. Recoloring or changing display mode does not restore cleared soma
+   markers. Rows with retained traces still show **Added: Yes**; neurons with
+   no remaining scene geometry show **Added: No**.
+5. **Action:** Select exactly one Data row and click **Add Soma Only**.
+   **Expected:** The soma layer contains only that selected neuron, with its
+   soma slice projection. Other neurons' retained traces remain, and their
+   cleared somas do not return. For a selected neuron that previously had full
+   traces, **Add Soma Only** retains the existing behavior of switching that
+   neuron to soma-only rendering.
+6. **Action:** Choose **Clear Layers** > **Both**, then repeat each menu choice
+   when no corresponding layers remain. Add neurons again afterward.
+   **Expected:** Both clears all Data neuron geometry and both slice
+   projections. Every row shows **Added: No**. The Data table, reference layers,
+   and heatmaps remain. Repeating a clear causes no error, and neurons can be
+   added again normally.
+
+**Manual verification**
+
+- Status: **Not run**
+- Date recorded: **2026-11-12**
+- Notes: Automated checks exercise the Qt menu, independent 2D/3D clearing,
+  retained layers and table metadata, repeated clearing, raw soma suppression,
+  and adding only selected somas or traces after a partial clear. The complete
+  workflow has not been manually exercised in napari.
 
 ## Use-Case Template
 

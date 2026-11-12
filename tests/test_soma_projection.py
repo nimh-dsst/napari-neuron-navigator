@@ -734,7 +734,10 @@ class _DummyClusterFilterCombo:
             self.selection = ClusterFilterSelection(
                 selection.cluster_ids & available_ids,
                 selection.include_unclustered and include_unclustered,
+                all_clusters=selection.all_clusters,
             )
+            if self.selection.is_all:
+                self.selection = ClusterFilterSelection(all_clusters=True)
 
 
 class _DummyStack:
@@ -2216,6 +2219,7 @@ def _bind_projection_helpers(widget) -> None:
 
 
 def _bind_scene_helpers(widget) -> None:
+    _bind_projection_helpers(widget)
     widget._current_scene_file_ids = types.MethodType(
         NeuronViewerWidget._current_scene_file_ids,
         widget,
@@ -2731,7 +2735,7 @@ def test_remove_selected_neurons_preserves_remaining_render_modes() -> None:
     widget._clear_neuron_layers.assert_not_called()
 
 
-def test_clear_all_neuron_layers_ignores_qt_checked_argument_and_resets_scene_state() -> (
+def test_clear_both_layers_ignores_qt_checked_argument_and_resets_scene_state() -> (
     None
 ):
     viewer = _DummyViewer(ndisplay=3)
@@ -2749,6 +2753,9 @@ def test_clear_all_neuron_layers_ignores_qt_checked_argument_and_resets_scene_st
         _slice_projector=MagicMock(),
         _soma_slice_projector=MagicMock(),
         _neuron_table=types.SimpleNamespace(set_added_file_ids=MagicMock()),
+        _capture_depth_state=MagicMock(return_value=None),
+        _restore_depth_state=MagicMock(),
+        _render_status_label=_DummyLabel(),
     )
     widget._current_scene_file_ids = types.MethodType(
         NeuronViewerWidget._current_scene_file_ids,
@@ -2759,7 +2766,7 @@ def test_clear_all_neuron_layers_ignores_qt_checked_argument_and_resets_scene_st
         widget,
     )
 
-    NeuronViewerWidget._clear_all_neuron_layers(widget, False)
+    NeuronViewerWidget._clear_scene_layers(widget, "both", False)
 
     assert viewer.layers == []
     assert widget._current_neuron_layers == []
@@ -4417,7 +4424,7 @@ def test_refresh_cluster_filter_controls_preserves_valid_multi_selection() -> No
     assert widget._show_all_btn.enabled is True
 
 
-def test_refresh_cluster_filter_controls_falls_back_to_all_when_invalid() -> None:
+def test_refresh_cluster_filter_controls_falls_back_to_all_clusters_when_invalid() -> None:
     combo = _DummyClusterFilterCombo(
         ClusterFilterSelection({9}, include_unclustered=True)
     )
@@ -4439,10 +4446,10 @@ def test_refresh_cluster_filter_controls_falls_back_to_all_when_invalid() -> Non
 
     NeuronViewerWidget._refresh_cluster_filter_controls(widget)
 
-    assert combo.selection == ClusterFilterSelection()
-    assert applied == [ClusterFilterSelection()]
-    assert widget._hide_others_btn.enabled is False
-    assert widget._recolor_cluster_btn.enabled is False
+    assert combo.selection == ClusterFilterSelection(all_clusters=True)
+    assert applied == [ClusterFilterSelection(all_clusters=True)]
+    assert widget._hide_others_btn.enabled is True
+    assert widget._recolor_cluster_btn.enabled is True
     assert widget._show_all_btn.enabled is True
 
 

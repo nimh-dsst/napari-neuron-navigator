@@ -5,6 +5,7 @@ Provides an interactive table for viewing and controlling neurons:
 - Track whether a neuron is currently added to the scene
 - Switch between focused column views
 - View neuron name and cluster assignments
+- Apply tags to selected rows
 - Edit neuron colors via color picker
 """
 
@@ -24,9 +25,11 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -445,6 +448,36 @@ class NeuronTableWidget(QWidget):
         )
         scope_row.addWidget(self.tag_action_scope, 1)
         tools_layout.addLayout(scope_row)
+
+        cluster_tags_group = QGroupBox("Cluster Membership Tags")
+        cluster_tags_layout = QVBoxLayout(cluster_tags_group)
+        cluster_column_row = QHBoxLayout()
+        cluster_column_row.addWidget(QLabel("Clustering column:"))
+        self.cluster_tag_column_combo = QComboBox()
+        self.cluster_tag_column_combo.currentIndexChanged.connect(
+            self._on_cluster_tag_column_changed
+        )
+        cluster_column_row.addWidget(self.cluster_tag_column_combo, 1)
+        cluster_tags_layout.addLayout(cluster_column_row)
+        cluster_tags_row = QHBoxLayout()
+        cluster_tags_row.addWidget(QLabel("Clusters:"))
+        self.cluster_tag_selector = TagSelector(
+            all_text="Choose clusters", include_untagged=False, item_name="cluster"
+        )
+        self.cluster_tag_selector.selection_changed.connect(
+            self._update_tag_action_controls
+        )
+        cluster_tags_row.addWidget(self.cluster_tag_selector, 1)
+        self.tag_cluster_members_button = QPushButton("Tag Cluster Members")
+        self.tag_cluster_members_button.clicked.connect(self._tag_cluster_members)
+        cluster_tags_row.addWidget(self.tag_cluster_members_button)
+        cluster_tags_layout.addLayout(cluster_tags_row)
+        self._cluster_tag_preview = QLabel()
+        self._cluster_tag_preview.setTextFormat(Qt.PlainText)
+        self._cluster_tag_preview.setWordWrap(True)
+        cluster_tags_layout.addWidget(self._cluster_tag_preview)
+        tools_layout.addWidget(cluster_tags_group)
+
         action_row = QHBoxLayout()
         self.delete_tags_button = QPushButton("Delete Checked Tags")
         self.delete_tags_button.clicked.connect(self._delete_checked_tags)
@@ -484,6 +517,28 @@ class NeuronTableWidget(QWidget):
         tools_layout.addWidget(self._tag_color_legend)
         layout.addWidget(self.tag_tools)
 
+        add_tags_row = QHBoxLayout()
+        add_tags_label = QLabel("Add tags:")
+        add_tags_row.addWidget(add_tags_label)
+        self.tag_entry_input = QLineEdit()
+        self.tag_entry_input.setPlaceholderText("Enter tags, separated by commas")
+        self.tag_entry_input.setToolTip(
+            "Add tags to the selected rows, keeping their existing tags. "
+            "Separate multiple tags with commas."
+        )
+        add_tags_label.setBuddy(self.tag_entry_input)
+        self.tag_entry_input.textChanged.connect(self._update_tag_action_controls)
+        self.tag_entry_input.returnPressed.connect(self._add_tags_to_selected_rows)
+        add_tags_row.addWidget(self.tag_entry_input, 1)
+        self.add_tags_button = QPushButton("Apply to Selected Rows")
+        self.add_tags_button.clicked.connect(self._add_tags_to_selected_rows)
+        add_tags_row.addWidget(self.add_tags_button)
+        layout.addLayout(add_tags_row)
+        self._add_tags_status = QLabel()
+        self._add_tags_status.setWordWrap(True)
+        self._add_tags_status.setVisible(False)
+        layout.addWidget(self._add_tags_status)
+
         self._table = QTableWidget(0, COL_COLOR + 1)
         self._adaptive_height_enabled = True
         self._table_maximum_height = self._table.maximumHeight()
@@ -501,6 +556,7 @@ class NeuronTableWidget(QWidget):
 
         layout.addWidget(self._table)
         self._refresh_preferred_height(visible_row_count=0)
+        self._refresh_cluster_tag_columns()
         self._update_tag_action_controls()
 
     def _refresh_preferred_height(
@@ -671,6 +727,7 @@ class NeuronTableWidget(QWidget):
         )
         self.excluded_tags_combo.set_tag_options(tags, 0)
         self._refresh_set_controls()
+        self._refresh_cluster_tag_columns()
         self._apply_annotation_filters()
 
     def annotation_rule(self) -> AnnotationRule:
@@ -1113,6 +1170,7 @@ class NeuronTableWidget(QWidget):
             self._table.blockSignals(signals_blocked)
 
         self._refresh_preferred_height(visible_row_count=len(entries))
+        self._refresh_cluster_tag_columns()
         self.selection_changed.emit([])
         self.state_changed.emit()
 
@@ -1641,6 +1699,103 @@ class NeuronTableWidget(QWidget):
             self.selection_changed.emit(after)
         self._update_tag_action_controls()
 
+    def _cluster_tag_source(self) -> tuple[str, dict[object, int | None]]:
+        """Read the chosen column by assignment identity, independently of the active run."""
+        assignment_id = self.cluster_tag_column_combo.currentData()
+        if assignment_id is None:
+            if self._assignment_sets():
+                return "", {}
+            return "Cluster", {
+                fid: entry.cluster_id for fid, entry in self._entries.items()
+            }
+        assignment = self._assignment_store.get(assignment_id)
+        if assignment is None:
+            return "", {}
+        return assignment.name, {
+            file_id: assignment.label_for(file_id) for file_id in self._entries
+        }
+
+    def _refresh_cluster_tag_columns(self) -> None:
+        """Keep column identities and cluster choices current as assignments change."""
+        if "cluster_tag_column_combo" not in self.__dict__:
+            return
+        combo = self.cluster_tag_column_combo
+        previous = combo.currentData()
+        assignment_sets = self._assignment_sets()
+        choices = [
+            (
+                f"{assignment.name} (active)"
+                if assignment.assignment_id == self._active_assignment_id()
+                else assignment.name,
+                assignment.assignment_id,
+            )
+            for assignment in assignment_sets
+        ] or [("Cluster", None)]
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            for title, assignment_id in choices:
+                combo.addItem(title, assignment_id)
+            index = combo.findData(previous)
+            if index < 0:
+                index = max(0, combo.findData(self._active_assignment_id()))
+            combo.setCurrentIndex(index)
+        finally:
+            combo.blockSignals(blocked)
+        if combo.currentData() != previous:
+            self.cluster_tag_selector.set_selection(None, emit=False)
+        self._refresh_cluster_tag_choices()
+
+    def _on_cluster_tag_column_changed(self, _index: int) -> None:
+        self.cluster_tag_selector.set_selection(None, emit=False)
+        self._refresh_cluster_tag_choices()
+
+    def _refresh_cluster_tag_choices(self) -> None:
+        _name, labels = self._cluster_tag_source()
+        counts = Counter(
+            f"Cluster {label}" for label in labels.values() if label is not None
+        )
+        # Unlike annotation filters, stale membership choices must not carry
+        # over to a different run or silently target a different cluster.
+        self.cluster_tag_selector.set_selection(
+            tuple(
+                tag
+                for tag in self.cluster_tag_selector.selected_tags()
+                if tag in counts
+            ),
+            emit=False,
+        )
+        self.cluster_tag_selector.set_tag_options(counts, 0)
+        self.cluster_tag_selector.setEnabled(bool(counts))
+        self._update_tag_action_controls()
+
+    def _cluster_tag_updates(self, file_ids) -> dict[object, NeuronMetadataUpdate]:
+        selected = set(self.cluster_tag_selector.selected_tags())
+        if not selected:
+            return {}
+        name, labels = self._cluster_tag_source()
+        return {
+            file_id: NeuronMetadataUpdate(tags=(f"{name}: Cluster {labels[file_id]}",))
+            for file_id in file_ids
+            if labels.get(file_id) is not None
+            and f"Cluster {labels[file_id]}" in selected
+        }
+
+    def _tag_cluster_members(self) -> None:
+        """Append a column-specific membership tag to each matching row in scope."""
+        updates = self._cluster_tag_updates(self._tag_action_file_ids())
+        if not updates:
+            self._tag_action_status.setText(
+                "Choose clusters with members in the tag action scope."
+            )
+            return
+        summary = self.apply_metadata_updates(updates)
+        self.show_metadata_columns()
+        self._refresh_annotation_filters()
+        self._tag_action_status.setText(
+            f"Applied cluster membership tags to {summary.updated_count:,} neurons."
+        )
+
     def _tag_action_file_ids(self):
         scope = self.tag_action_scope.currentData()
         if scope == "selected":
@@ -1656,6 +1811,10 @@ class NeuronTableWidget(QWidget):
     def _update_tag_action_controls(self, *_args):
         if "delete_tags_button" not in self.__dict__:
             return
+        self.add_tags_button.setEnabled(
+            bool(self._normalise_tags(self.tag_entry_input.text()))
+            and bool(self.get_selected_file_ids())
+        )
         ids = self._tag_action_file_ids()
         tags = set(self.tag_filter_combo.selected_tags())
         affected = [
@@ -1671,14 +1830,49 @@ class NeuronTableWidget(QWidget):
             f"Scope: {len(ids):,} neurons. {len(tags):,} checked tag(s); "
             f"deletion affects {len(affected):,} neurons."
         )
+        updates = self._cluster_tag_updates(ids)
+        self.tag_cluster_members_button.setEnabled(bool(updates))
+        names = sorted(
+            {update.tags[0] for update in updates.values()}, key=label_sort_key
+        )
+        self._cluster_tag_preview.setText(
+            f"Will tag {len(updates):,} neurons in the tag action scope. "
+            f"Tags: {'; '.join(names)}. Existing tags are kept."
+            if updates
+            else "Choose clusters to add '<clustering column>: Cluster <number>' tags "
+            "to their members in the tag action scope. Tags record membership at "
+            "the time of application."
+        )
 
     def _reset_tag_actions(self):
         self._deleted_tags_undo = {}
+        if "cluster_tag_selector" in self.__dict__:
+            self.cluster_tag_selector.set_selection(None, emit=False)
+        if "tag_entry_input" in self.__dict__:
+            self.tag_entry_input.clear()
+            self._add_tags_status.clear()
+            self._add_tags_status.setVisible(False)
         legend = self.__dict__.get("_tag_color_legend")
         if legend is not None:
             legend.setVisible(False)
             legend.setRowCount(0)
             self._tag_action_status.clear()
+
+    def _add_tags_to_selected_rows(self) -> None:
+        """Append typed tags to the visible selection, preserving other fields."""
+        tags = self._normalise_tags(self.tag_entry_input.text())
+        file_ids = self.get_selected_file_ids()
+        if not tags or not file_ids:
+            return
+        summary = self.apply_metadata_updates(
+            {file_id: NeuronMetadataUpdate(tags=tags) for file_id in file_ids}
+        )
+        self.show_metadata_columns()
+        self._refresh_annotation_filters()
+        self._add_tags_status.setText(
+            f"Applied tags to {summary.updated_count:,} selected row(s)."
+        )
+        self._add_tags_status.setVisible(True)
 
     def _delete_checked_tags(self):
         selected = set(self.tag_filter_combo.selected_tags())

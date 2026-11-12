@@ -9,14 +9,22 @@ from ..neuron_table_ops import label_sort_key
 
 
 class TagSelector(QComboBox):
-    """Select named tags, all neurons, or untagged neurons exclusively."""
+    """Select named items, with optional all/untagged choices."""
 
     selection_changed = Signal(object)
 
-    def __init__(self, parent=None, *, all_text="All tags", include_untagged=True):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        all_text="All tags",
+        include_untagged=True,
+        item_name="tag",
+    ):
         super().__init__(parent)
         self._all_text = all_text
         self._include_untagged = include_untagged
+        self._item_name = item_name
         self._selection = None
         self._updating = False
         self._popup_open = False
@@ -90,13 +98,13 @@ class TagSelector(QComboBox):
             self.setCurrentIndex(checked[0] if checked else 0)
             tags = self.selected_tags()
             text = (
-                f"{len(tags)} tags selected"
+                f"{len(tags)} {self._item_name}s selected"
                 if len(tags) > 1
                 else self.itemText(self.currentIndex())
             )
             self.lineEdit().setText(text)
             self.setToolTip(
-                "Checked tags: " + ", ".join(tags)
+                f"Checked {self._item_name}s: " + ", ".join(tags)
                 if tags
                 else self._all_text
                 if self._selection is None
