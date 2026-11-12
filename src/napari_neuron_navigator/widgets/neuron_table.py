@@ -5,6 +5,7 @@ Provides an interactive table for viewing and controlling neurons:
 - Track whether a neuron is currently added to the scene
 - Switch between focused column views
 - View neuron name and cluster assignments
+- Apply tags to selected rows
 - Edit neuron colors via color picker
 """
 
@@ -27,6 +28,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -483,6 +485,28 @@ class NeuronTableWidget(QWidget):
         self._tag_color_legend.setVisible(False)
         tools_layout.addWidget(self._tag_color_legend)
         layout.addWidget(self.tag_tools)
+
+        add_tags_row = QHBoxLayout()
+        add_tags_label = QLabel("Add tags:")
+        add_tags_row.addWidget(add_tags_label)
+        self.tag_entry_input = QLineEdit()
+        self.tag_entry_input.setPlaceholderText("Enter tags, separated by commas")
+        self.tag_entry_input.setToolTip(
+            "Add tags to the selected rows, keeping their existing tags. "
+            "Separate multiple tags with commas."
+        )
+        add_tags_label.setBuddy(self.tag_entry_input)
+        self.tag_entry_input.textChanged.connect(self._update_tag_action_controls)
+        self.tag_entry_input.returnPressed.connect(self._add_tags_to_selected_rows)
+        add_tags_row.addWidget(self.tag_entry_input, 1)
+        self.add_tags_button = QPushButton("Apply to Selected Rows")
+        self.add_tags_button.clicked.connect(self._add_tags_to_selected_rows)
+        add_tags_row.addWidget(self.add_tags_button)
+        layout.addLayout(add_tags_row)
+        self._add_tags_status = QLabel()
+        self._add_tags_status.setWordWrap(True)
+        self._add_tags_status.setVisible(False)
+        layout.addWidget(self._add_tags_status)
 
         self._table = QTableWidget(0, COL_COLOR + 1)
         self._adaptive_height_enabled = True
@@ -1656,6 +1680,10 @@ class NeuronTableWidget(QWidget):
     def _update_tag_action_controls(self, *_args):
         if "delete_tags_button" not in self.__dict__:
             return
+        self.add_tags_button.setEnabled(
+            bool(self._normalise_tags(self.tag_entry_input.text()))
+            and bool(self.get_selected_file_ids())
+        )
         ids = self._tag_action_file_ids()
         tags = set(self.tag_filter_combo.selected_tags())
         affected = [
@@ -1674,11 +1702,31 @@ class NeuronTableWidget(QWidget):
 
     def _reset_tag_actions(self):
         self._deleted_tags_undo = {}
+        if "tag_entry_input" in self.__dict__:
+            self.tag_entry_input.clear()
+            self._add_tags_status.clear()
+            self._add_tags_status.setVisible(False)
         legend = self.__dict__.get("_tag_color_legend")
         if legend is not None:
             legend.setVisible(False)
             legend.setRowCount(0)
             self._tag_action_status.clear()
+
+    def _add_tags_to_selected_rows(self) -> None:
+        """Append typed tags to the visible selection, preserving other fields."""
+        tags = self._normalise_tags(self.tag_entry_input.text())
+        file_ids = self.get_selected_file_ids()
+        if not tags or not file_ids:
+            return
+        summary = self.apply_metadata_updates(
+            {file_id: NeuronMetadataUpdate(tags=tags) for file_id in file_ids}
+        )
+        self.show_metadata_columns()
+        self._refresh_annotation_filters()
+        self._add_tags_status.setText(
+            f"Applied tags to {summary.updated_count:,} selected row(s)."
+        )
+        self._add_tags_status.setVisible(True)
 
     def _delete_checked_tags(self):
         selected = set(self.tag_filter_combo.selected_tags())

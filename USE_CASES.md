@@ -3606,9 +3606,16 @@ first pass.
   intersection semantics, grouping, exclusions, distances, zero neurons,
   cancellation, memory guards, persistence, and post hoc overlay isolation.
 
-### UC-026: Filter Data Rows by Labels and Tags
+### UC-026: Tag Selected Data Rows and Filter by Labels and Tags
 
 **Capability**
+
+The **Add tags** field and **Apply to Selected Rows** button append typed tags
+to the visible highlighted rows in Data's neuron table. Enter one tag or several
+comma-separated names; whitespace is trimmed and duplicate names are ignored.
+Existing tags and other row metadata remain. Enter also applies the typed tags.
+This action always uses selected rows, independently of **Tag action scope**.
+After application, the table reveals **Tags** and reports the selected row count.
 
 The **Label** and **Tag** dropdowns above Data's neuron table show rows matching
 existing annotations. Each selector offers all values, an unannotated option,
@@ -3628,7 +3635,7 @@ color all matching neurons together.
   query. Record the cohort IDs and size. Include at least one unlabelled,
   untagged neuron, shared and distinct Labels, and neurons with several Tags.
 - Use UC-021 to tag thalamic-terminus matches `TH termini`, or add known Tags
-  through **Table view: Label**. Include a second tag to check exact membership.
+  through **Add tags**. Include a second tag to check exact membership.
 - For combination checks, retain an existing named cluster assignment and a
   manual neuron heatmap with known memberships.
 
@@ -3715,18 +3722,50 @@ color all matching neurons together.
     **Expected:** The edited tags and per-neuron colors persist. Transient
     search choices, deletion undo history, and the last-applied legend are view
     state and are not required to reconstruct the saved neuron metadata.
+13. **Action:** Clear row filters, choose **Table view: Label**, sort by **Tags**,
+    and highlight two rows using the platform's multi-selection modifier.
+    Record their `file_id` values, tags, and other metadata. Enter
+    `Reviewed manually` in **Add tags**, then click **Apply to Selected Rows**.
+    Repeat the same application, then enter `Follow up, Reviewed manually` and
+    press Enter. Repeat with exactly one selected row.
+    **Expected:** Only the visible highlighted rows receive the typed tags.
+    Each name appears once, with existing tags retained. Labels, Groups, Notes,
+    colors, visibility, scene state, membership, sort direction, and selection
+    remain. The status reports the number of selected rows. New names appear
+    in the Tag selector. The input is also available in other Table views;
+    applying tags reveals the Tags column and retains an existing Full view.
+14. **Action:** Select all rows, then apply a Tag filter that hides some of them.
+    Set **Tag action scope: Entire table**, type a new tag, and apply it using
+    **Apply to Selected Rows**. Clear the filters to inspect all rows. Then
+    clear selection, and separately try empty or comma/whitespace-only input
+    with a selection. Test both the button and Enter.
+    **Expected:** Hidden rows receive no new tag even if Qt retains their
+    selection. The action scope for Tag Tools does not broaden this action.
+    Without visible selected rows or a nonempty tag, the button is disabled
+    and Enter changes nothing.
+15. **Action:** Choose **Tag: No tags**, select an untagged row, and apply
+    `Reviewed manually`. Clear the filters, save and reopen a project or
+    enhanced Parquet, and inspect the affected rows.
+    **Expected:** The newly tagged row immediately leaves the No tags view;
+    the filter remains active with updated counts. The typed tags persist
+    through save/reopen. Replacing or clearing the table, or restoring a
+    project, clears the tag input and its completion message.
 
 **Manual verification**
 
 - Status: Not run
 - Last verified: Never
 - Added: 2026-10-27
+- Updated: 2026-11-12 (typed tags for selected rows; manual status remains Not run)
 - Notes: Automated checks cover exact matching, empty annotations, combined
   filters, natural sorting, duplicate display identifiers, updates and removal,
   zero-match choices, cohort preservation, visible selection, and resets.
   Checks also cover any/all/exact matching, distinct tag cardinality, popup
   interactions, scoped deletion and undo, exact removal, combination colors,
   color scope, cancellation, and table-state persistence.
+  Selected-row tagging checks cover sorted row identity, metadata preservation,
+  repeated names, comma-separated input, Enter, empty input/selection, hidden
+  rows, filter refresh, and table-state persistence.
   The complete manual napari workflow above has not been exercised.
 
 ### UC-027: Define Live Neuron Sets and Compare Their Spatial Regions
@@ -3933,6 +3972,74 @@ additional volume. Projects preserve the registration and original layer type.
   source-provenance preservation, grid/type/atlas rejection, repeat registration,
   and float-image project persistence. The complete manual workflow remains to
   be exercised in napari.
+
+### UC-029: Clear Neuron Traces and Somas Independently
+
+**Capability**
+
+In **Data** > **Selected Neurons**, **Clear Layers** opens a dropdown like
+**Add Heatmap**. Choose **Neuron Traces**, **Soma**, or **Both** to clear that
+category across the main scene, independently of table selection and filters.
+Neuron Traces includes line/point traces and their 2D slice projection. Soma
+includes soma labels/markers and their 2D slice projection; raw soma markers
+within neuron point clouds are also suppressed. Clearing one category retains
+the other category, so somas can be replaced using a new row selection while
+keeping neuron traces. Atlas/reference layers, heatmaps, and Data rows remain.
+
+**Prerequisites**
+
+- Load `isocortex_total_right_brainglobe_flatmap.parquet`, or another neuron
+  Parquet containing soma nodes and connected traces. Populate Data with at
+  least three known `file_id` values and record their annotations and colors.
+- Load an atlas/reference layer and create a separate heatmap using
+  **Add Heatmap** so their preservation can be checked.
+- Use **Visualization** > **Render Mode** > **Both** to exercise both neuron lines
+  and point clouds. Keep **Show in 2D slices** enabled for projection checks.
+
+**Steps and expected results**
+
+1. **Action:** Select two Data rows and click **Add Full Neurons**. Select a
+   third row and click **Add Soma Only**. Open **Clear Layers**.
+   **Expected:** The scene contains traces and somas for the first two neurons
+   and a soma for the third. The menu lists **Neuron Traces**, **Soma**, and
+   **Both**. Opening or dismissing it alone does not clear anything.
+2. **Action:** Select just one row, or filter the table to a subset, then
+   choose **Clear Layers** > **Neuron Traces**. Check 2D and 3D displays.
+   **Expected:** All Data neuron line/point traces and their slice projection
+   disappear. Soma labels/markers and their slice projection remain. Rows with
+   retained somas still show **Added: Yes**. Table membership, annotations,
+   selection, filters, reference layers, and heatmaps remain.
+3. **Action:** Select just one neuron and click **Add Full Neurons**.
+   **Expected:** That neuron's traces return. Other neurons retain their somas
+   without having their cleared traces restored.
+4. **Action:** Choose **Clear Layers** > **Soma**, inspect 2D and 3D, then
+   change a retained neuron's color and toggle **Show in 2D slices**.
+   **Expected:** Soma labels/markers and soma slice projections disappear,
+   including raw soma-node markers within retained neuron point clouds. Traces
+   remain. Recoloring or changing display mode does not restore cleared soma
+   markers. Rows with retained traces still show **Added: Yes**; neurons with
+   no remaining scene geometry show **Added: No**.
+5. **Action:** Select exactly one Data row and click **Add Soma Only**.
+   **Expected:** The soma layer contains only that selected neuron, with its
+   soma slice projection. Other neurons' retained traces remain, and their
+   cleared somas do not return. For a selected neuron that previously had full
+   traces, **Add Soma Only** retains the existing behavior of switching that
+   neuron to soma-only rendering.
+6. **Action:** Choose **Clear Layers** > **Both**, then repeat each menu choice
+   when no corresponding layers remain. Add neurons again afterward.
+   **Expected:** Both clears all Data neuron geometry and both slice
+   projections. Every row shows **Added: No**. The Data table, reference layers,
+   and heatmaps remain. Repeating a clear causes no error, and neurons can be
+   added again normally.
+
+**Manual verification**
+
+- Status: **Not run**
+- Date recorded: **2026-11-12**
+- Notes: Automated checks exercise the Qt menu, independent 2D/3D clearing,
+  retained layers and table metadata, repeated clearing, raw soma suppression,
+  and adding only selected somas or traces after a partial clear. The complete
+  workflow has not been manually exercised in napari.
 
 ## Use-Case Template
 

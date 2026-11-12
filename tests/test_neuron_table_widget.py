@@ -402,6 +402,106 @@ def test_filters_notify_selected_cohort_changes_without_selecting_hidden_neurons
     assert set(widget.get_selected_file_ids()) == set(widget.file_ids())
 
 
+@pytest.mark.parametrize("descending", [False, True])
+def test_typed_tags_apply_to_sorted_selection_and_persist(
+    real_table_widget, descending
+):
+    module, widget = _filtered_fixture(real_table_widget)
+    selected = {"subject-a/shared", "subject-b/shared"}
+    order = module.Qt.DescendingOrder if descending else module.Qt.AscendingOrder
+    widget._table.sortByColumn(module.COL_TAGS, order)
+    widget.select_file_ids(list(selected))
+    before = {key: entry.to_state() for key, entry in widget._entries.items()}
+    notifications = []
+    widget.state_changed.connect(lambda: notifications.append(True))
+    widget.tag_entry_input.setText("  Reviewed manually, keep, Reviewed manually, , ")
+
+    for _ in range(2):
+        widget.add_tags_button.click()
+        for file_id, entry in widget._entries.items():
+            expected = dict(before[file_id])
+            if file_id in selected:
+                expected["tags"] = list(
+                    dict.fromkeys([*expected["tags"], "Reviewed manually", "keep"])
+                )
+            assert entry.to_state() == expected
+            row = widget._file_id_to_row(file_id)
+            assert widget._table.item(row, module.COL_TAGS).text() == ", ".join(
+                expected["tags"]
+            )
+        assert set(widget.get_selected_file_ids()) == selected
+        assert widget._table.horizontalHeader().sortIndicatorSection() == module.COL_TAGS
+        assert widget._table.horizontalHeader().sortIndicatorOrder() == order
+
+    assert len(notifications) == 2
+    assert not widget._table.isColumnHidden(module.COL_TAGS)
+    assert widget._add_tags_status.text() == "Applied tags to 2 selected row(s)."
+    assert widget.tag_filter_combo.findData("Reviewed manually") >= 0
+    saved = widget.export_state()
+    widget.import_state(saved)
+    assert widget.export_state() == saved
+    assert widget.tag_entry_input.text() == ""
+    assert widget._add_tags_status.isHidden()
+    assert not widget.add_tags_button.isEnabled()
+
+
+def test_typed_tags_skip_hidden_and_unselected_rows(real_table_widget):
+    _, widget = _filtered_fixture(real_table_widget)
+    # Qt can retain hidden selected indexes after filtering.
+    widget.select_file_ids(widget.file_ids())
+    widget.tag_filter_combo.set_selection("TH")
+    widget.tag_action_scope.setCurrentIndex(widget.tag_action_scope.findData("table"))
+    widget.tag_entry_input.setText("Reviewed")
+    widget.add_tags_button.click()
+    for file_id, entry in widget._entries.items():
+        assert ("Reviewed" in entry.tags) == (
+            file_id in {"subject-a/shared", "subject-c/shared"}
+        )
+    widget.select_file_ids(["subject-a/shared"])
+    widget.tag_entry_input.setText("Follow up")
+    widget.add_tags_button.click()
+    assert widget._entries["subject-a/shared"].tags[-1] == "Follow up"
+    assert "Follow up" not in widget._entries["subject-c/shared"].tags
+
+
+def test_typed_tags_require_nonempty_input_and_selection(real_table_widget):
+    from qtpy.QtTest import QTest
+
+    module, widget = _filtered_fixture(real_table_widget)
+    before = {key: entry.to_state() for key, entry in widget._entries.items()}
+    widget.tag_entry_input.setText("Reviewed")
+    assert not widget.add_tags_button.isEnabled()
+    QTest.keyClick(widget.tag_entry_input, module.Qt.Key_Return)
+    widget.select_file_ids(["subject-a/shared"])
+    assert widget.add_tags_button.isEnabled()
+    widget.tag_entry_input.setText(" , , ")
+    assert not widget.add_tags_button.isEnabled()
+    QTest.keyClick(widget.tag_entry_input, module.Qt.Key_Return)
+    assert {key: entry.to_state() for key, entry in widget._entries.items()} == before
+
+    widget.tag_entry_input.setText("Reviewed")
+    QTest.keyClick(widget.tag_entry_input, module.Qt.Key_Return)
+    assert widget._entries["subject-a/shared"].tags == ("TH", "keep", "Reviewed")
+    widget._table.clearSelection()
+    assert not widget.add_tags_button.isEnabled()
+
+
+def test_typed_tags_refresh_filters_when_selection_stops_matching(real_table_widget):
+    _, widget = _filtered_fixture(real_table_widget)
+    widget.tag_filter_combo.set_selection("")  # No tags.
+    widget.select_file_ids(["unannotated"])
+    widget.tag_entry_input.setText("Reviewed")
+    widget.add_tags_button.click()
+    assert widget._entries["unannotated"].tags == ("Reviewed",)
+    assert _shown(widget) == set()
+    assert widget.get_selected_file_ids() == []
+    assert not widget.add_tags_button.isEnabled()
+    assert widget.tag_filter_combo.currentText() == "No tags (0)"
+    widget.clear_annotation_filters()
+    widget.tag_filter_combo.set_selection("Reviewed")
+    assert _shown(widget) == {"unannotated"}
+
+
 def test_multi_tag_selector_search_modes_and_cardinality(real_table_widget):
     _, widget = _filtered_fixture(real_table_widget)
     widget.tag_filter_combo.set_selection(("TH", "CP"))

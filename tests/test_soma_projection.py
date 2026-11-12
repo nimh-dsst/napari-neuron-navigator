@@ -2216,6 +2216,7 @@ def _bind_projection_helpers(widget) -> None:
 
 
 def _bind_scene_helpers(widget) -> None:
+    _bind_projection_helpers(widget)
     widget._current_scene_file_ids = types.MethodType(
         NeuronViewerWidget._current_scene_file_ids,
         widget,
@@ -2731,7 +2732,7 @@ def test_remove_selected_neurons_preserves_remaining_render_modes() -> None:
     widget._clear_neuron_layers.assert_not_called()
 
 
-def test_clear_all_neuron_layers_ignores_qt_checked_argument_and_resets_scene_state() -> (
+def test_clear_both_layers_ignores_qt_checked_argument_and_resets_scene_state() -> (
     None
 ):
     viewer = _DummyViewer(ndisplay=3)
@@ -2749,6 +2750,9 @@ def test_clear_all_neuron_layers_ignores_qt_checked_argument_and_resets_scene_st
         _slice_projector=MagicMock(),
         _soma_slice_projector=MagicMock(),
         _neuron_table=types.SimpleNamespace(set_added_file_ids=MagicMock()),
+        _capture_depth_state=MagicMock(return_value=None),
+        _restore_depth_state=MagicMock(),
+        _render_status_label=_DummyLabel(),
     )
     widget._current_scene_file_ids = types.MethodType(
         NeuronViewerWidget._current_scene_file_ids,
@@ -2759,7 +2763,7 @@ def test_clear_all_neuron_layers_ignores_qt_checked_argument_and_resets_scene_st
         widget,
     )
 
-    NeuronViewerWidget._clear_all_neuron_layers(widget, False)
+    NeuronViewerWidget._clear_scene_layers(widget, "both", False)
 
     assert viewer.layers == []
     assert widget._current_neuron_layers == []
