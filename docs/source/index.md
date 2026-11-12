@@ -31,6 +31,11 @@ pixi run napari
 Pixi manages Python, napari, and the plugin's dependencies. The project supports
 Windows, macOS on Apple Silicon, and Linux.
 
+## Isocortex dataset
+
+The isocortex dataset is available on Zenodo:
+[DOI: 10.5281/zenodo.23960862](https://doi.org/10.5281/zenodo.23960862).
+
 ## Existing guides
 
 - [Repository README](https://github.com/nimh-dsst/napari-neuron-navigator/blob/main/README.md):

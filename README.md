@@ -7,6 +7,11 @@ data from SWC and Parquet files.
 [PDF](https://nimh-dsst.github.io/napari-neuron-navigator/napari-neuron-navigator.pdf) ·
 [Build the docs](docs/README.md)
 
+## Isocortex dataset
+
+The isocortex dataset is available on Zenodo:
+[DOI: 10.5281/zenodo.23960862](https://doi.org/10.5281/zenodo.23960862).
+
 ## Prerequisites
 
 The development environment requires Python 3.11 or 3.12 and napari 0.9.x;
