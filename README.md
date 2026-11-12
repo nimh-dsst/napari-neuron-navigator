@@ -3,6 +3,10 @@
 A napari plugin for navigating, visualizing, and analyzing neuronal morphology
 data from SWC and Parquet files.
 
+[Documentation](https://nimh-dsst.github.io/napari-neuron-navigator/) ·
+[PDF](https://nimh-dsst.github.io/napari-neuron-navigator/napari-neuron-navigator.pdf) ·
+[Build the docs](docs/README.md)
+
 ## Prerequisites
 
 The development environment requires Python 3.11 or 3.12 and napari 0.9.x;
@@ -97,11 +101,6 @@ macOS-only guard therefore hides and empties the private Qt top-level but keeps
 its viewer and canvas alive for the next projection. It never calls
 `Viewer.close()` on that visible macOS window and does not manipulate napari's
 slicer, status thread, viewer registry, or model teardown.
-
-For a complete CPD2 walkthrough covering clone/install, `pixi run napari`,
-left-hemisphere SWC-to-Parquet conversion, atlas loading, region queries, soma
-clustering, and GPe-limited cluster heatmaps, see
-[docs/cpd2_workflow.md](docs/cpd2_workflow.md).
 
 ## Similar-Neuron Search
 

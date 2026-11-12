@@ -2839,6 +2839,76 @@ def test_project_in_new_window_preserves_scene_after_render_mode_change(
     assert widget._flatmap_render_mode_change_pending is False
 
 
+@pytest.mark.parametrize(
+    ("old_style", "new_style"),
+    [("both_square", "both_shaped"), ("both_shaped", "both_square")],
+)
+@pytest.mark.parametrize("render_mode", ["heatmap", "flat_heatmap"])
+def test_new_window_render_reenables_region_buttons(
+    monkeypatch, old_style, new_style, render_mode
+) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    first = _DummyViewer()
+    second = _DummyViewer()
+    active = {"viewer": first}
+    widget._display_viewer_provider = lambda create=True: active["viewer"]
+    widget._last_display_viewer = first
+    old_heatmap = first.add_image(
+        np.ones((2, 3, 7)),
+        name=widget._render_layer_name(render_mode),
+        metadata={"flatmap_render_mode": render_mode, "flatmap_style": old_style},
+    )
+    old_labels = first.add_image(
+        np.ones((2, 3, 7)),
+        name=module._REGION_LABELS_LAYER_NAME,
+        metadata={"flatmap_style": old_style},
+    )
+    widget._projection_layer = old_heatmap
+    widget._region_labels_layer = old_labels
+    widget._region_surfaces_layers = []
+    widget._region_outlines_layers = []
+    widget._active_cache_profile = types.SimpleNamespace(profile_id="profile")
+    widget._projection_source_combo = _DummyDataCombo(module._PROJECTION_SOURCE_PRECOMPUTED)
+    widget._style_combo = _DummyDataCombo(new_style)
+    widget._render_mode_combo = _DummyDataCombo(render_mode)
+    widget._region_surfaces_btn = _DummyButton()
+    widget._region_outlines_btn = _DummyButton()
+    widget._clear_region_geometry_btn = _DummyButton()
+    widget._update_expected_filename_label = lambda: None
+    widget._refresh_cache_profiles = widget._update_cached_region_controls
+
+    widget._on_flatmap_style_changed()
+    assert widget._flatmap_render_mode_change_pending
+    assert widget._region_labels_btn.enabled is False
+
+    def activate_second():
+        active["viewer"] = second
+        return second
+
+    def render_in_active_window():
+        layer = second.add_image(
+            np.ones((2, 3, 8)),
+            name=widget._render_layer_name(render_mode),
+            metadata={"flatmap_render_mode": render_mode, "flatmap_style": new_style},
+        )
+        widget._projection_layer = layer
+        widget._notify_display_viewer_ready(layer)
+
+    widget._new_display_viewer_callback = activate_second
+    widget._start_precomputed_heatmap_worker = render_in_active_window
+    widget._project(new_window=True)
+
+    assert widget._flatmap_render_mode_change_pending is False
+    assert widget._region_labels_btn.enabled is True
+    assert widget._region_outlines_btn.enabled is True
+    assert widget._region_surfaces_btn.enabled is (render_mode == "heatmap")
+    assert widget._clear_region_geometry_btn.enabled is True
+    assert first.layers == [old_heatmap, old_labels]
+    assert old_heatmap.visible and old_labels.visible
+    assert widget._current_display_viewer() is second
+
+
 def test_flatmap_heatmap_selector_lists_only_gamma_adjustable_heatmaps(
     monkeypatch,
 ) -> None:
@@ -5723,6 +5793,173 @@ def test_cached_flat_region_outlines_use_only_materialized_cache_arrays(
         assert "translate" not in layer.init_kwargs
     expected_visp = np.asarray([12, 34, 56, 255], dtype=float) / 255
     np.testing.assert_allclose(widget._viewer.layers[0].edge_color, expected_visp)
+
+
+@pytest.mark.parametrize("tracked_soma", [False, True])
+def test_source_selector_changes_defer_live_layer_removal(
+    monkeypatch, tracked_soma
+) -> None:
+    """Dropdown signals must not destroy visible GPU layers or the main scene."""
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    main_layer = widget._viewer.add_image(np.ones((2, 2)), name="Atlas reference")
+    display = _DummyViewer()
+    widget._display_viewer_provider = lambda **_kwargs: display
+    names = [
+        module._HEATMAP_LAYER_NAME,
+        module._REGION_LABELS_LAYER_NAME,
+        f"{module._REGION_SURFACES_LAYER_NAME}: MOs5",
+        f"{module._REGION_OUTLINES_LAYER_NAME}: MOs5",
+        module._SOMA_POINTS_LAYER_NAME,
+    ]
+    old_layers = [display.add_image(np.ones((2, 2, 2)), name=name) for name in names]
+    widget._projection_layer, widget._region_labels_layer = old_layers[:2]
+    widget._region_surfaces_layers = [old_layers[2]]
+    widget._region_outlines_layers = [old_layers[3]]
+    widget._soma_layer = old_layers[4] if tracked_soma else None
+    widget._last_summary = object()
+    widget._active_cache_profile = None
+    queued = []
+    widget._queue_gui_callback = queued.append
+    widget._update_expected_filename_label = lambda: None
+    widget._refresh_cache_profiles = lambda: None
+    widget._notify_flatmap_correlation_source_changed = lambda: None
+    widget._projection_source_combo = _DummyDataCombo(module._PROJECTION_SOURCE_RECOMPUTE)
+    widget._update_style_choices_for_source = lambda _source: None
+    widget._set_cache_grid_locked = lambda _locked: None
+    widget._update_cached_region_controls = lambda: None
+
+    widget._on_projection_source_changed()
+
+    assert display.layers == old_layers
+    assert all(layer.visible is False for layer in old_layers)
+    assert widget._projection_layer is None
+    assert widget._region_labels_layer is None
+    assert widget._region_surfaces_layers == []
+    assert widget._region_outlines_layers == []
+    assert widget._soma_layer is None
+    assert widget._last_summary is None
+    assert len(queued) == 1
+    assert widget._viewer.layers == [main_layer]
+    assert main_layer.visible is True
+
+    # A subsequent projection may create a layer with the same name before the
+    # queued callback runs. Only the retired layer identities may be removed.
+    replacement = display.add_image(np.ones((2, 2, 2)), name=names[0])
+    queued[0]()
+
+    assert display.layers == [replacement]
+    assert replacement.visible is True
+    assert widget._viewer.layers == [main_layer]
+
+
+@pytest.mark.parametrize("revert", [False, True])
+def test_style_selector_keeps_the_scene_until_project(monkeypatch, revert) -> None:
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    heatmap = _configure_cache_activation_widget(widget, module)
+    heatmap.metadata["flatmap_style"] = "both_shaped"
+    labels = widget._viewer.add_image(
+        np.ones((1, 4, 4)),
+        name=module._REGION_LABELS_LAYER_NAME,
+        metadata={"flatmap_style": "both_shaped"},
+    )
+    widget._region_labels_layer = labels
+    original_summary = widget._last_summary
+    profile = _CacheProfile("matching-profile")
+    profile.style = lambda _style: types.SimpleNamespace(grid_spec=profile.grid)
+    widget._active_cache_profile = profile
+    widget._style_combo = _DummyDataCombo("both_square")
+    widget._render_mode_combo = _DummyDataCombo(module._RENDER_HEATMAP)
+    widget._update_expected_filename_label = lambda: None
+    widget._refresh_cache_profiles = lambda: widget._activate_cache_profile(profile)
+    queued = []
+    widget._queue_gui_callback = queued.append
+
+    widget._on_flatmap_style_changed()
+
+    assert widget._viewer.layers == [heatmap, labels]
+    assert heatmap.visible and labels.visible
+    assert widget._projection_layer is heatmap
+    assert widget._region_labels_layer is labels
+    assert widget._last_summary is original_summary
+    assert widget._flatmap_render_mode_change_pending is True
+    assert queued == []
+    assert "click Project to Flatmap" in widget._status_label.text
+
+    if revert:
+        widget._style_combo.data = "both_shaped"
+        widget._on_flatmap_style_changed()
+        assert widget._flatmap_render_mode_change_pending is False
+        assert heatmap.visible and labels.visible
+        assert queued == []
+        assert "matches the selected style" in widget._status_label.text
+        return
+
+    started = []
+    widget._start_precomputed_heatmap_worker = lambda: started.append(True)
+    widget._project()
+    assert started == [True]
+    assert not heatmap.visible and not labels.visible
+    assert len(queued) == 1
+    queued[0]()
+    assert widget._viewer.layers == []
+
+
+@pytest.mark.parametrize(
+    ("method", "layer_name"),
+    [
+        ("_defer_flatmap_grid_layer_removal", "Isocortex Flatmap Heatmap"),
+        ("_remove_projection_layer", "Isocortex Flatmap Heatmap"),
+        ("_clear_region_labels", "Flatmap Region Labels"),
+        ("_clear_region_surface_layers", "Flatmap Region Surfaces: MOs5"),
+        ("_clear_region_outline_layers", "Flatmap Region Outlines: MOs5"),
+        ("_remove_soma_layer", "Isocortex Flatmap Somas"),
+    ],
+)
+def test_layer_cleanup_binds_the_owning_canvas(monkeypatch, method, layer_name):
+    module = _load_flatmap_widget_module(monkeypatch)
+    widget = _widget(module)
+    owner = _DummyViewer()
+    other = _DummyViewer()
+    active_context = [other]
+
+    def bind_owner():
+        active_context[0] = owner
+
+    owner.window = types.SimpleNamespace(
+        _qt_viewer=types.SimpleNamespace(
+            canvas=types.SimpleNamespace(
+                _scene_canvas=types.SimpleNamespace(set_current=bind_owner)
+            )
+        )
+    )
+
+    class ContextCheckingLayers(list):
+        def remove(self, layer):
+            assert active_context[0] is owner
+            super().remove(layer)
+
+    owner.layers = ContextCheckingLayers()
+    layer = owner.add_image(np.ones((2, 2, 2)), name=layer_name)
+    current_viewer = [owner]
+    widget._display_viewer_provider = lambda **_kwargs: current_viewer[0]
+    widget._region_labels_layer = layer
+    widget._region_surfaces_layers = [layer]
+    widget._region_outlines_layers = [layer]
+    widget._soma_layer = layer if method == "_remove_soma_layer" else None
+    queued = []
+    widget._queue_gui_callback = queued.append
+
+    getattr(widget, method)()
+    # Deferred cleanup must bind the original canvas even after the user has
+    # switched the active comparison window.
+    current_viewer[0] = other
+    for callback in queued:
+        callback()
+
+    assert owner.layers == []
+    assert active_context[0] is owner
 
 
 def test_flat_region_overlays_are_retired_with_the_grid(monkeypatch) -> None:

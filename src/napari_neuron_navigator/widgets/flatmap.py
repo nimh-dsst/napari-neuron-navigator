@@ -391,6 +391,7 @@ class FlatmapProjectionWidget(QWidget):
         self._refresh_flatmap_heatmap_layer_list()
         if callable(getattr(self, "_display_viewer_provider", None)):
             self._update_flatmap_render_mode_change_pending()
+            self._update_cached_region_controls()
         return released_active
 
     def _clear_display_layer_handles(self) -> None:
@@ -436,6 +437,12 @@ class FlatmapProjectionWidget(QWidget):
                 )
         self._refresh_flatmap_heatmap_layer_list()
 
+        # A successful render resolves pending style/render choices in the
+        # active viewer. Re-enable overlays there without touching older
+        # comparison windows or waiting for another selector-change signal.
+        self._update_flatmap_render_mode_change_pending()
+        self._update_cached_region_controls()
+
     def _notify_display_viewer_failed(self, reason: str) -> None:
         """Report an unsuccessful first render so the main scene can recover."""
         viewer = self._current_display_viewer()
@@ -468,6 +475,24 @@ class FlatmapProjectionWidget(QWidget):
         if viewer is None:
             return None
         return getattr(viewer, "layers", None)
+
+    def _make_display_context_current(self, viewer=None) -> None:
+        """Bind the owning canvas before napari flushes layer-deletion commands.
+
+        napari 0.9 calls ``context.finish()`` during layer removal without
+        making its canvas current first. A popup or another viewer can leave
+        a different OpenGL context active, corrupting that viewer's resources.
+        ViewerModel-only callers have no Qt/VisPy canvas and need no binding.
+        """
+        if viewer is None:
+            viewer = self._current_display_viewer()
+        window = getattr(viewer, "window", None)
+        qt_viewer = getattr(window, "_qt_viewer", None)
+        canvas = getattr(qt_viewer, "canvas", None)
+        scene_canvas = getattr(canvas, "_scene_canvas", None)
+        set_current = getattr(scene_canvas, "set_current", None)
+        if callable(set_current):
+            set_current()
 
     @staticmethod
     def _is_flatmap_heatmap_layer(layer) -> bool:
@@ -1399,20 +1424,24 @@ class FlatmapProjectionWidget(QWidget):
                     break
 
     def _on_flatmap_style_changed(self) -> None:
-        self._invalidate_flatmap_grid_layers()
+        # A queued deletion can still overlap the macOS popup compositor.
+        # Keep the displayed scene intact until the user explicitly projects.
+        was_pending = bool(getattr(self, "_flatmap_render_mode_change_pending", False))
+        self._update_flatmap_render_mode_change_pending()
         self._update_expected_filename_label()
         self._refresh_cache_profiles()
+        if getattr(self, "_flatmap_render_mode_change_pending", False):
+            self._status_label.setText(
+                "Flatmap style changed; click Project to Flatmap to update the scene."
+            )
+        elif was_pending:
+            self._status_label.setText("Displayed flatmap matches the selected style.")
         self._notify_flatmap_correlation_source_changed()
 
     def _invalidate_flatmap_grid_layers(self) -> None:
-        """Remove render state that belongs to a previous style/cache grid."""
-        self._remove_projection_layer(create=False)
-        self._remove_soma_layer()
-        self._clear_named_region_layers(_REGION_LABELS_LAYER_NAME)
-        self._clear_region_surface_layers()
-        self._clear_region_outline_layers()
-        self._region_labels_layer = None
-        self._reset_flatmap_render_state()
+        """Retire a previous grid without freeing live GPU layers in a Qt signal."""
+        self._defer_flatmap_grid_layer_removal()
+        self._clear_display_axis_annotations()
 
     def _reset_flatmap_render_state(self) -> None:
         """Forget the latest projection without performing any layer mutation."""
@@ -1508,7 +1537,10 @@ class FlatmapProjectionWidget(QWidget):
 
     def _defer_flatmap_grid_layer_removal(self) -> None:
         """Retire a stale grid without deleting live GPU resources inline."""
-        soma_layer = self._cached_soma_layer()
+        soma_layer = self._cached_soma_layer() or self._find_layer_by_name(
+            _SOMA_POINTS_LAYER_NAME,
+            create=False,
+        )
         targets = (
             self._current_flatmap_render_layers() + self._current_cached_region_layers()
         )
@@ -1540,7 +1572,8 @@ class FlatmapProjectionWidget(QWidget):
                     exc_info=True,
                 )
 
-        layers = self._display_layers(create=False)
+        viewer = self._current_display_viewer()
+        layers = getattr(viewer, "layers", None)
 
         def remove_hidden_layers() -> None:
             if layers is None:
@@ -1548,6 +1581,7 @@ class FlatmapProjectionWidget(QWidget):
             for layer in unique_targets:
                 try:
                     if any(existing is layer for existing in layers):
+                        self._make_display_context_current(viewer)
                         layers.remove(layer)
                 except (RuntimeError, ValueError):
                     logger.debug(
@@ -2577,7 +2611,8 @@ class FlatmapProjectionWidget(QWidget):
         self._cancel_cache_btn.setEnabled(False)
 
     def _current_style_key(self) -> str:
-        key = self._style_combo.currentData()
+        combo = getattr(self, "_style_combo", None)
+        key = combo.currentData() if combo is not None else None
         return str(key or "both_shaped")
 
     def _current_style_filename(self) -> str:
@@ -2761,6 +2796,19 @@ class FlatmapProjectionWidget(QWidget):
         )
         plane_mode = self._current_plane_mode()
         region_layers = self._current_cached_region_layers()
+        selected_styles = {
+            self._current_style_key(),
+            self._current_style_filename(),
+        }
+        style_mismatch = any(
+            (getattr(layer, "metadata", {}) or {}).get("flatmap_style")
+            not in {None, "", "precomputed_parquet", *selected_styles}
+            for layer in (
+                render_layers
+                + ([soma_layer] if soma_layer is not None else [])
+                + region_layers
+            )
+        )
         region_mismatch = any(
             (getattr(layer, "metadata", {}) or {}).get("flatmap_plane_mode")
             not in {None, "", plane_mode}
@@ -2779,6 +2827,7 @@ class FlatmapProjectionWidget(QWidget):
         )
         self._flatmap_render_mode_change_pending = bool(
             render_mismatch
+            or style_mismatch
             or soma_mismatch
             or region_mismatch
             or allen_options_mismatch
@@ -5258,6 +5307,7 @@ class FlatmapProjectionWidget(QWidget):
             )
         if layer is not None and layers is not None:
             try:
+                self._make_display_context_current()
                 layers.remove(layer)
             except ValueError:
                 pass
@@ -5688,6 +5738,7 @@ class FlatmapProjectionWidget(QWidget):
         for layer in list(layers):
             if str(getattr(layer, "name", "")).startswith(prefix):
                 try:
+                    self._make_display_context_current()
                     layers.remove(layer)
                 except ValueError:
                     pass
@@ -5904,6 +5955,7 @@ class FlatmapProjectionWidget(QWidget):
             if not self._is_flatmap_render_layer_name(name) or name == except_name:
                 continue
             try:
+                self._make_display_context_current()
                 layers.remove(layer)
             except ValueError:
                 pass
@@ -7099,6 +7151,7 @@ class FlatmapProjectionWidget(QWidget):
         if layers is None:
             return
         try:
+            self._make_display_context_current()
             layers.remove(layer)
         except (ValueError, KeyError, RuntimeError):
             logger.debug(

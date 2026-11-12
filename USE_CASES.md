@@ -26,10 +26,10 @@ Unless a use case says otherwise:
 
 | ID | Capability | Manual status |
 | --- | --- | --- |
-| [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Not run |
-| [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Not run |
-| [UC-003](#uc-003-prepare-a-whole-neuron-parquet-for-flatmap-viewing) | Append bilateral shaped/square flatmap and depth coordinates to a whole Parquet | Not run |
-| [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Passed |
+| [UC-001](#uc-001-download-an-allen-mouse-atlas) | Download and cache a supported Allen Mouse Brain Atlas | Passed |
+| [UC-002](#uc-002-convert-swc-files-to-parquet) | Convert a folder or selected SWC files into one Parquet file | Passed |
+| [UC-003](#uc-003-prepare-a-whole-neuron-parquet-for-flatmap-viewing) | Append bilateral shaped/square flatmap and depth coordinates to a whole Parquet | Passed |
+| [UC-004](#uc-004-build-and-reuse-a-flatmap-region-cache) | Build, reopen, parse, and switch shaped/square region-cache data | Partially run |
 | [UC-005](#uc-005-view-selected-allen-isocortex-layers-as-a-flatmap-projection-or-stack) | View selected Allen-layer node counts as one projection or a compact stack | Not run |
 | [UC-006](#uc-006-inspect-and-query-custom-isocortex-layer-regions) | Inspect and query exact terminal regions grouped by Isocortex layer | Not run |
 | [UC-007](#uc-007-refine-and-save-multiple-cluster-assignments) | Preserve a soma clustering and refine selected neurons with a second method | Not run |
@@ -39,7 +39,7 @@ Unless a use case says otherwise:
 | [UC-011](#uc-011-view-a-depth-free-2d-flatmap-and-per-neuron-vector-traces) | View a plain flatmap with no depth axis as a 2D heatmap or per-neuron vector traces, and place somas in the current render's space | Not run |
 | [UC-012](#uc-012-balance-cortical-depth-against-flat-map-position-when-clustering-somas) | Cluster somas with an isotropic flatmap metric and an explicit cortical-depth weight | Partially run |
 | [UC-013](#uc-013-overlay-cached-brain-regions-on-a-2d-flat-map) | Overlay cached region fills and outlines on depth-free flatmap renders | Not run |
-| [UC-014](#uc-014-control-and-share-region-appearance-across-ccfv3-and-flatmap-views) | Assign, stage, share, save, and restore region colors and visibility across CCFv3 and flatmap overlays | Not run |
+| [UC-014](#uc-014-control-and-share-region-appearance-across-ccfv3-and-flatmap-views) | Assign, stage, share, save, and restore region colors and visibility across CCFv3 and flatmap overlays | Partially run |
 | [UC-015](#uc-015-compare-cluster-assignments-in-an-interactive-board) | Compare flatmap and CCFv3 cluster mappings side by side in a linked grid | Not run |
 | [UC-016](#uc-016-compare-multiple-flatmap-windows-side-by-side) | Compare several independently navigable flatmap viewers side by side | Partially run |
 | [UC-017](#uc-017-resize-the-floating-neuron-viewer-panel) | Increase the Neuron Viewer panel height after detaching it from napari | Not run |
@@ -71,6 +71,12 @@ the packaged atlas archives from its
 [dedicated GIN atlas repository](https://gin.g-node.org/BrainGlobe/atlases).
 The plugin downloads from that BrainGlobe repository rather than directly from
 the Allen Institute during this workflow.
+
+Atlas downloads verify HTTPS using the operating system's certificate store
+through `truststore`, so institution-managed trusted certificates are available
+inside the Pixi environment. Connection failures report the certificate,
+network, or HTTP error. A connection error alone does not establish that the
+remote server is down.
 
 These files are not bundled with the plugin because the volumetric images and
 meshes are large and users may need different resolutions. The plugin needs the
@@ -114,7 +120,9 @@ configuration; see BrainGlobe's
    **Expected:** The plugin starts the download through BrainGlobe. The Atlas
    controls are disabled during the operation, status text identifies the
    current phase, and the progress bar reports download progress before showing
-   that the atlas is being installed in the local cache.
+   that the atlas is being installed in the local cache. If the server does
+   not supply a total size, the progress bar is indeterminate and the status
+   reports received MiB until installation begins.
 5. **Action:** Wait for the download and installation to finish.
    **Expected:** The Atlas controls are enabled again, the progress indicator
    closes, and the status identifies the loaded atlas and its number of
@@ -131,10 +139,25 @@ locally.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: The uncached-atlas warning and confirmation prompt are tracked in
-  `TODO.md`.
+- Status: Passed
+- Last verified: 2026-11-09
+- Last attempted: 2026-11-09
+- Notes: The user confirmed that UC-001 passes manual testing after the native
+  certificate-trust fix. Cached loading of both `allen_mouse_25um` and
+  `allen_mouse_10um` was also explicitly confirmed.
+  During the earlier manual uncached-atlas loading check, the user reported
+  `Atlas: Error - GIN server is down`. The download/install path did not
+  complete on that attempt.
+  Investigation reproduced an underlying `SSLCertVerificationError`
+  (`self-signed certificate in certificate chain`), which BrainGlobe 2.3.0
+  replaced with the generic server-down message. System curl reached GIN with
+  HTTP 200. After switching atlas transport to native certificate trust, a
+  headless fresh download of `allen_mouse_50um_v1.2` succeeded in an isolated
+  temporary cache: 69,141,078 archive bytes, shape `(264, 160, 228)`, 840
+  structures, and 28.4 seconds for download/install/load. Reference and
+  annotation shapes matched; a cached reload succeeded with network access
+  forbidden. The user's existing atlas cache was not modified by this check.
+  The Passed status records the user's subsequent manual confirmation.
 
 ### UC-002: Convert SWC Files to Parquet
 
@@ -155,8 +178,13 @@ produce one Parquet file, but they differ in which SWCs are included:
 | **From Directory...** | Every file with an `.swc` extension, including uppercase variants such as `.SWC`, in the selected folder and all of its subfolders | A folder represents the complete dataset to convert |
 | **From Files...** | Only the files explicitly selected in the multi-file picker; other SWCs in the same folder or its subfolders are not discovered automatically | Only a particular group or subset of SWCs should be converted |
 
-`Resolution (μm)` selects the Allen atlas resolution used to annotate node
-coordinates with brain regions. `Hemisphere alignment` controls whether source
+`Resolution (μm)` is a dropdown offering only `10`, `25`, `50`, and `100`.
+It selects the Allen atlas resolution used to annotate node coordinates with
+brain regions. Each successful atlas load, including startup loading from
+cache, sets the dropdown to the loaded atlas's resolution. Before any atlas
+loads, it defaults to `25`. The user can choose another supported resolution
+for conversion; selecting an atlas without loading it does not change the
+default. `Hemisphere alignment` controls whether source
 coordinates are kept as-is (`None`) or morphologies on the opposite side are
 reflected into a common `Left` or `Right` hemisphere. The atlas resolution and
 the coordinate space of the SWCs must match for region annotations and
@@ -167,15 +195,18 @@ preprocessing onto the same background conversion. **Lookup directory...**
 selects a directory containing `flatmap_both_shaped.nrrd`,
 `flatmap_both_square.nrrd`, and `depth.nrrd`. When enabled, the output is a
 version-3 Parquet that can be rendered without reading the NRRDs again.
+Only nodes covered by the cortical lookup maps can appear in the flatmap;
+noncortical SWCs can convert successfully with no valid projected nodes.
 **Lookup resolution** normally reads the transform from the NRRD headers; enter
 an explicit micrometer value when those headers do not contain a usable
-transform. **Cancel conversion** cooperatively stops either phase and prevents
-a partial output from being published.
+transform. With or without flatmap preprocessing, **Cancel conversion**
+cooperatively stops the operation and prevents a partial output from being
+published. An existing destination is replaced only after successful completion.
 
 **Prerequisites**
 
-- Complete UC-001 for `allen_mouse_25um` so the atlas needed by this test is
-  available locally.
+- Have `allen_mouse_25um` available locally and confirm that it loads from
+  cache in UC-001. A fresh download is unnecessary when it is already cached.
 - Use valid SWC files registered to the Allen CCF in micrometers.
 - To test the optional chained preprocessing, prepare a lookup directory whose
   shaped, square, and depth NRRDs have the same spatial grid and transform.
@@ -200,10 +231,14 @@ a partial output from being published.
    columns**, **Lookup directory...**, `Lookup resolution`, **Cancel
    conversion**, a status area, and a progress indicator that is initially
    hidden.
-2. **Action:** Set `Resolution (μm)` to `25` and `Hemisphere alignment` to
-   `None`.
-   **Expected:** Conversion will use the 25 μm Allen annotation while preserving
-   the SWC coordinates.
+2. **Action:** Load `allen_mouse_25um` through **Atlas**, then inspect
+   `Resolution (μm)` under **Convert SWC to Parquet**. Set `Hemisphere alignment`
+   to `None`. Repeat the resolution-default check when loading another cached
+   supported atlas, then restore `allen_mouse_25um` for conversion.
+   **Expected:** The dropdown automatically matches each loaded atlas and offers
+   only `10`, `25`, `50`, and `100`. After restoring the 25 μm atlas, conversion
+   will use its annotation while preserving the SWC coordinates. A different
+   supported resolution can still be selected explicitly.
 3. **Action:** Click **From Directory...**, select `swc_batch`, and save the
    output as `directory.parquet` when **Save Parquet File** opens.
    **Expected:** The plugin recursively searches the selected folder, discovers
@@ -239,10 +274,27 @@ a partial output from being published.
    square bilateral flatmap columns and shared depth columns. No intermediate
    Parquet remains beside the output.
 10. **Action:** Start the chained conversion once more and cancel while it is
-    running.
+    running. Repeat with **Add bilateral flatmap/depth columns** unchecked.
+    Test both a new destination and an existing output selected for replacement.
     **Expected:** The worker stops, temporary artifacts are removed, any
     existing output remains unchanged, and all conversion controls become
     available again.
+11. **Action:** Uncheck **Add bilateral flatmap/depth columns**, click **From
+    Directory...**, choose an empty directory, and save to `empty.parquet`
+    outside that directory.
+    **Expected:** The status reports `No SWC files found`, no output Parquet is
+    created, and the conversion controls become available again.
+12. **Action:** Prepare a malformed `broken.swc` containing
+    `not_an_id 1 10 20 30 1 -1`. With flatmap preprocessing still unchecked,
+    click **From Files...**, select one valid SWC and `broken.swc`, and save to
+    `mixed.parquet`. Load the output through **SWC Parquet Data**.
+    **Expected:** The completion status reports `Converted 1 file(s), skipped 1`.
+    The output contains only the valid neuron and loads successfully.
+13. **Action:** Click **From Files...**, select only `broken.swc`, and save to
+    `invalid.parquet`.
+    **Expected:** The status reports `No SWC files were successfully processed`,
+    no output Parquet is created, and the conversion controls become available
+    again.
 
 If an individual SWC cannot be parsed, the converter skips it, keeps processing
 the valid files, and includes the skipped count in the completion status. If no
@@ -251,9 +303,58 @@ an error instead of reporting successful conversion.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: None
+- Status: Passed
+- Last verified: 2026-11-09
+- Notes: The user completed the directory-conversion/load check and confirmed
+  that three neurons appeared in the Data table. The test was instructed with
+  `allen_mouse_25um`, conversion resolution `25`, hemisphere alignment `None`,
+  and chained flatmap preprocessing disabled. The instructed output was
+  `/private/tmp/nn-manual-tests-2026-11-09/directory.parquet`.
+  The user also confirmed that **From Files...** converted only the two
+  selected SWCs. The instructed inputs were `cell_a.swc` and `cell_b.swc`,
+  with output
+  `/private/tmp/nn-manual-tests-2026-11-09/selected_files.parquet`.
+  The user confirmed that cancelling the **From Files...** input picker and
+  cancelling **Save Parquet File** both leave conversion idle, create no
+  additional Parquet file, and keep the controls usable.
+  The user confirmed that `directory_flatmap.parquet` loads after the chained
+  conversion. Local inspection found 59,001 nodes across three `file_id` values
+  and the expected version-3 shaped, square, and depth columns. All nodes have
+  invalid flatmap/depth lookup values; their atlas annotations are CP, GPe,
+  int, STR, or PAL. These ingestion fixtures therefore cannot verify a visible
+  cortical flatmap projection. The user confirmed cancellation works with
+  **Add bilateral flatmap/depth columns** enabled. Cancellation with it unchecked
+  initially left a partial output. After the fix to stage plain-conversion
+  output and check cancellation before publishing it, the user manually
+  confirmed that cancelling with the checkbox unchecked leaves no partial
+  output. The user also confirmed that cancelling conversion targeting an
+  existing Parquet leaves the original file unchanged and that it still loads
+  successfully. The user confirmed that selecting the empty directory
+  `/private/tmp/nn-manual-tests-2026-11-09/empty_swc` reports `No SWC files found`,
+  creates no output Parquet, and leaves the conversion controls usable.
+  The user confirmed that selecting `cell_a.swc` and `broken.swc` from
+  `/private/tmp/nn-manual-tests-2026-11-09/mixed_swc` with flatmap preprocessing
+  unchecked reports `Converted 1 file(s), skipped 1` and produces a Parquet
+  that loads with only the valid neuron. The user confirmed that selecting only
+  `broken.swc` reports `No SWC files were successfully processed`, creates no
+  output Parquet, and leaves the conversion controls usable.
+  The user confirmed that the resolution dropdown offers only `10`, `25`,
+  `50`, and `100`, and automatically follows successfully loaded
+  `allen_mouse_10um` and `allen_mouse_25um` atlases.
+  Inputs prepared for the 2026-11-09 manual run at
+  `/private/tmp/nn-manual-tests-2026-11-09/swc_batch/`, using the layout above.
+  `cell_a.swc` and `nested/cell_c.SWC` copy the committed
+  `tests/data/hemisphere/1119749665_17545_3134-X21894-Y19320_reg.swc` fixture;
+  `cell_b.swc` copies its `_reg_right.swc` counterpart. These are controlled
+  ingestion fixtures with three distinct filenames/file IDs, not three
+  biologically distinct neurons. Save outputs in the parent
+  `/private/tmp/nn-manual-tests-2026-11-09/` directory.
+  The chained-preprocessing lookup directory is
+  `/Users/lawrimorejg/repos/atlas-enhancement/data/allen_ccf_25/25-micron/`.
+  All three required NRRDs are present. Their headers record the same spatial
+  grid `(528, 320, 456)`, 25 μm spacing, and origin `(0, 0, 0)`, so use
+  `Lookup resolution: From NRRD header`. This header inspection is setup
+  validation, separate from the user's load confirmation.
 
 ### UC-003: Prepare a Whole Neuron Parquet for Flatmap Viewing
 
@@ -295,28 +396,95 @@ and does not need to load or query the NRRDs.
    It adds `x_flat_shaped`, `y_flat_shaped`, shaped validity/provenance columns,
    matching square columns, and shared `depth_um` validity/provenance columns.
    Its metadata identifies format version 3 and the lookup-set ID.
-4. **Action:** In **Flatmap**, choose **Precomputed Parquet + Cache**, switch
-   between **Both hemispheres, shaped** and **Both hemispheres, square**, and
-   project the same table subset.
+4. **Action:** Restore the same table subset with the Regions query if loading
+   the output cleared it. In **Flatmap**, choose **Precomputed Parquet + Cache**,
+   set **Render** to **2D Heatmap**, switch between **Both hemispheres, shaped**
+   and **Both hemispheres, square**, and click **Project to Flatmap** for each.
    **Expected:** Both styles render from the stored columns on their recorded
    canonical grids. The plugin does not ask for or load the NRRDs.
 5. **Action:** Run **Prepare Whole Parquet...** again, choose the source file as
-   the destination, and decline the replacement confirmation.
+   the destination, and choose **No** in **Replace Source Parquet?**. If the
+   system file dialog first asks whether to replace the existing file, accept
+   that prompt to reach the plugin's separate confirmation.
    **Expected:** Preprocessing does not start and the source is unchanged.
-6. **Action:** Start preprocessing to a new output and cancel it while running.
+6. **Action:** Start preprocessing to a new output and click **Cancel
+   Preparation** while it is running.
    **Expected:** The temporary output is removed and no partial Parquet is
    published. If an output already existed, its previous contents are intact.
-7. **Action:** Select a lookup directory whose files have mismatched grids or
-   transforms.
+7. **Action:** Use **Lookup directory...** to select lookup files with mismatched
+   grids or transforms. Click **Prepare Whole Parquet...** and choose a new
+   output path.
    **Expected:** Validation reports the exact mismatch and does not create an
-   output. A lookup set without a usable NRRD transform requests an explicit
-   resolution instead of silently assuming one.
+   output, and the preparation controls become usable again.
+8. **Action:** Select a lookup directory whose three files share a spatial grid
+   but lack spatial transforms in their NRRD headers. Leave **Lookup resolution**
+   at **From NRRD header**, click **Prepare Whole Parquet...**, and choose a new
+   output path.
+   **Expected:** Validation reports the missing spatial transforms and requests
+   `lookup_resolution_um` explicitly. No output is created, and the preparation
+   controls become usable again.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
-- Notes: None
+- Status: Passed
+- Last verified: 2026-11-09
+- Notes: The user confirmed loading the prepared input in napari and querying
+  `MOs5` with soma-only membership to leave only `17099_004_reg.swc` in the Data
+  table. The user then confirmed loading the prepared output
+  `/private/tmp/nn-manual-tests-2026-11-09/cortical_input_flatmap.parquet`.
+  Local artifact inspection verified all three files and all 156,996 source
+  rows survived preprocessing despite the one-neuron table filter. Every
+  original column, including `manual_test_label`, and all source schema metadata
+  match the input. The output records format version 3 and a nonempty lookup-set
+  ID, with 8,882 projection-valid nodes in each bilateral style. The user
+  confirmed that, after restoring the MOs5 soma query, **Precomputed Parquet +
+  Cache**, **Both hemispheres, shaped**, and **2D Heatmap** produce a visible
+  heatmap in **Neuron Navigator Flatmap** without requesting NRRD files.
+  The user also confirmed that **Both hemispheres, square** renders the same
+  neuron as a visible 2D heatmap without requesting NRRD files. The user
+  confirmed that choosing **No** in **Replace Source Parquet?** prevents
+  preprocessing from starting. A local SHA-256 comparison against the checksum
+  saved before this check verified that `cortical_input_flatmap.parquet` is
+  unchanged. The user confirmed that **Cancel Preparation** stops a running
+  preparation to `cortical_cancelled.parquet`, leaves no output, and makes
+  **Prepare Whole Parquet...** usable again. Local inspection confirmed that
+  the cancelled output is absent and the loaded source checksum is unchanged.
+  The user confirmed that the mismatched lookup set reports the square/depth
+  grid mismatch, creates no output, and leaves controls usable. Local inspection
+  confirmed that `cortical_mismatch.parquet` is absent. The user also confirmed
+  that lookup files without usable header transforms report the missing
+  transforms and request `lookup_resolution_um` explicitly, create no output,
+  and leave controls usable. Local inspection confirmed that
+  `cortical_missing_transform.parquet` is absent. The input
+  `/private/tmp/nn-manual-tests-2026-11-09/cortical_input.parquet` contains
+  156,996 nodes across three complete `file_id` values, selected from the local
+  `isocortex_total_right_brainglobe_flatmap.parquet`: `17099_002_reg.swc`
+  (62,141 nodes), `17099_003_reg.swc` (82,873 nodes), and `17099_004_reg.swc`
+  (11,982 nodes). Their source somas have valid shaped and square projections;
+  the first two are annotated ORBm5 and the third MOs5. All nodes for each file
+  were retained, with unique node IDs, one root, and no dangling parents
+  verified locally. The input omits existing flatmap/depth columns and their
+  metadata, and adds a `manual_test_label` column (`UC003-1`, `UC003-2`,
+  `UC003-3`) plus `manual_test.source_json` schema metadata for preservation
+  checks. Use the same 25 μm lookup directory as UC-002. Save generated outputs
+  beside the input, leaving the full source dataset untouched.
+  For the subset prerequisite, use **Regions** with **Query source: Atlas
+  Regions**, **Search scope: Whole Parquet**, and **Node types: Soma** only.
+  Clear any region selection, select `MOs5`, and click **Find Neurons in Selected
+  Regions**. The user confirmed that the resulting Data table contains only
+  `17099_004_reg.swc`; the loaded Parquet still contains all three files.
+  A synthetic invalid lookup set was prepared at
+  `/private/tmp/nn-manual-tests-2026-11-09/mismatched_lookup`: shaped and depth
+  grids are `(4, 4, 4)`, while the square grid is `(4, 4, 5)`. All headers record
+  25 μm spacing and zero origin. Both local validation and the user-led napari
+  check reject the square/depth grid mismatch.
+  Another synthetic lookup set at
+  `/private/tmp/nn-manual-tests-2026-11-09/headerless_lookup` has matching
+  `(4, 4, 4)` grids with no spatial transforms in its headers. Local validation
+  rejects automatic resolution and accepts an explicit 25 μm fallback. The user
+  confirmed the automatic-resolution rejection in napari; the explicit fallback
+  was checked locally. These tiny synthetic volumes test validation and are not
+  suitable for cortical rendering.
 
 ### UC-004: Build and Reuse a Flatmap Region Cache
 
@@ -345,21 +513,23 @@ projecting meshes, or converting region coordinates while viewing.
 
 **Steps and expected results**
 
-1. **Action:** Open **Flatmap**, choose the lookup directory, click **Build
-   Cache Profile...**, choose a new cache directory, and keep **New profile Y
-   bins** at `256` and **Depth bin** at `25 um`.
+1. **Action:** Open **Flatmap**, choose the lookup directory, set **New profile Y
+   bins** to `256` and the cache section's **Depth bin** to `25 um`, then click
+   **Build Cache Profile...** and choose a new cache directory when prompted.
    **Expected:** The plugin validates the exact atlas/lookup grid match and
    builds one profile containing a shaped/square pair. Progress covers
    annotation scanning, occupancy, surfaces, and outlines. The manifest is
    published only after all referenced arrays are complete.
 2. **Action:** Change **New profile Y bins** to `272`, start a second build,
-   and cancel it while it is running.
+   and click the cache section's **Cancel** button while it is running.
    **Expected:** Temporary files from that build are removed, the prior profile
    remains listed and usable, and the controls are restored.
 3. **Action:** Close and reopen napari, load the version-3 Parquet and a
-   BrainGlobe atlas with the same atlas/version structure catalog, choose
-   **Precomputed Parquet + Cache**, set **Render** to **Heatmap** and its color
-   mode to **Single color**, then click **Project to Flatmap**. After the
+   BrainGlobe atlas with the same atlas/version structure catalog, and query a
+   few neurons into the Data table. Choose **Precomputed Parquet + Cache** and
+   **Both hemispheres, shaped**, set **Render** to **3D Heatmap** and its color
+   mode to **Single color**, and set **Y bins** to `256` and **Depth bin** to
+   `25 um`. Click **Project to Flatmap**. After the
    heatmap appears in **Neuron Navigator Flatmap**, click **Choose Cache
    Directory...** and select the existing cache. Repeat the cache selection
    several times on both Windows and macOS when those systems are available.
@@ -392,20 +562,26 @@ projecting meshes, or converting region coordinates while viewing.
 6. **Action:** Switch between **Both hemispheres, shaped** and **Both
    hemispheres, square** without changing the Parquet or cache directory, then
    project and show the desired cached region layers again.
-   **Expected:** Stale layers from the previous style are cleared. Neurons and
-   newly shown cached region layers use the matching profile grid and remain
-   aligned, including when the queried neurons occupy only a small part of the
-   global flatmap.
+   **Expected:** Choosing a style leaves the current scene visible until
+   **Project to Flatmap** is clicked. Overlay actions are disabled while the
+   controls differ from the displayed scene. Projecting retires the old layers
+   with their owning OpenGL canvas current. Neurons and newly shown cached
+   region layers use the matching profile grid and remain aligned, including
+   when the queried neurons occupy only a small part of the global flatmap.
 7. **Action:** Load a Parquet or atlas that is incompatible with every cached
-   profile, or remove one referenced array and then reopen the cache. When
-   testing a second directory, keep a valid cache and heatmap active first.
+   profile, or prepare a separate cache copy with one referenced array omitted
+   and select it through **Choose Cache Directory...**. Keep a valid cache and
+   heatmap active while testing the invalid candidate directory.
    **Expected:** The plugin reports the exact lookup, atlas, grid, missing-file,
    or validation mismatch. A failed candidate directory does not replace the
    active cache or clear its heatmap. It never starts NRRD recomputation
    automatically.
 8. **Action:** Explicitly choose **Recompute from NRRDs**.
    **Expected:** The legacy runtime lookup workflow becomes available only for
-   this explicit fallback choice.
+   this explicit fallback choice. The status reports
+   `NRRD recomputation is selected explicitly.`, single-hemisphere style
+   choices become available, and the cache grid controls unlock. With
+   **3D Heatmap** selected, **Y bins** and **Depth bin** are editable.
 9. **Action:** After a projection appears, use the flatmap window's
    operating-system close control. Verify that the main layers, order,
    visibility, active selection, dimensions, and camera never changed, then
@@ -425,16 +601,139 @@ projecting meshes, or converting region coordinates while viewing.
     Screen and use the same close control.
     **Expected:** The main window remains fullscreen and responsive. The
     flatmap window opens populated, disappears without a ghost window, and can
-    be reused. Dismissal produces no native crash or operating-system crash
-    report. The macOS hide guard is the only private Qt integration; no
-    slicer, status-thread, viewer-registry, or model cleanup is performed by the
-    plugin.
+    be reused. Closing a fullscreen flatmap first exits Full Screen, keeping its
+    content intact during the native transition, then hides the window and
+    clears its transient layers. Dismissal produces no native crash or
+    operating-system crash report. The plugin retains the macOS hide guard and
+    binds the owning canvas for flatmap layer removal; it performs no private
+    slicer, status-thread, viewer-registry, or model cleanup.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: 2026-07-22 (against the pre-square-bin cache format)
-- Notes: **Re-run required.** On 2026-08-11 the flat map grid moved to per-axis
+- Status: Partially run
+- Last verified: 2026-11-10
+- Notes: **Current rerun:** The user confirmed completing the cache build with
+  256 Y bins and 25 μm depth bins. The resulting cache is at
+  `/private/tmp/nn-manual-tests-2026-11-09/region_profile_cache` (rather than the
+  initially prepared `region_cache_uc004` directory). Local inspection verified
+  manifest format version 2, one `allen_mouse_25um` v1.2 profile with a lookup-set
+  ID matching the UC-003 output, shaped grid `(75, 256, 491)`, square grid
+  `(75, 256, 512)`, and the presence, dtype, and shape of all 26 referenced
+  arrays. The user confirmed cancelling a second build at 272 Y bins. Local
+  comparison against the saved pre-cancellation snapshot verified that the
+  manifest checksum and profile IDs are unchanged: only the original 256-bin
+  profile remains, and its directory is the only entry under `profiles`, with
+  no temporary build directory left behind. The user confirmed reopening napari,
+  loading `allen_mouse_25um` and the UC-003 output, restoring the MOs5 soma query,
+  and rendering a shaped **3D Heatmap** in **Single color** at 256 Y bins and
+  25 μm depth bins before choosing the existing cache directory. The cache opens
+  without freezing either window, the heatmap remains visible, and the 256-bin
+  profile appears. The user confirmed that the active profile locks
+  **Projection Options** to **Y bins: 256**, **Depth bin: 25 μm**, and checked
+  **Exclude depth -1 nodes**; all three controls are disabled and the heatmap
+  remains visible. The user confirmed selecting the Atlas Regions parent
+  `MOs` with **Include child regions** enabled and creating **Flatmap Region
+  Labels**, **Flatmap Region Surfaces**, and **Flatmap Region Outlines** in the
+  flatmap viewer; all three overlays align with the current neuron heatmap.
+  The user confirmed switching to **Custom Regions** with **Whole Parquet**
+  scope, selecting only `MOs2/3` and `MOs5`, and recreating labels, surfaces,
+  and outlines. The overlays represent only those two terminal regions,
+  replace the previous MOs overlays, and remain aligned with the heatmap.
+  **Failed style-switch check:** Selecting **Both hemispheres, square** with
+  the shaped 3D heatmap and Custom Regions labels/surfaces/outlines visible
+  crashed napari before **Project to Flatmap** was clicked. Apple report
+  `python3.12-2026-11-09-164410.ips` records macOS 26.7.1, `EXC_BAD_ACCESS`
+  (`SIGSEGV`) on the main thread in `gleRunVertexSubmitImmediate` during a Qt
+  backing-store repaint. The style-change handler removed live GPU layers
+  synchronously. The first fix hid those layers and queued their removal
+  after the signal handler returned. Validation of that attempt passed 184 related tests and a
+  desktop Qt/VisPy regression test with six style-dropdown changes and rendered
+  labels, surfaces, outlines, and somas. A separate desktop check using this
+  run's actual cortical Parquet, atlas, cache, and MOs2/3/MOs5 selection passed
+  four style changes with complete heatmap/overlay re-rendering each time; the
+  main viewer's layers and camera were unchanged. **Failed retest on
+  2026-11-10:** The user confirmed that choosing the square style still closes
+  napari. Apple report `python3.12-2026-11-10-124254.ips` records the same native
+  OpenGL/backing-store crash. These passing automated checks therefore did not
+  establish a fix.
+  **Current correction:** A full-plugin check using the normal Qt event loop,
+  the production secondary-window factory, and no screenshot readbacks
+  reproduced drawing errors and a native crash. Installed napari 0.9 flushes
+  its layer-deletion GL commands without first making the owning canvas current;
+  another window's context can be active after a popup interaction. Flatmap
+  cleanup now binds the owning VisPy canvas before every immediate or queued
+  removal. Queued cleanup retains the original viewer even if another window
+  becomes active. Style selection keeps the displayed scene intact until an
+  explicit projection, including when the user switches back to the displayed
+  style. This correction passed 190 related tests and a full-plugin desktop
+  regression with six style changes, explicit owning-context assertions, and
+  fatal handling of rendering errors. A strict desktop run with the actual
+  cortical Parquet, atlas, cache, and MOs2/3/MOs5 selection passed four complete
+  style changes and re-projections. The user subsequently confirmed that the
+  crash correction works and that a square flatmap with region overlays is
+  visible. They then reported disabled region buttons after opening a shaped
+  heatmap in a new window while retaining the square window; that regression
+  and its correction are recorded in UC-016. The user has now confirmed that
+  the new-window region actions work while the older window remains open.
+  The crash and new-window regression are manually resolved; the remaining
+  UC-004 checks keep this use case partially run.
+  Repeated cache selection and projection failure/cancellation are pending.
+  The invalid-cache fixture was prepared on 2026-11-10 at
+  `/private/tmp/nn-manual-tests-2026-11-09/invalid_region_cache_uc004`, using the
+  working `region_profile_cache` manifest and hardlinks to its other 25 arrays.
+  The shaped `occupancy-linear-bins.npy` array is omitted. Local validation
+  reports `Cache array is missing`, and the working manifest's SHA-256 is
+  unchanged. The user confirmed that opening this candidate fails while
+  everything else stays unchanged: the active valid cache, visible heatmap,
+  and region overlays remain usable and napari stays responsive. The invalid
+  candidate does not replace the working cache.
+  The user confirmed that explicitly selecting **Recompute from NRRDs** clears
+  the active projection, reports `NRRD recomputation is selected explicitly.`,
+  enables single-hemisphere style choices, and unlocks **Y bins** and **Depth
+  bin** with **3D Heatmap** selected. This verifies the fallback controls;
+  a runtime NRRD projection was not part of this check.
+  An automated pre-check for step 9 detected that native macOS dismissal cleared
+  the retained viewer without first binding its OpenGL canvas when the main
+  window's context was current. The close handler now binds the closing viewer
+  before clearing its layers, including when closing an older comparison
+  window. A strict desktop check using the real UC-003/004 artifacts passed
+  three close/reopen cycles with canvas reuse, restored region overlays, and
+  unchanged main layers. On 2026-11-10 the user confirmed restarting napari,
+  restoring the cached 3D heatmap and regions, and completing three normal
+  close/reopen cycles using the flatmap window's red macOS close control.
+  Each projection reopened populated without a crash or ghost window; the
+  main viewer's layers, visibility, selection, and camera stayed unchanged.
+  The user also confirmed three close/reopen cycles with the main napari
+  window in macOS Full Screen. The main window stayed fullscreen and
+  responsive, and each flatmap reopened populated without a crash or ghost
+  window. **Failed fullscreen-flatmap dismissal on 2026-11-10:** Closing the
+  flatmap while it is itself fullscreen removes its content but leaves a gray
+  ghost window. The ghost remains until **Project to Flatmap** populates the
+  viewer again. At that point step 10 remained incomplete despite the passing
+  main-window fullscreen cycles. The projection failure/cancellation checks in
+  step 9 also remain pending.
+  **Fullscreen dismissal correction:** A desktop reproduction using the actual
+  cortical Parquet and cache confirmed that Qt reported the window hidden
+  while AppKit still reported it visible after the fullscreen exit animation.
+  The close guard now waits for a spontaneous window-state change confirming
+  the native exit, then queues the hide and owning-canvas layer cleanup after
+  the notification handler returns. A local requested-state change is ignored;
+  repeated close actions do not restart the transition, and reusing the viewer
+  cancels a pending dismissal. The real-data desktop check passed three native
+  fullscreen close/reopen cycles with restored region overlays, unchanged main
+  layers, and no remaining visible native window or fullscreen state. Validation
+  also passed 21 window-management tests and the desktop regression covering six
+  style switches, three normal close/reopen cycles, and three native fullscreen
+  close/reopen cycles. On 2026-11-10 the user confirmed that the corrected
+  fullscreen-flatmap dismissal works on manual retest. The flatmap closes
+  without the gray ghost window and can be populated again with **Project to
+  Flatmap**. Step 10 now passes manual testing.
+  Setup for the 2026-11-09 rerun uses the UC-003
+  `cortical_input_flatmap.parquet` output, `allen_mouse_25um`, and the real lookup
+  directory `/Users/lawrimorejg/repos/atlas-enhancement/data/allen_ccf_25/25-micron/`
+  with **Lookup resolution: From NRRD header**. Restore this directory after the
+  synthetic invalid-lookup checks in UC-003.
+  **Historical rerun requirement:** On 2026-08-11 the flat map grid moved to per-axis
   bin counts: the control is now **Y bins** and the X count is derived from each
   style's aspect ratio, so one profile holds a 512-wide square grid and a
   491-wide shaped grid instead of two 256x256 grids. The region-cache manifest
@@ -455,8 +754,9 @@ projecting meshes, or converting region coordinates while viewing.
   **Partial manual result:** The revised retain-and-reuse guard was stable when
   reached through the macOS operating-system close control, but invoking the
   same dismissal from the plugin button still caused a native crash. The plugin
-  button and its callback were therefore removed; the complete repeated and
-  fullscreen sequence in steps 9 and 10 remains `Not run`.
+  button and its callback were therefore removed. At that time, the complete
+  repeated and fullscreen sequence in steps 9 and 10 had not been run; the
+  current rerun above records subsequent verification.
   **Superseded historical result:** macOS 26.5.1 arm64 with napari 0.6.6 and
   PyQt6 6.8.1 passed cache build/reopen/parse, shaped/square switching, and the
   former detached-window close/fullscreen checks without a crash or retained
@@ -1780,18 +2080,37 @@ visible at a given 2D pixel; the 3D layer continues to preserve depth planes.
     **Expected:** The new project restores its applied palette and newly created
     overlays use it. The older project opens normally with an empty palette and
     atlas-color defaults.
+12. **Action:** In a fresh session, load the atlas, select `MOp` in **Atlas
+    Regions**, and click **Export Applied Palette...** before changing any
+    appearance settings. Then select the `MOp` row in **Region Appearance**,
+    click **Assign Distinct Colors**, and try exporting again before clicking
+    **Apply**. Finally, click **Apply** and export.
+    **Expected:** Both export attempts before **Apply** show a warning that
+    there are no applied overrides to export and explain that staged edits
+    must be applied first. No Save dialog opens, no file is created or
+    overwritten, and staged edits remain available. After **Apply**, the Save
+    dialog opens normally and the exported JSON contains a nonempty
+    `overrides` object for `MOp`.
 
 **Manual verification**
 
-- Status: Not run
-- Last verified: Never
+- Status: Partially run — empty palette export warnings and palette export/import
+  checks passed; the full appearance workflow remains unverified.
+- Last verified: 2026-11-10
 - Notes: Added on 2026-08-20. Automated tests cover ancestry resolution,
   explicit atlas-color breaks, transparent combined-label entries, per-region
   mesh and flatmap styling, retained descendant IDs and inherited/overridden
   colors in a 2D Labels layer, in-place restyling without cache/NRRD work,
   palette JSON and project round trips, import filtering, and old-project
-  compatibility. Qt-dependent interaction and visual co-registration still
-  require this manual napari run.
+  compatibility. Updated on 2026-11-10 to cover empty palette export warnings;
+  automated tests also check that empty exports cannot create or overwrite a
+  file. On 2026-11-10, the user confirmed the manual palette checks: empty and
+  staged-only palettes show a warning without opening the Save dialog; staged
+  colors remain available; applying enables an export with nonempty overrides;
+  removing the only override with **Inherit** and **Apply** restores the warning;
+  and importing the saved palette with **Merge** and **Apply** restores its color
+  and permits export again. Full CCFv3/flatmap visual checks, import edge cases,
+  and project round trips still require manual verification.
 
 ### UC-015: Compare Cluster Assignments in an Interactive Board
 
@@ -1952,6 +2271,8 @@ viewer.
 
 - Load a neuron Parquet with valid flatmap coordinates. For **Precomputed
   Parquet + Cache**, use a version-3 Parquet produced by UC-003.
+- For the cached-region checks, load a matching atlas and the compatible region
+  cache from UC-004, and select the regions to overlay.
 - Select enough neurons or clusters to make two visibly different projections.
 - Start from a clean napari session with the **Neuron Navigator** plugin open.
 
@@ -1963,7 +2284,7 @@ viewer.
    The main napari viewer is unchanged.
 2. **Action:** Change the selection, style, or render mode, then click **Project
    in New Window**.
-   **Expected:** Changing **Render** does not remove or alter the first viewer.
+   **Expected:** Changing **Render** or **Style** does not remove or alter the first viewer.
    A second populated viewer named **Neuron Navigator Flatmap 2** appears after
    projection. The first viewer, all of its layers, and its camera remain
    unchanged, so the two projections can be arranged side by side.
@@ -1975,6 +2296,11 @@ viewer.
    heatmaps, and the gamma action changes only the selected layers in that
    window. Returning to a window restores its heatmap selection. **Add Soma**
    and cached region actions continue to change only the newest flatmap viewer.
+   With a compatible cache and **3D Heatmap**, **Show Region Labels**, **Show
+   Region Surfaces**, and **Show Region Outlines** become enabled automatically
+   when the new projection finishes, even if older viewers use another style.
+   Check this by keeping a square window with overlays open, choosing shaped,
+   clicking **Project in New Window**, and adding the same regions there.
 4. **Action:** Move the plane slider and camera independently in both flatmap
    viewers.
    **Expected:** Each viewer keeps its own dimensions and camera. Its on-canvas
@@ -1992,9 +2318,27 @@ viewer.
 
 **Manual verification**
 
-- Status: Partially run — render-mode transition and native stability confirmed
-- Last verified: 2026-09-08
-- Notes: Manually confirmed on a MacBook Pro with an M3 chip that changing
+- Status: Partially run
+- Last verified: 2026-11-10
+- Notes: **Resolved regression:** The user confirmed that the style-switch crash
+  is resolved, but initially keeping a square heatmap and its region overlays
+  open, switching to shaped, and choosing **Project in New Window** left the new
+  window's region buttons disabled. They only recovered after closing every
+  flatmap window and changing styles again. Rendering reset the pending-settings
+  flag without refreshing the cached-region buttons, leaving their previous
+  disabled state on screen. The render-ready and viewer-release paths now
+  recompute compatibility for the current viewer and refresh those controls.
+  Regression tests cover both style directions in 2D and 3D and verify that
+  older viewers remain untouched. An automated desktop check with the actual
+  UC-003/004 artifacts opened square, shaped, and square in three simultaneous
+  windows, clicked all three region actions in each, and verified preserved
+  layers, visibility, style metadata, and cameras in older viewers. After the
+  correction, the user confirmed that the same square-to-shaped new-window
+  workflow works: the region buttons enable after rendering and overlays can
+  be added while the older square window stays open. All 194 related tests and
+  the desktop style-change regression passed. The remaining UC-016 checks have
+  not been manually verified in this rerun.
+  **Earlier result (2026-09-08):** Manually confirmed on a MacBook Pro with an M3 chip that changing
   **Render** after creating the initial flatmap window no longer shuts down
   napari. Automated tests cover retaining two populated viewers, active-viewer
   scoping, per-window heatmap selection and gamma changes, independent plane

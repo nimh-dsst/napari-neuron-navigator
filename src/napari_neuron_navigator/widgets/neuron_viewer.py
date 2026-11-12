@@ -98,6 +98,7 @@ from ..project_io import (
     read_enhanced_parquet_metadata,
     save_project_bundle,
 )
+from ..region import RESOLUTIONS
 from ..region_appearance import RegionAppearanceStore
 from ..swc import NodeType
 from .analysis_tab import AnalysisTabWidget
@@ -163,11 +164,52 @@ class _FlatmapWindowCloseGuard(QObject):
         super().__init__(parent)
         self._viewer = viewer
         self._callback = callback
+        self._pending_fullscreen_hide = None
+        self._fullscreen_hide_queued = False
+
+    def hide_after_fullscreen_exit(self, qt_window, callback) -> bool:
+        """Keep the canvas visible until AppKit finishes leaving its Space."""
+        if self._pending_fullscreen_hide is not None:
+            return True
+        if not qt_window.isFullScreen():
+            return False
+        self._pending_fullscreen_hide = callback
+        try:
+            qt_window.showNormal()
+        except RuntimeError:
+            self.cancel_pending_hide()
+            raise
+        return True
+
+    def cancel_pending_hide(self) -> None:
+        """Do not dismiss a viewer that has since been reused or released."""
+        self._pending_fullscreen_hide = None
+        self._fullscreen_hide_queued = False
 
     def eventFilter(self, watched, event) -> bool:
-        if event.type() != QEvent.Type.Close:
-            return False
-        return bool(self._callback(self._viewer, watched, event))
+        if event.type() == QEvent.Type.Close:
+            return bool(self._callback(self._viewer, watched, event))
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and self._pending_fullscreen_hide is not None
+            and not self._fullscreen_hide_queued
+            and event.spontaneous()
+            and not watched.isFullScreen()
+        ):
+            # showNormal() changes Qt's requested state synchronously. Only
+            # the spontaneous event confirms that AppKit finished the native
+            # transition. Hiding sooner leaves a visible, empty native window.
+            callback = self._pending_fullscreen_hide
+            self._fullscreen_hide_queued = True
+
+            def finish_hide():
+                if self._pending_fullscreen_hide is callback:
+                    self.cancel_pending_hide()
+                    callback()
+
+            # Leave the native notification handler before removing GPU layers.
+            QTimer.singleShot(0, finish_hide)
+        return False
 
 
 _SomaSelectionKey = tuple[int, frozenset[int], tuple[object, ...]]
@@ -871,6 +913,7 @@ class NeuronViewerWidget(QWidget):
         if record is None:
             return
         qt_window, guard = record
+        guard.cancel_pending_hide()
         remove = getattr(qt_window, "removeEventFilter", None)
         if callable(remove):
             try:
@@ -909,8 +952,6 @@ class NeuronViewerWidget(QWidget):
             else getattr(getattr(viewer, "window", None), "_qt_window", None)
         )
         hide = getattr(qt_window, "hide", None)
-        is_fullscreen = getattr(qt_window, "isFullScreen", None)
-        show_normal = getattr(qt_window, "showNormal", None)
         if not callable(hide):
             logger.warning(
                 "The macOS flatmap viewer could not be hidden safely; "
@@ -918,10 +959,10 @@ class NeuronViewerWidget(QWidget):
             )
             return False
         try:
-            if callable(is_fullscreen) and callable(show_normal) and is_fullscreen():
-                # Return the hidden window to a normal state so the next
-                # public Viewer.show() does not reopen it in a stale Space.
-                show_normal()
+            if record is not None and record[1].hide_after_fullscreen_exit(
+                qt_window, lambda: self._hide_flatmap_macos_viewer(viewer)
+            ):
+                return True
             hide()
         except RuntimeError:
             return False
@@ -947,6 +988,9 @@ class NeuronViewerWidget(QWidget):
         clear = getattr(layers, "clear", None)
         if callable(clear):
             try:
+                bind_context = getattr(flatmap_tab, "_make_display_context_current", None)
+                if callable(bind_context):
+                    bind_context(viewer)
                 clear()
             except (AttributeError, RuntimeError):
                 logger.debug(
@@ -1076,6 +1120,12 @@ class NeuronViewerWidget(QWidget):
         self._retire_closed_flatmap_viewers()
         viewer = getattr(self, "_flatmap_viewer", None)
         if viewer is not None and not new_window:
+            if create:
+                record = (getattr(self, "_flatmap_close_guards", None) or {}).get(
+                    id(viewer)
+                )
+                if record is not None:
+                    record[1].cancel_pending_hide()
             return viewer
         if not create:
             return viewer
@@ -1801,10 +1851,16 @@ class NeuronViewerWidget(QWidget):
 
         res_row = QHBoxLayout()
         res_row.addWidget(QLabel("Resolution (μm):"))
-        self._convert_resolution_spin = QSpinBox()
-        self._convert_resolution_spin.setRange(10, 100)
-        self._convert_resolution_spin.setValue(25)
-        res_row.addWidget(self._convert_resolution_spin)
+        self._convert_resolution_combo = QComboBox()
+        for resolution in RESOLUTIONS:
+            self._convert_resolution_combo.addItem(str(resolution), resolution)
+        self._convert_resolution_combo.setCurrentText("25")
+        self._convert_resolution_combo.setToolTip(
+            "Atlas voxel size used to assign brain regions to SWC nodes. "
+            "Defaults to the loaded atlas resolution."
+        )
+        self._sync_conversion_resolution_to_atlas()
+        res_row.addWidget(self._convert_resolution_combo)
         convert_layout.addLayout(res_row)
 
         hemisphere_row = QHBoxLayout()
@@ -3876,9 +3932,29 @@ class NeuronViewerWidget(QWidget):
         self._update_mask_sigma_units_label()
         self._update_point_import_controls()
 
+    def _sync_conversion_resolution_to_atlas(self) -> None:
+        """Default SWC annotation resolution to the successfully loaded atlas."""
+        combo = getattr(self, "_convert_resolution_combo", None)
+        atlas = getattr(self, "_atlas", None)
+        if combo is None or atlas is None:
+            return
+        try:
+            resolution = np.asarray(atlas.resolution, dtype=float)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if resolution.shape != (3,):
+            return
+        for supported in RESOLUTIONS:
+            if np.allclose(resolution, supported):
+                index = combo.findData(supported)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                return
+
     def _apply_loaded_atlas(self, atlas, atlas_name: str) -> None:
         """Store a loaded atlas and refresh atlas-dependent UI."""
         self._atlas = atlas
+        self._sync_conversion_resolution_to_atlas()
 
         selectors = []
         for attr_name in (
@@ -10726,7 +10802,7 @@ class NeuronViewerWidget(QWidget):
         for name in (
             "_convert_dir_btn",
             "_convert_files_btn",
-            "_convert_resolution_spin",
+            "_convert_resolution_combo",
             "_convert_hemisphere_combo",
             "_convert_add_flatmap_cb",
             "_convert_lookup_dir_btn",
@@ -10927,9 +11003,11 @@ class NeuronViewerWidget(QWidget):
             show_warning("An SWC conversion is already running.")
             return
 
-        resolution = self._convert_resolution_spin.value()
+        resolution = int(self._convert_resolution_combo.currentData())
         hemisphere = self._convert_hemisphere_combo.currentData()
-        atlas_name = self._atlas_combo.currentText()
+        atlas_name = str(
+            getattr(self._atlas, "atlas_name", "") or self._atlas_combo.currentText()
+        )
         add_flatmaps_control = getattr(self, "_convert_add_flatmap_cb", None)
         add_flatmaps = bool(
             add_flatmaps_control is not None and add_flatmaps_control.isChecked()

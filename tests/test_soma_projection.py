@@ -124,6 +124,18 @@ class _FakeQEvent:
 
     class Type:
         Close = 6
+        WindowStateChange = 10
+
+
+class _WindowStateEvent:
+    def __init__(self, *, spontaneous: bool) -> None:
+        self._spontaneous = spontaneous
+
+    def type(self):
+        return _FakeQEvent.Type.WindowStateChange
+
+    def spontaneous(self):
+        return self._spontaneous
 
 
 class _FakeWidget:
@@ -539,6 +551,12 @@ class _DummyMutableComboBox:
         if self.current_index < 0 or self.current_index >= len(self.items):
             return None
         return self.items[self.current_index][1]
+
+    def findData(self, data) -> int:
+        return next(
+            (index for index, (_text, value) in enumerate(self.items) if value == data),
+            -1,
+        )
 
     def currentText(self) -> str:
         if self.current_index < 0 or self.current_index >= len(self.items):
@@ -1299,6 +1317,41 @@ def test_macos_close_hides_clears_and_retains_viewer(
     assert widget._flatmap_close_guards == {id(viewer): (qt_window, guard)}
 
 
+@pytest.mark.parametrize("close_active", [False, True])
+def test_macos_close_binds_the_hidden_viewers_canvas(monkeypatch, close_active) -> None:
+    method_globals = NeuronViewerWidget._close_flatmap_viewer.__globals__
+    monkeypatch.setitem(method_globals, "_IS_MACOS", True)
+    widget = _flatmap_window_widget()
+    closing = _FlatmapViewer(title="closing", ndisplay=3, show=False)
+    other = _FlatmapViewer(title="other", ndisplay=3, show=False)
+    widget._flatmap_viewers = [closing, other]
+    widget._flatmap_viewer = closing if close_active else other
+    widget._flatmap_viewer_pending_show = False
+    current_context = [other]
+
+    def bind_context(viewer):
+        assert viewer is closing
+        assert closing.window._qt_window.hidden
+        current_context[0] = viewer
+
+    class ContextCheckingLayers(list):
+        def clear(self):
+            assert current_context[0] is closing
+            super().clear()
+
+    widget._flatmap_tab._make_display_context_current = bind_context
+    closing.layers = ContextCheckingLayers([_scene_layer("closing", flatmap=True)])
+    other_layer = _scene_layer("other", flatmap=True)
+    other.layers.append(other_layer)
+
+    assert widget._hide_flatmap_macos_viewer(closing)
+
+    assert closing.layers == []
+    assert closing.close_calls == 0
+    assert other.layers == [other_layer]
+    assert widget._flatmap_viewer is (closing if close_active else other)
+
+
 def test_macos_window_close_event_uses_the_same_hide_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1385,8 +1438,10 @@ def test_macos_close_event_can_hide_an_older_comparison_window(
     assert widget._flatmap_viewer_pending_show is False
 
 
-def test_macos_fullscreen_close_exits_fullscreen_before_hiding(
+@pytest.mark.parametrize("close_active", [False, True])
+def test_macos_fullscreen_close_waits_for_native_exit_before_hiding(
     monkeypatch: pytest.MonkeyPatch,
+    close_active: bool,
 ) -> None:
     method_globals = NeuronViewerWidget._close_flatmap_viewer.__globals__
     monkeypatch.setitem(method_globals, "_IS_MACOS", True)
@@ -1396,19 +1451,84 @@ def test_macos_fullscreen_close_exits_fullscreen_before_hiding(
         ndisplay=3,
         show=False,
     )
-    widget._flatmap_viewer = viewer
+    other = _FlatmapViewer(title="other", ndisplay=3, show=False)
+    widget._flatmap_viewers = [viewer, other]
+    widget._flatmap_viewer = viewer if close_active else other
     widget._flatmap_viewer_pending_show = False
     widget._install_flatmap_macos_close_guard(viewer)
     qt_window = viewer.window._qt_window
+    guard = qt_window.installed_filters[0]
     qt_window.fullscreen = True
+    layer = _scene_layer("flatmap", flatmap=True)
+    viewer.layers.append(layer)
+    queued = []
+    monkeypatch.setattr(
+        _FakeQTimer, "singleShot", lambda _delay, callback: queued.append(callback)
+    )
 
-    assert widget._close_flatmap_viewer() is True
+    assert widget._hide_flatmap_macos_viewer(viewer) is True
 
     assert qt_window.show_normal_calls == 1
     assert qt_window.fullscreen is False
+    assert qt_window.hidden is False
+    assert viewer.layers == [layer]
+    assert widget._flatmap_tab.released == []
+    # The local state change caused by showNormal is too early to hide.
+    assert not guard.eventFilter(qt_window, _WindowStateEvent(spontaneous=False))
+    assert queued == []
+    # Repeated close actions during the animation do not restart it.
+    assert widget._hide_flatmap_macos_viewer(viewer) is True
+    assert qt_window.show_normal_calls == 1
+    # Native exit can produce multiple state changes. Finish once, outside
+    # AppKit's notification handler, and only then release GPU layers.
+    assert not guard.eventFilter(qt_window, _WindowStateEvent(spontaneous=True))
+    assert not guard.eventFilter(qt_window, _WindowStateEvent(spontaneous=True))
+    assert len(queued) == 1
+    assert viewer.layers == [layer]
+    queued[0]()
     assert qt_window.hidden is True
+    assert viewer.layers == []
+    assert widget._flatmap_tab.released == [viewer]
     assert viewer.close_calls == 0
-    assert widget._flatmap_viewer is viewer
+    assert widget._flatmap_viewer is (viewer if close_active else other)
+    assert widget._flatmap_viewer_pending_show is close_active
+
+
+@pytest.mark.parametrize("native_exit_queued", [False, True])
+def test_reusing_fullscreen_flatmap_cancels_its_pending_dismissal(
+    monkeypatch: pytest.MonkeyPatch,
+    native_exit_queued: bool,
+) -> None:
+    monkeypatch.setitem(
+        NeuronViewerWidget._hide_flatmap_macos_viewer.__globals__, "_IS_MACOS", True
+    )
+    widget = _flatmap_window_widget()
+    viewer = _FlatmapViewer(title="flatmap", ndisplay=3, show=False)
+    widget._flatmap_viewer = viewer
+    widget._install_flatmap_macos_close_guard(viewer)
+    qt_window = viewer.window._qt_window
+    guard = qt_window.installed_filters[0]
+    qt_window.fullscreen = True
+    layer = _scene_layer("flatmap", flatmap=True)
+    viewer.layers.append(layer)
+    queued = []
+    monkeypatch.setattr(
+        _FakeQTimer, "singleShot", lambda _delay, callback: queued.append(callback)
+    )
+
+    assert widget._hide_flatmap_macos_viewer(viewer)
+    if native_exit_queued:
+        guard.eventFilter(qt_window, _WindowStateEvent(spontaneous=True))
+    # A new projection owns this viewer now. Neither a late native event nor
+    # an already queued hide may clear its replacement content.
+    assert widget._get_or_create_flatmap_viewer(create=True) is viewer
+    guard.eventFilter(qt_window, _WindowStateEvent(spontaneous=True))
+    for callback in queued:
+        callback()
+
+    assert not qt_window.hidden
+    assert viewer.layers == [layer]
+    assert widget._flatmap_tab.released == []
 
 
 def test_macos_widget_teardown_never_closes_a_visible_flatmap_viewer(
@@ -1598,6 +1718,69 @@ def test_data_tab_offers_all_supported_atlas_resolutions() -> None:
         "allen_mouse_50um",
         "allen_mouse_100um",
     )
+
+
+@pytest.mark.parametrize("resolution", [10, 25, 50, 100])
+def test_conversion_resolution_defaults_to_loaded_atlas(resolution):
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    widget._convert_resolution_combo = _DummyMutableComboBox()
+    for supported in (10, 25, 50, 100):
+        widget._convert_resolution_combo.addItem(str(supported), supported)
+    widget._atlas = types.SimpleNamespace(resolution=(resolution,) * 3)
+    # A choice in the atlas selector has not necessarily been loaded yet.
+    widget._atlas_combo = _DummyComboBox("allen_mouse_25um")
+
+    widget._sync_conversion_resolution_to_atlas()
+
+    assert widget._convert_resolution_combo.currentData() == resolution
+
+
+def test_conversion_resolution_preserves_choice_without_loaded_atlas():
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    widget._convert_resolution_combo = _DummyMutableComboBox()
+    widget._convert_resolution_combo.addItem("50", 50)
+    widget._atlas = None
+
+    widget._sync_conversion_resolution_to_atlas()
+
+    assert widget._convert_resolution_combo.currentData() == 50
+
+
+@pytest.mark.parametrize("resolution", [10, 25])
+def test_conversion_resolution_reaches_worker_and_uses_loaded_atlas(
+    monkeypatch, resolution
+):
+    worker_factory = MagicMock()
+    fake_workers = types.ModuleType("napari_neuron_navigator.workers")
+    fake_workers.ConvertWorker = worker_factory
+    monkeypatch.setitem(sys.modules, "napari_neuron_navigator.workers", fake_workers)
+    thread = MagicMock()
+    monkeypatch.setitem(
+        NeuronViewerWidget._start_conversion.__globals__, "QThread", lambda: thread
+    )
+    widget = NeuronViewerWidget.__new__(NeuronViewerWidget)
+    widget._atlas = types.SimpleNamespace(
+        atlas_name="allen_mouse_25um", resolution=(25, 25, 25)
+    )
+    widget._atlas_combo = _DummyComboBox("allen_mouse_100um")
+    widget._convert_resolution_combo = _DummyMutableComboBox()
+    widget._convert_resolution_combo.addItem(str(resolution), resolution)
+    widget._convert_hemisphere_combo = types.SimpleNamespace(
+        currentData=lambda: None, setEnabled=lambda _enabled: None
+    )
+    widget._convert_progress = _DummyProgressBar()
+    widget._convert_status_label = _DummyStatusLabel()
+
+    widget._start_conversion(["cell_a.swc"], "output.parquet", source_mode="files")
+
+    assert worker_factory.call_args.args[2] == resolution
+    assert worker_factory.call_args.kwargs["atlas_name"] == "allen_mouse_25um"
+    assert worker_factory.call_args.kwargs["cached_atlas"] is widget._atlas
+    assert worker_factory.call_args.kwargs["use_cached_annotation"] is (
+        resolution == 25
+    )
+    assert widget._convert_resolution_combo.enabled is False
+    thread.start.assert_called_once()
 
 
 def test_selected_neurons_starts_with_adaptive_height_toggle() -> None:

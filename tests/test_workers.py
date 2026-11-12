@@ -11,6 +11,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
+import pytest
 
 from napari_neuron_navigator.analysis.clustering import (
     ClusterExclusionRule,
@@ -256,9 +258,11 @@ def test_atlas_load_worker_reports_cached_load(monkeypatch, tmp_path):
     assert errors == []
 
 
+@pytest.mark.parametrize("unknown_total", [False, True])
 def test_atlas_load_worker_reports_cache_miss_and_download_progress(
     monkeypatch,
     tmp_path,
+    unknown_total,
 ):
     """Cache misses should show download destination and byte progress."""
     workers = _import_workers_module()
@@ -270,8 +274,9 @@ def test_atlas_load_worker_reports_cache_miss_and_download_progress(
 
     def fake_load(atlas_name, **kwargs):
         calls.append((atlas_name, kwargs))
-        kwargs["fn_update"](25, 100)
-        kwargs["fn_update"](100, 100)
+        mib = 1024 * 1024
+        kwargs["fn_update"](25 * mib, 0 if unknown_total else 100 * mib)
+        kwargs["fn_update"](100 * mib, 100 * mib)
         return atlas
 
     monkeypatch.setattr(workers, "load_brainglobe_atlas", fake_load)
@@ -298,27 +303,35 @@ def test_atlas_load_worker_reports_cache_miss_and_download_progress(
         for status in statuses
     )
     assert any("Installing allen_mouse_25um" in status for status in statuses)
-    assert (0, 100, 25) in progress
+    if unknown_total:
+        assert any("25.0 MiB received" in status for status in statuses)
+    else:
+        assert (0, 100, 25) in progress
     assert (0, 100, 100) in progress
     assert (0, 0, 0) in progress
     assert finished == [atlas]
     assert errors == []
 
 
-def test_load_brainglobe_atlas_disables_latest_check(monkeypatch, tmp_path):
-    """BrainGlobe loads should avoid the remote latest-version check."""
+def test_load_brainglobe_atlas_uses_cache_without_network(monkeypatch, tmp_path):
+    """An existing cache must bypass every remote check and download."""
     workers = _import_workers_module()
+    import napari_neuron_navigator.atlas_download as downloads
+
     calls = []
     atlas = object()
+    atlas_dir = tmp_path / "allen_mouse_25um_v1.2"
+    atlas_dir.mkdir()
 
-    class FakeBrainGlobeAtlas:
-        def __new__(cls, *args, **kwargs):
-            calls.append((args, kwargs))
-            return atlas
+    def load_cached(name, directory):
+        calls.append((name, directory))
+        return atlas
 
-    fake_module = types.ModuleType("brainglobe_atlasapi")
-    fake_module.BrainGlobeAtlas = FakeBrainGlobeAtlas
-    monkeypatch.setitem(sys.modules, "brainglobe_atlasapi", fake_module)
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("Cached atlases must load offline")
+
+    monkeypatch.setattr(workers, "load_cached_brainglobe_atlas", load_cached)
+    monkeypatch.setattr(downloads, "download_brainglobe_atlas", unexpected_download)
 
     result = workers.load_brainglobe_atlas(
         "allen_mouse_25um",
@@ -329,15 +342,47 @@ def test_load_brainglobe_atlas_disables_latest_check(monkeypatch, tmp_path):
     )
 
     assert result is atlas
+    assert calls == [("allen_mouse_25um", atlas_dir)]
+
+
+def test_load_brainglobe_atlas_downloads_missing_cache(monkeypatch, tmp_path):
+    workers = _import_workers_module()
+    import napari_neuron_navigator.atlas_download as downloads
+
+    atlas_dir = tmp_path / "allen_mouse_50um_v1.2"
+    atlas = object()
+    calls = []
+
+    def progress(*_args):
+        pass
+
+    def download(name, **kwargs):
+        calls.append((name, kwargs))
+        return atlas_dir
+
+    def load_cached(name, directory):
+        assert name == "allen_mouse_50um"
+        assert directory == atlas_dir
+        return atlas
+
+    monkeypatch.setattr(downloads, "download_brainglobe_atlas", download)
+    monkeypatch.setattr(workers, "load_cached_brainglobe_atlas", load_cached)
+    assert (
+        workers.load_brainglobe_atlas(
+            "allen_mouse_50um",
+            brainglobe_dir=tmp_path,
+            interm_download_dir=tmp_path / "downloads",
+            fn_update=progress,
+        )
+        is atlas
+    )
     assert calls == [
         (
-            ("allen_mouse_25um",),
+            "allen_mouse_50um",
             {
                 "brainglobe_dir": tmp_path,
-                "interm_download_dir": tmp_path,
-                "check_latest": False,
-                "config_dir": tmp_path / "config.conf",
-                "fn_update": calls[0][1]["fn_update"],
+                "interm_download_dir": tmp_path / "downloads",
+                "fn_update": progress,
             },
         )
     ]
@@ -444,6 +489,7 @@ def test_convert_worker_uses_batch_conversion_with_alignment(monkeypatch, tmp_pa
         calls["resolution"] = resolution
         calls["n_workers"] = n_workers
         progress_callback("Processing a.swc...", 0, 2)
+        Path(output_path).write_bytes(b"converted")
         return BatchParquetConversionSummary(
             discovered_files=2,
             processed_files=2,
@@ -479,7 +525,9 @@ def test_convert_worker_uses_batch_conversion_with_alignment(monkeypatch, tmp_pa
     worker.run()
 
     assert [Path(p).name for p in calls["input_path"]] == ["a.swc", "b.swc"]
-    assert Path(calls["output_path"]) == output_path
+    assert Path(calls["output_path"]).parent == output_path.parent
+    assert not Path(calls["output_path"]).exists()
+    assert output_path.read_bytes() == b"converted"
     assert calls["recursive"] is False
     assert calls["hemisphere"] == "right"
     assert calls["atlas_name"] == "allen_mouse_10um"
@@ -517,6 +565,7 @@ def test_convert_worker_passes_cached_atlas_inputs(monkeypatch, tmp_path):
         calls["annotation_volume"] = annotation_volume
         calls["region_lookup"] = region_lookup
         progress_callback("Processing a.swc...", 0, 1)
+        Path(output_path).write_bytes(b"converted")
         return BatchParquetConversionSummary(
             discovered_files=1,
             processed_files=1,
@@ -548,6 +597,154 @@ def test_convert_worker_passes_cached_atlas_inputs(monkeypatch, tmp_path):
     assert calls["region_lookup"][5]["acronym"] == "CR"
     assert not errors
     assert finished[0][1].processed_files == 1
+
+
+@pytest.fixture
+def conversion_swc_paths(tmp_path):
+    paths = [tmp_path / "a.swc", tmp_path / "b.swc"]
+    for path in paths:
+        path.write_text("1 1 10 20 30 5 -1\n2 3 11 21 31 1 1\n")
+    return paths
+
+
+@pytest.mark.parametrize("add_flatmaps", [False, True])
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("cancel_phase", ["during_write", "after_conversion"])
+def test_convert_worker_cancel_discards_partial_output(
+    monkeypatch,
+    tmp_path,
+    conversion_swc_paths,
+    add_flatmaps,
+    existing_output,
+    cancel_phase,
+):
+    """Cancel a real Parquet writer without publishing or replacing a dataset."""
+    import napari_neuron_navigator.parquet as parquet_module
+
+    workers = _import_workers_module()
+    output = tmp_path / "neurons.parquet"
+    original_bytes = b"previous complete dataset"
+    if existing_output:
+        output.write_bytes(original_bytes)
+    worker = workers.ConvertWorker(
+        conversion_swc_paths,
+        str(output),
+        cached_atlas=_FakeCachedAtlas(),
+        use_cached_annotation=True,
+        flatmap_lookup_dir=tmp_path / "lookups" if add_flatmaps else None,
+    )
+    real_batch = parquet_module.batch_convert_swc_to_parquet
+    real_write = parquet_module._write_table_batch
+    written_paths: list[Path] = []
+
+    def write_then_cancel(writer, path, tables, **kwargs):
+        writer = real_write(writer, path, tables, **kwargs)
+        written_paths.append(Path(path))
+        if cancel_phase == "during_write":
+            worker.cancel()
+        return writer
+
+    def convert_then_cancel(source, destination, **kwargs):
+        summary = real_batch(source, destination, batch_size=1, **kwargs)
+        if cancel_phase == "after_conversion":
+            worker.cancel()
+        return summary
+
+    monkeypatch.setattr(parquet_module, "_write_table_batch", write_then_cancel)
+    monkeypatch.setattr(
+        parquet_module, "batch_convert_swc_to_parquet", convert_then_cancel
+    )
+    finished: list[object] = []
+    errors: list[str] = []
+    progress: list[str] = []
+    worker.finished.connect(lambda *args: finished.append(args))
+    worker.error.connect(errors.append)
+    worker.progress.connect(lambda message, *_args: progress.append(message))
+
+    worker.run()
+
+    assert written_paths
+    assert finished == []
+    assert errors == ["SWC conversion cancelled."]
+    if existing_output:
+        assert output.read_bytes() == original_bytes
+    else:
+        assert not output.exists()
+    assert not list(tmp_path.glob(".neurons.swc-*.parquet"))
+    if cancel_phase == "during_write":
+        assert len([message for message in progress if message.startswith("Processing ")]) == 1
+
+
+@pytest.mark.parametrize("late_cancel", [False, True])
+def test_convert_worker_publishes_complete_plain_output(
+    tmp_path, conversion_swc_paths, late_cancel
+):
+    """A completed dataset replaces the destination; a later cancel stays successful."""
+    workers = _import_workers_module()
+    output = tmp_path / "neurons.parquet"
+    output.write_bytes(b"previous complete dataset")
+    worker = workers.ConvertWorker(
+        conversion_swc_paths,
+        str(output),
+        cached_atlas=_FakeCachedAtlas(),
+        use_cached_annotation=True,
+    )
+    finished: list[object] = []
+    errors: list[str] = []
+    worker.finished.connect(lambda *args: finished.append(args))
+    worker.error.connect(errors.append)
+
+    def cancel_after_publication(message, *_args):
+        if late_cancel and message == "Finalizing Parquet...":
+            worker.cancel()
+
+    worker.progress.connect(cancel_after_publication)
+
+    worker.run()
+
+    table = pq.read_table(output)
+    assert table.num_rows == 4
+    assert set(table.column("file_id").to_pylist()) == {"a.swc", "b.swc"}
+    assert errors == []
+    assert len(finished) == 1
+    assert finished[0][0] == str(output)
+    assert finished[0][1].processed_files == 2
+    assert not list(tmp_path.glob(".neurons.swc-*.parquet"))
+
+
+@pytest.mark.parametrize("existing_output", [False, True])
+def test_convert_worker_failure_discards_partial_plain_output(
+    monkeypatch, tmp_path, existing_output
+):
+    workers = _import_workers_module()
+    output = tmp_path / "neurons.parquet"
+    original_bytes = b"previous complete dataset"
+    if existing_output:
+        output.write_bytes(original_bytes)
+
+    def fail_after_writing(_source, destination, **_kwargs):
+        Path(destination).write_bytes(b"partial dataset")
+        raise OSError("Disk full")
+
+    monkeypatch.setattr(
+        "napari_neuron_navigator.parquet.batch_convert_swc_to_parquet",
+        fail_after_writing,
+    )
+    worker = workers.ConvertWorker(["a.swc"], str(output))
+    errors: list[str] = []
+    finished: list[object] = []
+    worker.error.connect(errors.append)
+    worker.finished.connect(lambda *args: finished.append(args))
+
+    worker.run()
+
+    assert finished == []
+    assert errors == ["Disk full"]
+    if existing_output:
+        assert output.read_bytes() == original_bytes
+    else:
+        assert not output.exists()
+    assert not list(tmp_path.glob(".neurons.swc-*.parquet"))
 
 
 def test_convert_worker_chains_atomic_v3_flatmap_preparation(
@@ -767,6 +964,7 @@ def test_convert_worker_accepts_directory_source(monkeypatch, tmp_path):
         calls["resolution"] = resolution
         calls["n_workers"] = n_workers
         progress_callback("Discovered 3 SWC file(s).", 0, 3)
+        Path(output_path).write_bytes(b"converted")
         return BatchParquetConversionSummary(
             discovered_files=3,
             processed_files=3,
@@ -801,7 +999,9 @@ def test_convert_worker_accepts_directory_source(monkeypatch, tmp_path):
     worker.run()
 
     assert calls["input_path"] == input_dir
-    assert Path(calls["output_path"]) == output_path
+    assert Path(calls["output_path"]).parent == output_path.parent
+    assert not Path(calls["output_path"]).exists()
+    assert output_path.read_bytes() == b"converted"
     assert calls["recursive"] is True
     assert calls["annotate_regions"] is True
     assert calls["n_workers"] == 1
@@ -832,6 +1032,7 @@ def test_convert_worker_logs_files_source_timing(monkeypatch, tmp_path, caplog):
         calls["recursive"] = recursive
         calls["source_mode"] = source_mode
         progress_callback("Processing a.swc...", 0, 2)
+        Path(output_path).write_bytes(b"converted")
         return BatchParquetConversionSummary(
             discovered_files=2,
             processed_files=2,
@@ -880,6 +1081,7 @@ def test_convert_worker_logs_directory_source_timing(monkeypatch, tmp_path, capl
         calls["recursive"] = recursive
         calls["source_mode"] = source_mode
         progress_callback("Discovered 26 SWC file(s).", 0, 26)
+        Path(output_path).write_bytes(b"converted")
         return BatchParquetConversionSummary(
             discovered_files=26,
             processed_files=26,

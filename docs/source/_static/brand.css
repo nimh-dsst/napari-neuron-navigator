@@ -1,0 +1,10 @@
+/* Shared documentation palette with Chronoxiv's PyData theme. */
+html[data-theme="light"] {
+  --pst-color-primary: #1f6f8b;
+  --pst-color-secondary: #e07a2f;
+}
+
+html[data-theme="dark"] {
+  --pst-color-primary: #5fb3d1;
+  --pst-color-secondary: #f0a060;
+}

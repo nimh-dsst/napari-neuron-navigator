@@ -127,17 +127,24 @@ def load_brainglobe_atlas(
     config_dir: str | Path | None = None,
     fn_update=None,
 ):
-    """Load a BrainGlobe atlas with explicit dirs and no latest-version check."""
-    from brainglobe_atlasapi import BrainGlobeAtlas
+    """Load offline from cache, or download using native certificate trust."""
+    from .atlas_download import download_brainglobe_atlas
 
-    return BrainGlobeAtlas(
-        atlas_name,
-        brainglobe_dir=brainglobe_dir,
-        interm_download_dir=interm_download_dir,
-        check_latest=False,
-        config_dir=config_dir,
-        fn_update=fn_update,
+    root = Path(brainglobe_dir).expanduser()
+    candidates = sorted(path for path in root.glob(f"{atlas_name}_v*") if path.is_dir())
+    if len(candidates) > 1:
+        raise FileExistsError(f"Multiple versions of atlas {atlas_name} in {root}")
+    atlas_dir = (
+        candidates[0]
+        if candidates
+        else download_brainglobe_atlas(
+            atlas_name,
+            brainglobe_dir=root,
+            interm_download_dir=Path(interm_download_dir).expanduser(),
+            fn_update=fn_update,
+        )
     )
+    return load_cached_brainglobe_atlas(atlas_name, atlas_dir)
 
 
 def load_cached_brainglobe_atlas(atlas_name: str, atlas_dir: str | Path):
@@ -210,6 +217,10 @@ class AtlasLoadWorker(QObject):
         """Forward BrainGlobe byte progress as a 0-100 progress value."""
         if total <= 0:
             self._emit_busy_progress()
+            self.status.emit(
+                f"Atlas: Downloading {self._atlas_name} "
+                f"({completed / (1024 * 1024):.1f} MiB received)..."
+            )
             return
 
         percentage = int(min(max(completed / total, 0.0), 1.0) * 100)
@@ -1297,18 +1308,16 @@ class ConvertWorker(QObject):
                 0,
                 total,
             )
-            conversion_output_path = self._output_path
-            if self._flatmap_lookup_dir is not None:
-                self._output_path.parent.mkdir(parents=True, exist_ok=True)
-                descriptor, staged_name = tempfile.mkstemp(
-                    prefix=f".{self._output_path.stem}.swc-",
-                    suffix=".parquet",
-                    dir=self._output_path.parent,
-                )
-                os.close(descriptor)
-                staged_conversion_path = Path(staged_name)
-                staged_conversion_path.unlink()
-                conversion_output_path = staged_conversion_path
+            self._output_path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, staged_name = tempfile.mkstemp(
+                prefix=f".{self._output_path.stem}.swc-",
+                suffix=".parquet",
+                dir=self._output_path.parent,
+            )
+            os.close(descriptor)
+            staged_conversion_path = Path(staged_name)
+            staged_conversion_path.unlink()
+            conversion_output_path = staged_conversion_path
             batch_start = perf_counter()
             cached_midline, cached_annotation_volume, cached_region_lookup = (
                 self._cached_atlas_conversion_inputs()
@@ -1359,9 +1368,9 @@ class ConvertWorker(QObject):
             if summary.processed_files == 0:
                 raise ValueError("No SWC files were successfully processed")
 
+            self._check_cancelled()
             total = summary.discovered_files
             if self._flatmap_lookup_dir is not None:
-                self._check_cancelled()
                 from .flatmap_parquet import augment_neuron_parquet_with_flatmaps
                 from .flatmap_profiles import discover_flatmap_lookup_set
 
@@ -1386,9 +1395,10 @@ class ConvertWorker(QObject):
                     progress_callback=self._report_progress,
                     cancel_callback=lambda: self._cancel_requested,
                 )
-            # Returning from the final writer is the atomic publication
-            # boundary. A later cancel request must not turn success into an
-            # error after the destination already exists.
+            else:
+                os.replace(conversion_output_path, self._output_path)
+            # The destination has now been atomically published. A later cancel
+            # request must not turn success into an error.
             self.progress.emit("Finalizing Parquet...", total, total)
             logger.debug(
                 "swc_conversion_worker_finished source_mode=%s elapsed_s=%.6f",
