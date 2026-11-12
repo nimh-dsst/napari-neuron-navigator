@@ -252,6 +252,7 @@ _ATLAS_REFERENCE_PROMPT = (
 )
 _DEFAULT_NEURON_RGBA = (0.5, 0.5, 0.5, 1.0)
 _CLUSTER_FILTER_ALL = "all"
+_CLUSTER_FILTER_ALL_CLUSTERS = "all_clusters"
 _CLUSTER_FILTER_UNCLUSTERED = "unclustered"
 _CLUSTER_FILTER_CLUSTER = "cluster"
 _MANUAL_HEATMAP_ALL_LABEL = "All Manual Heatmaps"
@@ -447,7 +448,7 @@ class _ClusterFilterComboBox(QComboBox):
         line_edit = self.lineEdit()
         if line_edit is not None:
             line_edit.setReadOnly(True)
-            line_edit.setText("All")
+            line_edit.setText("All neurons")
         view = self.view()
         viewport = view.viewport()
         if viewport is not None:
@@ -469,12 +470,19 @@ class _ClusterFilterComboBox(QComboBox):
         self._available_cluster_ids = available_ids
         self._has_unclustered_option = bool(include_unclustered)
 
-        selected = selection or ClusterFilterSelection()
+        selected = (
+            selection
+            if selection is not None
+            else ClusterFilterSelection(all_clusters=True)
+        )
         if not selected.is_all:
             selected = ClusterFilterSelection(
                 selected.cluster_ids & available_set,
                 selected.include_unclustered and include_unclustered,
+                all_clusters=selected.all_clusters,
             )
+            if selected.is_all:
+                selected = ClusterFilterSelection(all_clusters=True)
 
         signals_blocked = self.blockSignals(True)
         self._updating = True
@@ -482,9 +490,14 @@ class _ClusterFilterComboBox(QComboBox):
             self.clear()
             all_checked = selected.is_all
             self._add_check_item(
-                "All",
+                "All neurons",
                 _CLUSTER_FILTER_ALL,
                 checked=all_checked,
+            )
+            self._add_check_item(
+                "All clusters",
+                _CLUSTER_FILTER_ALL_CLUSTERS,
+                checked=selected.all_clusters,
             )
             if include_unclustered:
                 self._add_check_item(
@@ -496,7 +509,7 @@ class _ClusterFilterComboBox(QComboBox):
                 self._add_check_item(
                     f"Cluster {cluster_id}",
                     (_CLUSTER_FILTER_CLUSTER, cluster_id),
-                    checked=cluster_id in selected.cluster_ids,
+                    checked=selected.all_clusters or cluster_id in selected.cluster_ids,
                 )
             self.setCurrentIndex(0)
         finally:
@@ -509,11 +522,16 @@ class _ClusterFilterComboBox(QComboBox):
         """Return the currently checked cluster filter."""
         cluster_ids: set[int] = set()
         include_unclustered = False
+        all_clusters = False
         for index in range(self.count()):
             if not self._item_checked(index):
                 continue
             data = self.itemData(index)
-            if data == _CLUSTER_FILTER_UNCLUSTERED:
+            if data == _CLUSTER_FILTER_ALL:
+                return ClusterFilterSelection()
+            if data == _CLUSTER_FILTER_ALL_CLUSTERS:
+                all_clusters = True
+            elif data == _CLUSTER_FILTER_UNCLUSTERED:
                 include_unclustered = True
             elif (
                 isinstance(data, tuple)
@@ -521,7 +539,11 @@ class _ClusterFilterComboBox(QComboBox):
                 and data[0] == _CLUSTER_FILTER_CLUSTER
             ):
                 cluster_ids.add(int(data[1]))
-        return ClusterFilterSelection(frozenset(cluster_ids), include_unclustered)
+        return ClusterFilterSelection(
+            frozenset() if all_clusters else frozenset(cluster_ids),
+            include_unclustered,
+            all_clusters=all_clusters,
+        )
 
     def _add_check_item(
         self,
@@ -594,11 +616,30 @@ class _ClusterFilterComboBox(QComboBox):
         data = self.itemData(index)
         if data == _CLUSTER_FILTER_ALL:
             self._check_all_only()
+        elif data == _CLUSTER_FILTER_ALL_CLUSTERS:
+            checked = not self._item_checked(index)
+            self._set_item_checked(0, False)
+            for row in range(1, self.count()):
+                if self.itemData(row) != _CLUSTER_FILTER_UNCLUSTERED:
+                    self._set_item_checked(row, checked)
+            if not self._has_specific_selection():
+                self._check_all_clusters()
         else:
             self._set_item_checked(index, not self._item_checked(index))
             self._set_item_checked(0, False)
+            if isinstance(data, tuple) and data[0] == _CLUSTER_FILTER_CLUSTER:
+                cluster_rows = [
+                    row
+                    for row in range(self.count())
+                    if isinstance(self.itemData(row), tuple)
+                ]
+                self._set_item_checked(
+                    self.findData(_CLUSTER_FILTER_ALL_CLUSTERS),
+                    bool(cluster_rows)
+                    and all(self._item_checked(row) for row in cluster_rows),
+                )
             if not self._has_specific_selection():
-                self._set_item_checked(0, True)
+                self._check_all_clusters()
 
         self.setCurrentIndex(0)
         self._update_display_text()
@@ -615,6 +656,14 @@ class _ClusterFilterComboBox(QComboBox):
         for index in range(self.count()):
             self._set_item_checked(index, index == 0)
 
+    def _check_all_clusters(self) -> None:
+        for index in range(self.count()):
+            self._set_item_checked(
+                index,
+                self.itemData(index)
+                not in (_CLUSTER_FILTER_ALL, _CLUSTER_FILTER_UNCLUSTERED),
+            )
+
     def _has_specific_selection(self) -> bool:
         return any(self._item_checked(index) for index in range(1, self.count()))
 
@@ -629,7 +678,13 @@ class _ClusterFilterComboBox(QComboBox):
     @staticmethod
     def _selection_text(selection: ClusterFilterSelection) -> str:
         if selection.is_all:
-            return "All"
+            return "All neurons"
+        if selection.all_clusters:
+            return (
+                "All clusters + Unclustered"
+                if selection.include_unclustered
+                else "All clusters"
+            )
 
         cluster_ids = sorted(selection.cluster_ids)
         if not cluster_ids:
@@ -688,6 +743,10 @@ class NeuronViewerWidget(QWidget):
             self._saved_table_state: dict[str, object] = {}
             self._current_project_path: Path | None = None
             self._cluster_assignment_store = ClusterAssignmentStore()
+            self._cluster_filter_by_assignment: dict[
+                str | None, ClusterFilterSelection
+            ] = {}
+            self._cluster_filter_assignment_id: str | None = None
             self._comparison_board_state = ComparisonBoardState()
             self._comparison_data_provider = None
             self._comparison_window = None
@@ -3210,6 +3269,15 @@ class NeuronViewerWidget(QWidget):
     def _load_enhanced_table_state(self, filepath: str | Path) -> int:
         """Read enhanced parquet table metadata without making it mandatory."""
         self._saved_table_state = {}
+        self._cluster_filter_by_assignment = {}
+        self._cluster_filter_assignment_id = None
+        filter_setter = getattr(
+            getattr(self, "_cluster_filter_combo", None), "set_cluster_options", None
+        )
+        if callable(filter_setter):
+            filter_setter(
+                [], include_unclustered=False, selection=ClusterFilterSelection()
+            )
         self._cluster_assignment_store.load_state({})
         refresh_assignments = getattr(
             self,
@@ -8874,6 +8942,8 @@ class NeuronViewerWidget(QWidget):
         data = self._cluster_filter_combo.itemData(idx)
         if data is None:
             return ClusterFilterSelection()
+        if data == _CLUSTER_FILTER_ALL_CLUSTERS:
+            return ClusterFilterSelection(all_clusters=True)
         try:
             return ClusterFilterSelection(frozenset({int(data)}))
         except (TypeError, ValueError):
@@ -9006,13 +9076,36 @@ class NeuronViewerWidget(QWidget):
     def _selected_cluster_from_filter(self) -> int | None:
         """Return the single selected cluster, if the filter is single-cluster."""
         selection = self._selected_cluster_filter()
-        if selection.include_unclustered or len(selection.cluster_ids) != 1:
+        if (
+            selection.all_clusters
+            or selection.include_unclustered
+            or len(selection.cluster_ids) != 1
+        ):
             return None
         return next(iter(selection.cluster_ids))
 
     def _refresh_cluster_filter_controls(self) -> None:
-        """Refresh cluster filter dropdown options from table cluster assignments."""
+        """Restore the active column's filter without borrowing another run's labels."""
         previous = self._selected_cluster_filter()
+        store = getattr(self, "_cluster_assignment_store", None)
+        assignment_id = None if store is None else store.active_assignment_id
+        selections = getattr(self, "_cluster_filter_by_assignment", None)
+        if selections is None:
+            selections = self._cluster_filter_by_assignment = {}
+            self._cluster_filter_assignment_id = assignment_id
+        selections[self._cluster_filter_assignment_id] = previous
+        if store is not None:
+            valid_ids = {
+                None,
+                *(assignment.assignment_id for assignment in store.sets()),
+            }
+            for stale_id in selections.keys() - valid_ids:
+                selections.pop(stale_id)
+        previous = selections.get(
+            assignment_id,
+            ClusterFilterSelection(all_clusters=assignment_id is not None),
+        )
+        self._cluster_filter_assignment_id = assignment_id
         cluster_ids = self._neuron_table.available_cluster_ids()
         has_unclustered = False
         unclustered_getter = getattr(
@@ -9032,8 +9125,10 @@ class NeuronViewerWidget(QWidget):
             self._cluster_filter_combo.blockSignals(True)
             try:
                 self._cluster_filter_combo.clear()
-                self._cluster_filter_combo.addItem("All")
+                self._cluster_filter_combo.addItem("All neurons")
                 self._cluster_filter_combo.setItemData(0, None)
+                self._cluster_filter_combo.addItem("All clusters")
+                self._cluster_filter_combo.setItemData(1, _CLUSTER_FILTER_ALL_CLUSTERS)
                 for cluster_id in cluster_ids:
                     self._cluster_filter_combo.addItem(f"Cluster {cluster_id}")
                     self._cluster_filter_combo.setItemData(
@@ -9048,7 +9143,9 @@ class NeuronViewerWidget(QWidget):
                     idx = self._cluster_filter_combo.findData(selected_cluster)
                     self._cluster_filter_combo.setCurrentIndex(idx if idx >= 0 else 0)
                 else:
-                    self._cluster_filter_combo.setCurrentIndex(0)
+                    self._cluster_filter_combo.setCurrentIndex(
+                        1 if previous.all_clusters else 0
+                    )
             finally:
                 self._cluster_filter_combo.blockSignals(False)
 
@@ -9057,6 +9154,9 @@ class NeuronViewerWidget(QWidget):
     def _on_cluster_filter_changed(self, _selection: object = None) -> None:
         """Filter table rows by selected cluster groups and update action buttons."""
         selection = self._selected_cluster_filter()
+        selections = getattr(self, "_cluster_filter_by_assignment", None)
+        if selections is not None:
+            selections[self._cluster_filter_assignment_id] = selection
         self._apply_neuron_table_filters()
 
         has_filter = not selection.is_all

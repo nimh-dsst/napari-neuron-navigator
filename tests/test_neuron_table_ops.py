@@ -191,6 +191,29 @@ def test_cluster_filter_selection_all_rows_when_empty() -> None:
     assert matches == {"n1": True, "n2": True}
 
 
+@pytest.mark.parametrize("include_unclustered", [False, True])
+def test_all_clusters_matches_every_assigned_file_id(include_unclustered) -> None:
+    selection = ClusterFilterSelection(
+        all_clusters=True, include_unclustered=include_unclustered
+    )
+    clusters = {"subject-a/shared": 0, "subject-b/shared": 10, "unassigned": None}
+    expected = {
+        "subject-a/shared": True,
+        "subject-b/shared": True,
+        "unassigned": include_unclustered,
+    }
+    assert not selection.is_all
+    assert cluster_filter_matches(clusters, selection) == expected
+    assert visibility_for_selected_cluster(clusters, selection) == expected
+
+
+def test_all_clusters_with_no_assignments_does_not_fall_back_to_all_neurons() -> None:
+    assert cluster_filter_matches(
+        {"subject-a/shared": None, "subject-b/shared": None},
+        ClusterFilterSelection(all_clusters=True),
+    ) == {"subject-a/shared": False, "subject-b/shared": False}
+
+
 def test_visibility_for_selected_cluster_and_show_all() -> None:
     """Visibility map hides non-cluster members and restores all for None."""
     cluster_by_file = {"n1": 1, "n2": 2, "n3": 1}

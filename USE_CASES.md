@@ -1026,6 +1026,11 @@ selected and clustered by voxel correlation without removing other neurons or
 overwriting the soma assignments. One assignment is active at a time for
 filtering, colors, flatmap grouping, and Analysis heatmaps. Projects and
 Enhanced Parquet exports preserve every assignment and its run provenance.
+The Data **Cluster** filter remembers a separate selection for each assignment
+column during the session. A new column defaults to **All clusters**, which
+shows only neurons assigned in that column. **All neurons** includes unassigned
+rows; **Unclustered** can be selected separately or alongside cluster choices.
+Other Label, Tag, Set, and Manual Heatmap filters continue to intersect.
 
 **Prerequisites**
 
@@ -1071,13 +1076,21 @@ Enhanced Parquet exports preserve every assignment and its run provenance.
    selected cohort and its parent Soma Location assignment and cluster. The
    first run uses the selected region and dilation; the repeated run reports
    **All regions (optional)** and uses all finite CCFv3 nodes for those rows.
+   The new active column's **Cluster** filter defaults to **All clusters**,
+   showing every assigned member of the new run rather than reusing the soma
+   column's earlier filter. Blank rows remain in the table but are hidden by
+   this default filter.
 4. **Action:** Switch **Cluster assignment** between **Soma Location 1** and
    **Voxel Correlation 1**.
    **Expected:** The active header, cluster filter, summary, sort target,
    rendered colors, flatmap cluster grouping, and Analysis heatmap cluster
    choices all follow the selected assignment. Switching does not modify any
    saved labels. The voxel assignment's blank rows appear under
-   **Unclustered**.
+   **Unclustered**, or together with assigned rows under **All neurons**.
+   Returning to the soma assignment restores its earlier cluster selection;
+   returning to the voxel assignment restores that column's independent
+   selection. Cluster numbers shared by the two columns never transfer a
+   filter between them.
 5. **Action:** Click **Rename...**, give the voxel assignment a descriptive
    name, and confirm. Then create another selected-row run.
    **Expected:** The table header and selector use the new display name while
@@ -1122,12 +1135,33 @@ Enhanced Parquet exports preserve every assignment and its run provenance.
     Cancelling starts no clustering worker and creates no assignment; the
     repeated confirmation starts the snapshotted run without changing its
     cohort or region filter.
+11. **Action:** In **Data**, choose **Cluster: All clusters** and inspect its
+    checked cluster entries. Uncheck one cluster, restore **All clusters**, and
+    check **Unclustered** alongside it. Then choose **All neurons**. Make
+    different multi-selections in two assignment columns, switch between them,
+    and rename one column. Repeat after deleting the active column or loading
+    a different Parquet/project. If available, test a column with no assigned
+    neurons.
+    **Expected:** All clusters checks every assigned cluster and excludes blank
+    rows unless Unclustered is also checked. Unchecking a cluster restricts
+    the filter to the remaining checked groups. All neurons shows the entire
+    cohort permitted by the other filters. Each column restores its own
+    selection even when renamed. Deleting a column discards only its filter
+    history; the next active column restores its own selection. Loading a
+    source resets this temporary filter history, so restored assignments start
+    at All clusters. A column with no assigned neurons shows zero rows under
+    All clusters and never silently broadens to unassigned neurons. Before any
+    clustering is available, All neurons keeps the unclustered table visible.
 
 **Manual verification**
 
 - Status: Not run
 - Last verified: Never
-- Notes: None
+- Updated: 2026-11-12 (per-column cluster filters and All clusters default)
+- Notes: Automated checks cover assigned-only filtering, independent column
+  selections, the clustering-completion path, mouse multi-selection, renaming,
+  deletion, source reload, empty assignments, and combined row filters. The
+  complete manual workflow has not been exercised in napari.
 
 ### UC-008: Create Combined, Individual, and Enhanced Neuron Heatmaps
 

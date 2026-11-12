@@ -734,7 +734,10 @@ class _DummyClusterFilterCombo:
             self.selection = ClusterFilterSelection(
                 selection.cluster_ids & available_ids,
                 selection.include_unclustered and include_unclustered,
+                all_clusters=selection.all_clusters,
             )
+            if self.selection.is_all:
+                self.selection = ClusterFilterSelection(all_clusters=True)
 
 
 class _DummyStack:
@@ -4421,7 +4424,7 @@ def test_refresh_cluster_filter_controls_preserves_valid_multi_selection() -> No
     assert widget._show_all_btn.enabled is True
 
 
-def test_refresh_cluster_filter_controls_falls_back_to_all_when_invalid() -> None:
+def test_refresh_cluster_filter_controls_falls_back_to_all_clusters_when_invalid() -> None:
     combo = _DummyClusterFilterCombo(
         ClusterFilterSelection({9}, include_unclustered=True)
     )
@@ -4443,10 +4446,10 @@ def test_refresh_cluster_filter_controls_falls_back_to_all_when_invalid() -> Non
 
     NeuronViewerWidget._refresh_cluster_filter_controls(widget)
 
-    assert combo.selection == ClusterFilterSelection()
-    assert applied == [ClusterFilterSelection()]
-    assert widget._hide_others_btn.enabled is False
-    assert widget._recolor_cluster_btn.enabled is False
+    assert combo.selection == ClusterFilterSelection(all_clusters=True)
+    assert applied == [ClusterFilterSelection(all_clusters=True)]
+    assert widget._hide_others_btn.enabled is True
+    assert widget._recolor_cluster_btn.enabled is True
     assert widget._show_all_btn.enabled is True
 
 

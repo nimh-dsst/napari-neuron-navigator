@@ -17,6 +17,7 @@ class ClusterFilterSelection:
 
     cluster_ids: frozenset[int] = field(default_factory=frozenset)
     include_unclustered: bool = False
+    all_clusters: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -29,11 +30,16 @@ class ClusterFilterSelection:
             "include_unclustered",
             bool(self.include_unclustered),
         )
+        object.__setattr__(self, "all_clusters", bool(self.all_clusters))
 
     @property
     def is_all(self) -> bool:
         """Return whether this selection represents all table rows."""
-        return not self.cluster_ids and not self.include_unclustered
+        return (
+            not self.cluster_ids
+            and not self.include_unclustered
+            and not self.all_clusters
+        )
 
 
 @dataclass(frozen=True)
@@ -149,7 +155,10 @@ def cluster_filter_matches(
     return {
         file_id: (
             (cluster is None and selected.include_unclustered)
-            or (cluster is not None and int(cluster) in selected.cluster_ids)
+            or (
+                cluster is not None
+                and (selected.all_clusters or int(cluster) in selected.cluster_ids)
+            )
         )
         for file_id, cluster in cluster_by_file.items()
     }
