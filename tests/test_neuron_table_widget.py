@@ -502,6 +502,211 @@ def test_typed_tags_refresh_filters_when_selection_stops_matching(real_table_wid
     assert _shown(widget) == {"unannotated"}
 
 
+def _cluster_tag_fixture(real_table_widget):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget = _filtered_fixture(real_table_widget)
+    widget.append_file_ids([7])
+    earlier = widget._assignment_store.add(
+        name="Soma Location 1",
+        assignments={
+            "subject-a/shared": 1,
+            "subject-b/shared": 2,
+            "subject-c/shared": 2,
+            7: 10,
+            "outside-table": 1,
+        },
+        input_file_ids=[*widget.file_ids(), "outside-table"],
+        unassigned_neuron_ids=["unannotated"],
+    )
+    active = widget._assignment_store.add(
+        name="Voxel Correlation 1",
+        assignments={
+            "subject-a/shared": 2,
+            "subject-b/shared": 1,
+            "subject-c/shared": 1,
+            7: 0,
+        },
+        input_file_ids=widget.file_ids(),
+        unassigned_neuron_ids=["unannotated"],
+    )
+    widget.refresh_cluster_assignments()
+    widget.cluster_tag_column_combo.setCurrentIndex(
+        widget.cluster_tag_column_combo.findData(active.assignment_id)
+    )
+    QApplication.processEvents()
+    return module, widget, earlier, active
+
+
+@pytest.mark.parametrize(
+    ("scope", "affected"),
+    [
+        ("displayed", {"subject-a/shared", "subject-b/shared"}),
+        ("selected", {"subject-b/shared"}),
+        ("table", {"subject-a/shared", "subject-b/shared", "subject-c/shared"}),
+    ],
+)
+def test_cluster_tags_use_chosen_column_and_scope_preserving_metadata(
+    real_table_widget, scope, affected
+):
+    from qtpy.QtWidgets import QApplication
+
+    module, widget, earlier, active = _cluster_tag_fixture(real_table_widget)
+    widget.cluster_tag_column_combo.setCurrentIndex(
+        widget.cluster_tag_column_combo.findData(earlier.assignment_id)
+    )
+    widget.cluster_tag_selector.set_selection(("Cluster 1", "Cluster 2"))
+    assert widget.cluster_tag_selector.currentText() == "2 clusters selected"
+    assert (
+        widget.cluster_tag_selector.itemText(
+            widget.cluster_tag_selector.findData("Cluster 1")
+        )
+        == "Cluster 1 (1)"
+    )
+    widget._table.sortByColumn(module.COL_TAGS, module.Qt.DescendingOrder)
+    QApplication.processEvents()
+    widget.select_file_ids(["subject-b/shared", "subject-c/shared"])
+    widget.label_filter_combo.setCurrentIndex(
+        widget.label_filter_combo.findData("Rank 2")
+    )
+    widget.tag_action_scope.setCurrentIndex(widget.tag_action_scope.findData(scope))
+    before = {fid: entry.to_state() for fid, entry in widget._entries.items()}
+    before_assignments = widget._assignment_store.to_state()
+    selected = widget.get_selected_file_ids()
+    notifications = []
+    widget.state_changed.connect(lambda: notifications.append(True))
+
+    for _ in range(2):
+        assert widget.tag_cluster_members_button.isEnabled()
+        assert f"Will tag {len(affected)} neurons" in widget._cluster_tag_preview.text()
+        widget.tag_cluster_members_button.click()
+        for fid, entry in widget._entries.items():
+            expected = dict(before[fid])
+            if fid in affected:
+                expected["tags"] = [
+                    *expected["tags"],
+                    f"Soma Location 1: Cluster {earlier.label_for(fid)}",
+                ]
+            assert entry.to_state() == expected
+        assert widget.get_selected_file_ids() == selected
+        assert widget._assignment_store.to_state() == before_assignments
+        assert widget._assignment_store.active_assignment_id == active.assignment_id
+        assert (
+            widget._table.horizontalHeader().sortIndicatorSection() == module.COL_TAGS
+        )
+        assert (
+            widget._table.horizontalHeader().sortIndicatorOrder()
+            == module.Qt.DescendingOrder
+        )
+    assert len(notifications) == 2
+    assert not widget._table.isColumnHidden(module.COL_TAGS)
+    saved = widget.export_state()
+    widget.import_state(saved)
+    assert widget.export_state() == saved
+    assert widget.cluster_tag_selector.selected_tags() == ()
+    assert not widget.tag_cluster_members_button.isEnabled()
+
+
+def test_cluster_tag_choices_follow_column_switch_and_membership_changes(
+    real_table_widget,
+):
+    from qtpy.QtWidgets import QApplication
+
+    _, widget, earlier, active = _cluster_tag_fixture(real_table_widget)
+    assert widget.cluster_tag_column_combo.currentData() == active.assignment_id
+    widget.cluster_tag_selector.set_selection(("Cluster 0", "Cluster 1"))
+    assert "Voxel Correlation 1: Cluster 0" in widget._cluster_tag_preview.text()
+    widget.cluster_tag_column_combo.setCurrentIndex(
+        widget.cluster_tag_column_combo.findData(earlier.assignment_id)
+    )
+    assert widget.cluster_tag_selector.selected_tags() == ()
+    assert not widget.tag_cluster_members_button.isEnabled()
+    assert [
+        widget.cluster_tag_selector.itemData(i)
+        for i in range(widget.cluster_tag_selector.count())
+    ] == [None, "Cluster 1", "Cluster 2", "Cluster 10"]
+    widget.cluster_tag_selector.set_selection(("Cluster 1", "Cluster 2"))
+    widget._assignment_store.rename(earlier.assignment_id, "Renamed run")
+    widget._assignment_store.set_active(earlier.assignment_id)
+    widget.refresh_cluster_assignments()
+    assert widget.cluster_tag_selector.selected_tags() == ("Cluster 1", "Cluster 2")
+    assert "Renamed run: Cluster 1" in widget._cluster_tag_preview.text()
+    # A new run must not silently replace the user's chosen source column.
+    widget._assignment_store.add(name="New run", assignments={7: 4}, input_file_ids=[7])
+    widget.refresh_cluster_assignments()
+    assert widget.cluster_tag_column_combo.currentData() == earlier.assignment_id
+    widget.retain_file_ids([7])
+    QApplication.processEvents()
+    assert widget.cluster_tag_selector.selected_tags() == ()
+    assert not widget.tag_cluster_members_button.isEnabled()
+    assert widget.cluster_tag_selector.findData("Cluster 10") >= 0
+
+
+def test_cluster_tagging_handles_no_members_and_legacy_cluster_column(
+    real_table_widget,
+):
+    from qtpy.QtWidgets import QApplication
+
+    _module, widget = real_table_widget
+    assert not widget.tag_cluster_members_button.isEnabled()
+    assert not widget.cluster_tag_selector.isEnabled()
+    widget.populate(["subject-a/shared", "subject-b/shared", "unassigned"])
+    # Exercise the existing single Cluster column without named assignments.
+    widget._entries["subject-a/shared"].cluster_id = 0
+    widget._entries["subject-b/shared"].cluster_id = 2
+    widget._replace_entries(widget._entries_in_table_order())
+    QApplication.processEvents()
+    assert widget.cluster_tag_column_combo.currentText() == "Cluster"
+    widget.cluster_tag_selector.set_selection(("Cluster 0",))
+    widget.tag_action_scope.setCurrentIndex(
+        widget.tag_action_scope.findData("selected")
+    )
+    assert not widget.tag_cluster_members_button.isEnabled()
+    widget._tag_cluster_members()
+    assert all(not entry.tags for entry in widget._entries.values())
+    widget.select_file_ids(["unassigned"])
+    assert not widget.tag_cluster_members_button.isEnabled()
+    widget.select_file_ids(["subject-a/shared"])
+    widget.tag_cluster_members_button.click()
+    assert widget._entries["subject-a/shared"].tags == ("Cluster: Cluster 0",)
+    assert widget._entries["subject-b/shared"].tags == ()
+    widget.clear()
+    QApplication.processEvents()
+    assert widget.cluster_tag_selector.selected_tags() == ()
+    assert not widget.tag_cluster_members_button.isEnabled()
+
+
+def test_cluster_tagging_refreshes_tag_filters_and_appends_other_column_tags(
+    real_table_widget,
+):
+    from qtpy.QtWidgets import QApplication
+
+    _, widget, earlier, active = _cluster_tag_fixture(real_table_widget)
+    # A selected cluster 0 is a real membership; unassigned is excluded.
+    widget.tag_filter_combo.set_selection("")
+    widget.cluster_tag_selector.set_selection(("Cluster 0",))
+    widget.tag_cluster_members_button.click()
+    assert widget._entries[7].tags == ("Voxel Correlation 1: Cluster 0",)
+    assert _shown(widget) == {"unannotated"}
+    assert not widget.tag_cluster_members_button.isEnabled()
+    assert widget.tag_filter_combo.findData("Voxel Correlation 1: Cluster 0") >= 0
+    widget.clear_annotation_filters()
+    widget.cluster_tag_column_combo.setCurrentIndex(
+        widget.cluster_tag_column_combo.findData(earlier.assignment_id)
+    )
+    widget.cluster_tag_selector.set_selection(("Cluster 10",))
+    widget.tag_cluster_members_button.click()
+    assert widget._entries[7].tags == (
+        "Voxel Correlation 1: Cluster 0",
+        "Soma Location 1: Cluster 10",
+    )
+    # Tags remain a snapshot if the source column is subsequently renamed.
+    widget._assignment_store.rename(active.assignment_id, "Renamed voxel run")
+    widget.refresh_cluster_assignments()
+    QApplication.processEvents()
+    assert widget._entries[7].tags[0] == "Voxel Correlation 1: Cluster 0"
+
+
 def test_multi_tag_selector_search_modes_and_cardinality(real_table_widget):
     _, widget = _filtered_fixture(real_table_widget)
     widget.tag_filter_combo.set_selection(("TH", "CP"))

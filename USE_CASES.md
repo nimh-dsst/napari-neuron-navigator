@@ -3629,6 +3629,15 @@ scope. Deletion retains other fields and supports one-level undo. Automatic
 colors distinguish complete tag combinations; single-color application can
 color all matching neurons together.
 
+**Tag Tools** > **Cluster Membership Tags** lets users choose a saved
+**Clustering column** and check one or more **Clusters**. **Tag Cluster Members**
+adds a separate `<column name>: Cluster <number>` tag to each matching neuron
+within **Tag action scope**. For example, selecting clusters 1 and 3 from
+`Soma Location 1` gives each neuron its own cluster's tag, rather than both
+tags. These are snapshots of membership when applied; changing assignments or
+renaming a column does not rewrite existing tags. Existing annotations remain,
+and reapplying a tag does not duplicate it.
+
 **Prerequisites**
 
 - Populate Data using the simple MOs5 soma query in UC-021, or another repeatable
@@ -3638,6 +3647,10 @@ color all matching neurons together.
   through **Add tags**. Include a second tag to check exact membership.
 - For combination checks, retain an existing named cluster assignment and a
   manual neuron heatmap with known memberships.
+- For membership tagging, retain two named clustering columns with different
+  assignments for some shared `file_id` values. Record memberships and include
+  at least one neuron unassigned in the chosen column. Counts in **Clusters**
+  refer to members in the current table, before applying the action scope.
 
 **Steps and expected results**
 
@@ -3750,13 +3763,43 @@ color all matching neurons together.
     the filter remains active with updated counts. The typed tags persist
     through save/reopen. Replacing or clearing the table, or restoring a
     project, clears the tag input and its completion message.
+16. **Action:** Expand **Tag Tools** > **Cluster Membership Tags**, choose a
+    **Clustering column** that is not the active assignment, and check two
+    **Clusters**. Choose **Tag action scope: Entire table**, inspect the tag
+    names and affected count in the preview, and click **Tag Cluster Members**.
+    Repeat the same action.
+    **Expected:** Each matching `file_id` receives only its own cluster's tag
+    from the chosen column, such as `Soma Location 1: Cluster 3`. Nonmembers,
+    unassigned neurons, and neurons absent from the table receive no tag.
+    Existing tags, Labels, Groups, Notes, colors, visibility, scene state,
+    selection, and sort order remain. The active assignment is unchanged.
+    Duplicate applications add no duplicate names. New tags appear in the Tag
+    selector and the table reveals the Tags column.
+17. **Action:** Apply row filters and repeat with **Displayed rows**, then
+    **Selected rows**. Try no cluster selection, an empty row selection under
+    Selected rows, and clusters with no members in the chosen scope.
+    **Expected:** Only members in the explicit scope receive tags. Selected
+    rows excludes hidden rows even if Qt retains selected indexes. Entire
+    table includes hidden members. Without matching members the action is
+    disabled; it never silently broadens to all clusters or the whole table.
+18. **Action:** Switch **Clustering column**, add another clustering run,
+    rename the chosen column, or remove its last table members. Save and
+    reopen a project or enhanced Parquet after tagging.
+    **Expected:** Switching columns clears checked cluster choices. Adding a
+    new run preserves the chosen source column; renaming retains its identity
+    and updates the preview. Cluster choices and counts follow current table
+    membership, and obsolete choices are removed. Previously applied tags
+    retain their original text and persist through save/reopen. Cluster
+    selections are temporary controls and reset on table replacement or
+    project restore. With no named assignments, the single **Cluster** column
+    is supported; with no assigned members, tagging is disabled.
 
 **Manual verification**
 
 - Status: Not run
 - Last verified: Never
 - Added: 2026-10-27
-- Updated: 2026-11-12 (typed tags for selected rows; manual status remains Not run)
+- Updated: 2026-11-12 (typed tags and cluster membership tags; manual status remains Not run)
 - Notes: Automated checks cover exact matching, empty annotations, combined
   filters, natural sorting, duplicate display identifiers, updates and removal,
   zero-match choices, cohort preservation, visible selection, and resets.
@@ -3766,6 +3809,9 @@ color all matching neurons together.
   Selected-row tagging checks cover sorted row identity, metadata preservation,
   repeated names, comma-separated input, Enter, empty input/selection, hidden
   rows, filter refresh, and table-state persistence.
+  Cluster membership checks cover independent saved columns, multiple clusters,
+  all action scopes, unassigned neurons, numeric `file_id` values, zero-valued
+  cluster labels, source changes, snapshots, and metadata preservation.
   The complete manual napari workflow above has not been exercised.
 
 ### UC-027: Define Live Neuron Sets and Compare Their Spatial Regions
