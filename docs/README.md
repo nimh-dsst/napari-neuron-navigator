@@ -2,8 +2,10 @@
 
 The published site is at
 [nimh-dsst.github.io/napari-neuron-navigator](https://nimh-dsst.github.io/napari-neuron-navigator/).
-Its source lives in `docs/source/`. The initial site contains one introductory
-Markdown page, `docs/source/index.md`.
+Its source lives in `docs/source/`. The main guide, `docs/source/index.md`,
+contains installation and running instructions, feature workflows,
+compatibility notes, testing commands, and attributions moved from the
+repository README.
 
 ## Build and preview
 
@@ -35,8 +37,9 @@ pixi run -e docs docs-pdf
 
 This converts `docs/source/index.md` into
 `docs/_build/pdf/napari-neuron-navigator.pdf`. `docs-build` also copies it to the
-HTML site's root for downloading. The PDF currently covers only the introductory
-page. Extend the PDF build when adding more published pages.
+HTML site's root for downloading. The PDF covers the full main guide; linked
+repository documents such as `USE_CASES.md` remain separate. Extend the PDF
+build when adding more published pages.
 
 Convert any standalone Markdown document using the same workflow:
 
