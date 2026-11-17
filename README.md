@@ -12,7 +12,7 @@ data from SWC and Parquet files.
 ## Isocortex dataset
 
 The isocortex dataset is available on Zenodo:
-[DOI: 10.5281/zenodo.23960862](https://doi.org/10.5281/zenodo.23960862).
+[DOI: 10.5281/zenodo.24303220](https://doi.org/10.5281/zenodo.24303220).
 
 ## Prerequisites
 

@@ -9,7 +9,7 @@ workflows, compatibility, and testing.
 ## Isocortex dataset
 
 The isocortex dataset is available on Zenodo:
-[DOI: 10.5281/zenodo.23960862](https://doi.org/10.5281/zenodo.23960862).
+[DOI: 10.5281/zenodo.24303220](https://doi.org/10.5281/zenodo.24303220).
 
 ## Prerequisites
 
@@ -231,6 +231,83 @@ raw features, assignments, order, and provenance. Assignment definitions and
 cohort membership also persist through the existing project/assignment store.
 See [UC-025](https://github.com/nimh-dsst/napari-neuron-navigator/blob/main/USE_CASES.md#uc-025-cluster-mos-neurons-by-regional-neurite-profiles)
 for the MOs manual workflow and its interpretation limits.
+
+## 25 µm CCFv3-to-flatmap NRRD collection
+
+The downsampled 25 µm NRRD collection converts atlas-registered Allen Mouse
+CCFv3 isocortex coordinates into bilateral flatmap positions and cortical
+depth. This supports viewing neuronal morphology in shaped or square flatmap
+space and overlaying the corresponding atlas regions.
+
+### Reference and provenance
+
+The original laminar coordinate systems and flatmaps are described in
+Bolaños-Puchet, S., Teska, A., et al. (2024),
+[Enhancement of brain atlases with laminar coordinate systems: Flatmaps and barrel column annotations](https://doi.org/10.1162/imag_a_00209),
+*Imaging Neuroscience*, 2. Please cite this paper when using the flatmaps.
+
+The [upstream atlas-enhancement repository](https://github.com/openbraininstitute/atlas-enhancement)
+provides the original implementation. The
+[NIMH-DSST fork](https://github.com/nimh-dsst/atlas-enhancement) adds
+`resample_ccf_coordinate_fields.py` to evaluate the published 10 µm flatmap and
+absolute-depth fields on the official Allen CCFv3 25 µm grid. This resampling
+uses mask-normalized trilinear interpolation within the target Isocortex
+mask. Flatmap coordinate values retain their dimensionless units, and depth
+values remain in micrometers. The 25 µm spacing describes the sampling grid.
+
+### Collection contents
+
+Keep these three files together in one lookup directory:
+
+- `flatmap_both_shaped.nrrd` stores `x_flat` and `y_flat` coordinates for the
+  bilateral shaped map at each CCFv3 voxel.
+- `flatmap_both_square.nrrd` stores `x_flat` and `y_flat` coordinates for the
+  bilateral square map at each CCFv3 voxel.
+- `depth.nrrd` stores absolute cortical depth in micrometers, shared by both
+  styles.
+
+All three files use the same `(528, 320, 456)` spatial grid, 25 µm spacing,
+and zero origin. Each flatmap also has a length-2 coordinate axis, which the
+plugin handles automatically. These fields cover the isocortex; undefined
+lookup locations retain invalid markers.
+
+### Convert CCFv3 neuron coordinates
+
+Start with a neuron Parquet whose `x`, `y`, and `z` coordinates are already
+registered to CCFv3 in micrometers. The plugin uses the NRRD spatial transform
+to find the nearest lookup voxel and reads its flatmap and depth values.
+Keep the source coordinates in micrometers when using the default coordinate
+mode; the plugin applies the 25 µm spacing during lookup.
+
+1. Extract the collection into a directory containing the three filenames above.
+2. Open the source neuron Parquet in **Data**.
+3. In **Flatmap**, click **Lookup directory...** and select that directory.
+   Leave **Lookup resolution** at **From NRRD header**.
+4. Click **Prepare Whole Parquet...** and save the output. The resulting
+   version-3 Parquet preserves the CCFv3 coordinates and adds independent
+   shaped/square flatmap columns, shared `depth_um`, and validity/provenance
+   columns. Invalid lookups remain identifiable in those columns.
+
+The equivalent command from the repository root is:
+
+```bash
+pixi run python scripts/add_flatmap_columns_to_parquet.py neurons.parquet neurons_flatmap_25um.parquet --lookup-dir /path/to/25-micron --coordinate-mode microns
+```
+
+### Build matching flatmap region caches
+
+Load **allen_mouse_25um** before using **Build Cache Profile...** with this
+collection. Cache construction requires the atlas annotation to match the
+lookup grid exactly. A cache profile containing both shaped and square styles
+was successfully built and validated with BrainGlobe atlas version 1.2,
+256 Y bins, and 25 µm depth bins. This was a computational validation; the
+napari display was not manually verified.
+
+Use this same lookup trio for both neuron-Parquet preprocessing and cache
+construction. Lookup identities include source-file hashes and grid metadata,
+so a Parquet prepared with the 10 µm collection needs reprocessing to use the
+25 µm cache. Invalid source lookup voxels are excluded from cached regions.
+See **Precomputed Flatmap Region Cache** below for viewing and profile selection.
 
 ## Direct Flatmap/Depth NRRD Loading
 
@@ -521,4 +598,7 @@ This repository contains modified code derived from [napari swc editor](https://
 
 ## AI Usage Statement
 
-U.S. Department of Health and Human Services (HHS) ChatGPT models 5.5 and 5.6 Sol, as well as Claude Opus 4.8, were used for software-development assistance. All AI-assisted content was reviewed and validated by the authors.
+U.S. Department of Health and Human Services (HHS) ChatGPT models 5.5,
+5.6 Sol, and 6.1 Sol (Extra Thinking), as well as Claude Opus 4.8, were used
+for software-development assistance. All AI-assisted content was reviewed and
+validated by the authors.
