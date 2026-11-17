@@ -2,7 +2,7 @@ name: Documentation
 
 on:
   push:
-    branches: [main, docs/tutorial]
+    branches: [main, docs/tutorial, docs/first-draft]
     paths:
       - "docs/**"
       - "scripts/markdown_to_pdf.py"
@@ -57,8 +57,12 @@ jobs:
           path: docs/_build/html
 
   deploy:
-    # Publish this initial branch directly; main continues publishing after merge.
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/docs/tutorial')
+    # Publish the documentation branches directly; main publishes after merge.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/docs/tutorial' ||
+       github.ref == 'refs/heads/docs/first-draft')
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
