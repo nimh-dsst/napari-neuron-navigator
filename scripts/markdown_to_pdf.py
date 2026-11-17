@@ -146,7 +146,8 @@ def convert_markdown_to_pdf(input_path: Path, output_path: Path) -> None:
     md = MarkdownIt(
         "commonmark",
         {
-            "html": False,
+            # Preserve inline HTML links with per-link browser targets.
+            "html": True,
             "highlight": _highlight_code,
         },
     )

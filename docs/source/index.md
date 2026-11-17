@@ -9,7 +9,7 @@ workflows, compatibility, and testing.
 ## Isocortex dataset
 
 The isocortex dataset is available on Zenodo:
-[DOI: 10.5281/zenodo.24303220](https://doi.org/10.5281/zenodo.24303220).
+<a href="https://doi.org/10.5281/zenodo.24303220" target="_blank" rel="noopener noreferrer">DOI: 10.5281/zenodo.24303220</a>.
 
 ## Prerequisites
 
