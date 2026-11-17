@@ -56,17 +56,18 @@ All generated HTML and PDFs stay under the gitignored `docs/_build/` directory.
 ## Publishing
 
 `.github/workflows/docs.yml` builds HTML and PDF on documentation pull requests,
-relevant pushes to `docs/tutorial` and `main`, and manual runs. Every build uploads
-the PDF as a `documentation-pdf` Actions artifact. Pushes and manual runs on those
-two branches deploy the complete HTML site, including the downloadable PDF,
-using GitHub's official Pages artifact and deployment actions.
+relevant pushes to `docs/tutorial`, `docs/first-draft`, and `main`, and manual
+runs. Every build uploads the PDF as a `documentation-pdf` Actions artifact.
+Pushes and manual runs on those branches deploy the complete HTML site,
+including the downloadable PDF, using GitHub's official Pages artifact and
+deployment actions.
 
 GitHub Pages must use **GitHub Actions** as its publishing source. The
-`github-pages` environment allows `docs/tutorial` for this initial publication
-and `main` for publication after merge. When the tutorial branch is retired,
-remove it from the workflow's push/deploy conditions and the environment's
-deployment branch rules. Pull requests build and upload artifacts without
-deploying.
+`github-pages` environment allows `docs/tutorial` and `docs/first-draft` for
+publication before merge and `main` for publication after merge. When a
+documentation branch is retired, remove it from the workflow's push/deploy
+conditions and the environment's deployment branch rules. Pull requests build
+and upload artifacts without deploying.
 
 See [GitHub's custom Pages workflow documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
 for the deployment permissions and environment requirements.
