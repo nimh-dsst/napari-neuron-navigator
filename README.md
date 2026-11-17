@@ -52,3 +52,10 @@ This command automatically builds the package if needed before launching napari.
 
 See the [documentation](https://nimh-dsst.github.io/napari-neuron-navigator/)
 for workflows, debug logging, testing, compatibility, and attributions.
+
+## AI Usage Statement
+
+U.S. Department of Health and Human Services (HHS) ChatGPT models 5.5,
+5.6 Sol, 6 Astra, and 6.1 Sol (Extra High Thinking), as well as Claude Opus 4.8, were used
+for software-development assistance. All AI-assisted content was reviewed and
+validated by the authors.
